@@ -47,6 +47,27 @@ impl SecureString {
     pub fn to_string(&self) -> String {
         self.borrow().to_string()
     }
+
+    /// Mutate the SecureString contents via a String in a scoped closure.
+    ///
+    /// The provided closure receives a mutable String containing the current contents.
+    /// After the closure runs, the modified String is securely copied back into the SecureString.
+    ///
+    /// ## Example
+    /// ```rust
+    /// use secure_types::SecureString;
+    /// let mut secure = SecureString::from("initial");
+    /// secure.string_mut(|s| s.push_str(" text"));
+    /// assert_eq!(secure.borrow(), "initial text");
+    /// ```
+    pub fn string_mut<F>(&mut self, f: F)
+    where
+        F: FnOnce(&mut String),
+    {
+        let mut temp = self.borrow().to_string();
+        f(&mut temp);
+        self.vec = SecureVec::new(temp.into_bytes());
+    }
 }
 
 impl PartialEq for SecureString {
@@ -129,6 +150,13 @@ mod tests {
     fn test_new() {
         let string = SecureString::from("Hello, world!");
         assert_eq!(string.borrow(), "Hello, world!");
+    }
+
+    #[test]
+    fn test_string_mut() {
+        let mut secure = SecureString::from("Hello");
+        secure.string_mut(|s| s.push_str(", world!"));
+        assert_eq!(secure.borrow(), "Hello, world!");
     }
 
     #[cfg(feature = "serde")]
