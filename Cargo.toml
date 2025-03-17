@@ -1,0 +1,24 @@
+[package]
+name = "secure-types"
+version = "0.1.0"
+authors = ["Michalis Molfetas"]
+edition = "2024"
+
+[dependencies.memsec]
+version = "0.7.0"
+
+[dependencies.zeroize]
+version = "1.8.1"
+
+[dependencies.serde]
+version = "1"
+optional = true
+
+[dev-dependencies.serde_json]
+version = "1"
+
+[dev-dependencies.serde]
+version = "1"
+
+[features]
+serde = ["dep:serde"]
