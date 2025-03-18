@@ -7,3 +7,4 @@ pub use string::SecureString;
 pub use array::SecureArray;
 
 pub use zeroize::Zeroize;
+pub use memsec;
