@@ -22,3 +22,7 @@ version = "1"
 
 [features]
 serde = ["dep:serde"]
+
+[[bin]]
+name = "dump-test"
+path = "src/bin/dump_test.rs"

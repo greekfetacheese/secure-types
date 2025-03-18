@@ -66,7 +66,18 @@ where
     ///
     /// This will consume the SecureVec
     ///
-    /// You are responsible for zeroizing the contents of returned Vec
+    /// ## You are responsible for zeroizing the contents of the returned value
+    /// 
+    /// 
+    /// #### The most simple way to zero out the Vec is create a SecureVec instance again
+    /// ```rust
+    /// use secure_types::SecureVec;
+    /// let secure_vec = SecureVec::from(vec![1, 2, 3]);
+    /// let exposed_vec = secure_vec.into_vec();
+    /// //! when you are done just create a new SecureVec instance
+    /// //! keep in mind even if you dont clone the exposed_vec the memory allocator may leave a copy of the data in memory depending on the usage
+    /// let secure_again = SecureVec::from(exposed_vec);
+    /// ```
     pub fn into_vec(mut self) -> Vec<T> {
         unsafe {
             munlock(

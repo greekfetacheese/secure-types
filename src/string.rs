@@ -1,4 +1,4 @@
-use crate::vec::SecureVec;
+use super::SecureVec;
 use core::fmt;
 use std::str::FromStr;
 
