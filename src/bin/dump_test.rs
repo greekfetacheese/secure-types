@@ -1,36 +1,17 @@
 #[path = "../lib.rs"]
 mod lib;
 
-use std::io::Write;
+use std::io::{Write, Read};
 use zeroize::Zeroize;
 
+
+// This code does not leave any copies of the string in memory
 fn main() {
-    let mut username = lib::SecureString::from("");
-    let mut password = lib::SecureString::from("");
-
-    username.string_mut(|user| {
-        prompt("Username: ", user).unwrap();
-    });
-
-    password.string_mut(|pass| {
-        prompt("Password: ", pass).unwrap();
-    });
-
-    let mut something_else = String::new();
-    prompt(
-        "Write something else to overwrite the previous allocation (password): ",
-        &mut something_else,
-    )
-    .unwrap();
+   let username = secure_prompt("Username: ").unwrap();
+   let password = secure_prompt("Password: ").unwrap();
 
     drop(username);
     drop(password);
-    something_else.zeroize();
-    // Here despite that something_else is zeroized the memory allocation still has a copy of the data
-    // There is no way to guarantee full erase of the data
-    // Try running this test and comment the something_else prompt and search for the password in the memory dump
-    // You will see that the password now it will be there
-    // but the username is still gone because the password overtook the previous allocation (username) and so on...
 
     println!("Take a dump now");
     loop {
@@ -38,10 +19,19 @@ fn main() {
     }
 }
 
-fn prompt(msg: &str, string: &mut String) -> Result<(), std::io::Error> {
+// It's not perfect but does its job and doesn't leave any copies of the string in memory
+// Try running this test and with the last 3 lines commented and see the password being in memory
+fn secure_prompt(msg: &str) -> Result<lib::SecureString, std::io::Error> {
     print!("{}", msg);
-    std::io::stdout().flush().unwrap();
+    std::io::stdout().flush()?;
 
-    std::io::stdin().read_line(string)?;
-    Ok(())
+    let mut buffer = [0u8; 1024];
+    let bytes_read = std::io::stdin().read(&mut buffer)?;
+    let secure = lib::SecureString::from(String::from_utf8_lossy(&buffer[..bytes_read]).into_owned());
+    buffer.zeroize();
+    // make sure we overwrite the old string allocation
+    print!("Press enter to continue");
+    std::io::stdout().flush()?;
+    let _ = std::io::stdin().read(&mut buffer)?;
+    Ok(secure)
 }

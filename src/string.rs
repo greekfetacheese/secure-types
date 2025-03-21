@@ -2,6 +2,13 @@ use super::SecureVec;
 use core::fmt;
 use std::str::FromStr;
 
+#[cfg(feature = "egui")]
+use core::ops::Range;
+#[cfg(feature = "egui")]
+use egui::{TextBuffer, text_selection::text_cursor_state::byte_index_from_char_index};
+#[cfg(feature = "egui")]
+use zeroize::Zeroize;
+
 /// #### SecureString
 ///
 /// - Securely erases the contents when it is dropped
@@ -29,6 +36,12 @@ pub struct SecureString {
 }
 
 impl SecureString {
+    pub fn new_with_capacity(capacity: usize) -> Self {
+        let mut vec = SecureVec::new(Vec::with_capacity(capacity));
+        vec.borrow_mut_vec().reserve(capacity);
+        SecureString { vec }
+    }
+
     pub fn borrow(&self) -> &str {
         unsafe { core::str::from_utf8_unchecked(self.vec.borrow()) }
     }
@@ -46,6 +59,19 @@ impl SecureString {
     /// This will create a new allocated String you are responsible for zeroizing its contents
     pub fn to_string(&self) -> String {
         self.borrow().to_string()
+    }
+
+    #[cfg(feature = "egui")]
+    pub fn insert_str(&mut self, byte_idx: usize, text: &str) {
+        assert!(self.borrow().is_char_boundary(byte_idx));
+        let bytes = text.as_bytes();
+        let vec = self.vec.borrow_mut_vec();
+        vec.reserve(bytes.len());
+        let old_len = vec.len();
+        vec.splice(byte_idx..byte_idx, bytes.iter().copied());
+        if byte_idx < old_len {
+            vec.zeroize();
+        }
     }
 
     /// Mutate the SecureString contents via a String in a scoped closure.
@@ -67,6 +93,23 @@ impl SecureString {
         let mut temp = self.borrow().to_string();
         f(&mut temp);
         self.vec = SecureVec::new(temp.into_bytes());
+    }
+
+    pub fn secure_mut<F>(&mut self, f: F)
+    where
+        F: FnOnce(&mut SecureString),
+    {
+        let mut temp = SecureString::from("");
+        std::mem::swap(self, &mut temp); // Swap out original
+        f(&mut temp);
+        std::mem::swap(self, &mut temp); // Swap back modified
+        temp.erase();
+    }
+}
+
+impl Default for SecureString {
+    fn default() -> Self {
+        Self::from(String::new())
     }
 }
 
@@ -139,6 +182,61 @@ impl<'de> serde::Deserialize<'de> for SecureString {
             }
         }
         deserializer.deserialize_string(SecureStringVisitor)
+    }
+}
+
+#[cfg(feature = "egui")]
+use egui::text_edit::TextEditOutput;
+
+#[cfg(feature = "egui")]
+/// This does not zero out the string from memory, we just deallocate it.
+/// This is a temporary workaround
+pub fn clear_text_edit_state(mut output: TextEditOutput) {
+    output.state.clear_undoer();
+}
+
+#[cfg(feature = "egui")]
+impl TextBuffer for SecureString {
+    fn is_mutable(&self) -> bool {
+        true
+    }
+
+    fn as_str(&self) -> &str {
+        self.borrow()
+    }
+
+    fn insert_text(&mut self, text: &str, char_index: usize) -> usize {
+        // println!("Inserting {:?} at char {}, ptr {:?}", text, char_index, text.as_ptr());
+        let byte_idx = byte_index_from_char_index(self.as_str(), char_index);
+        self.insert_str(byte_idx, text);
+        text.chars().count()
+    }
+
+    fn delete_char_range(&mut self, char_range: Range<usize>) {
+        assert!(char_range.start <= char_range.end);
+        //println!("Deleting char range {:?}", char_range);
+        let byte_start = byte_index_from_char_index(self.as_str(), char_range.start);
+        let byte_end = byte_index_from_char_index(self.as_str(), char_range.end);
+
+        let vec = self.vec.borrow_mut_vec();
+        vec.drain(byte_start..byte_end).for_each(drop);
+        let len = vec.len();
+        vec[len..].iter_mut().for_each(|byte| *byte = 0);
+    }
+
+    fn clear(&mut self) {
+        self.erase();
+    }
+
+    fn replace_with(&mut self, text: &str) {
+        // println!("Replacing with {:?}", text);
+        self.vec = SecureVec::new(text.as_bytes().to_vec());
+    }
+
+    fn take(&mut self) -> String {
+        let copy = self.borrow().to_string();
+        self.erase();
+        copy
     }
 }
 

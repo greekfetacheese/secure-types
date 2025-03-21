@@ -44,6 +44,10 @@ let borrowed_array = secret_array.borrow();
 assert_eq!(borrowed_array, [1, 2, 3, 4, 5]);
 ```
 
+### Feature Flags
+- `serde`: Enables serialization and deserialization of `SecureString` and `SecureVec`
+- `egui`: Allows the direct usage of `SecureString` for `egui` text editing, see [egui-test](src/bin/egui_test.rs) for an example
+
 
 ## Credits
 [secure-string](https://github.com/ISibboI/secure-string)
