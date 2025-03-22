@@ -74,9 +74,8 @@ impl SecureString {
         }
     }
 
-    /// Mutate the SecureString contents via a String in a scoped closure.
+    /// Mutate the SecureString via a String in a scoped closure.
     ///
-    /// The provided closure receives a mutable String containing the current contents.
     /// After the closure runs, the modified String is securely copied back into the SecureString.
     ///
     /// ## Example
@@ -95,6 +94,7 @@ impl SecureString {
         self.vec = SecureVec::new(temp.into_bytes());
     }
 
+    /// Mutate the SecureString directly in a scoped closure.
     pub fn secure_mut<F>(&mut self, f: F)
     where
         F: FnOnce(&mut SecureString),
@@ -185,15 +185,6 @@ impl<'de> serde::Deserialize<'de> for SecureString {
     }
 }
 
-#[cfg(feature = "egui")]
-use egui::text_edit::TextEditOutput;
-
-#[cfg(feature = "egui")]
-/// This does not zero out the string from memory, we just deallocate it.
-/// This is a temporary workaround
-pub fn clear_text_edit_state(mut output: TextEditOutput) {
-    output.state.clear_undoer();
-}
 
 #[cfg(feature = "egui")]
 impl TextBuffer for SecureString {
