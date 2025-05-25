@@ -1,6 +1,6 @@
 use super::SecureVec;
 use core::fmt;
-use std::str::FromStr;
+use core::str::FromStr;
 
 #[cfg(feature = "egui")]
 use core::ops::Range;
@@ -37,17 +37,15 @@ pub struct SecureString {
 
 impl SecureString {
     pub fn new_with_capacity(capacity: usize) -> Self {
-        let mut vec = SecureVec::new(Vec::with_capacity(capacity));
-        vec.borrow_mut_vec().reserve(capacity);
-        SecureString { vec }
+        let mut vec = Vec::with_capacity(capacity);
+        vec.reserve(capacity);
+        SecureString {
+            vec: SecureVec::new(vec),
+        }
     }
 
     pub fn borrow(&self) -> &str {
         unsafe { core::str::from_utf8_unchecked(self.vec.borrow()) }
-    }
-
-    pub fn borrow_mut(&mut self) -> &mut str {
-        unsafe { core::str::from_utf8_unchecked_mut(self.vec.borrow_mut()) }
     }
 
     pub fn erase(&mut self) {
@@ -61,22 +59,7 @@ impl SecureString {
         self.borrow().to_string()
     }
 
-    #[cfg(feature = "egui")]
-    pub fn insert_str(&mut self, byte_idx: usize, text: &str) {
-        assert!(self.borrow().is_char_boundary(byte_idx));
-        let bytes = text.as_bytes();
-        let vec = self.vec.borrow_mut_vec();
-        vec.reserve(bytes.len());
-        let old_len = vec.len();
-        vec.splice(byte_idx..byte_idx, bytes.iter().copied());
-        if byte_idx < old_len {
-            vec.zeroize();
-        }
-    }
-
     /// Mutate the SecureString via a String in a scoped closure.
-    ///
-    /// After the closure runs, the modified String is securely copied back into the SecureString.
     ///
     /// ## Example
     /// ```rust
@@ -100,9 +83,9 @@ impl SecureString {
         F: FnOnce(&mut SecureString),
     {
         let mut temp = SecureString::from("");
-        std::mem::swap(self, &mut temp); // Swap out original
-        f(&mut temp);
-        std::mem::swap(self, &mut temp); // Swap back modified
+        core::mem::swap(self, &mut temp); // now temp is the old self
+        f(&mut temp); // mutate temp
+        core::mem::swap(self, &mut temp); // update self with temp
         temp.erase();
     }
 }
@@ -143,7 +126,7 @@ where
 }
 
 impl FromStr for SecureString {
-    type Err = std::convert::Infallible;
+    type Err = core::convert::Infallible;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Ok(SecureString {
@@ -171,7 +154,7 @@ impl<'de> serde::Deserialize<'de> for SecureString {
         struct SecureStringVisitor;
         impl<'de> serde::de::Visitor<'de> for SecureStringVisitor {
             type Value = SecureString;
-            fn expecting(&self, formatter: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
+            fn expecting(&self, formatter: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
                 write!(formatter, "an utf-8 encoded string")
             }
             fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
@@ -185,7 +168,6 @@ impl<'de> serde::Deserialize<'de> for SecureString {
     }
 }
 
-
 #[cfg(feature = "egui")]
 impl TextBuffer for SecureString {
     fn is_mutable(&self) -> bool {
@@ -197,22 +179,26 @@ impl TextBuffer for SecureString {
     }
 
     fn insert_text(&mut self, text: &str, char_index: usize) -> usize {
-        // println!("Inserting {:?} at char {}, ptr {:?}", text, char_index, text.as_ptr());
+        /*  println!(
+            "Inserting {:?} at char {}, ptr {:?}",
+            text,
+            char_index,
+            text.as_ptr()
+        );*/
         let byte_idx = byte_index_from_char_index(self.as_str(), char_index);
-        self.insert_str(byte_idx, text);
+        self.vec.splice(byte_idx, text.as_bytes());
         text.chars().count()
     }
 
     fn delete_char_range(&mut self, char_range: Range<usize>) {
         assert!(char_range.start <= char_range.end);
-        //println!("Deleting char range {:?}", char_range);
+        // println!("Deleting char range {:?}", char_range);
         let byte_start = byte_index_from_char_index(self.as_str(), char_range.start);
         let byte_end = byte_index_from_char_index(self.as_str(), char_range.end);
 
-        let vec = self.vec.borrow_mut_vec();
-        vec.drain(byte_start..byte_end).for_each(drop);
-        let len = vec.len();
-        vec[len..].iter_mut().for_each(|byte| *byte = 0);
+        if byte_start < byte_end {
+            self.vec.drain(byte_start..byte_end);
+        }
     }
 
     fn clear(&mut self) {

@@ -1,8 +1,5 @@
-#[path = "../lib.rs"]
-mod lib;
-
 use egui::{self};
-use lib::SecureString;
+use secure_types::SecureString;
 
 pub struct App {
     pub secret_text: SecureString,

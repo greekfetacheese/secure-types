@@ -22,6 +22,7 @@ optional = true
 version = "0.31.1"
 optional = true
 
+
 [dev-dependencies.serde_json]
 version = "1"
 
@@ -41,9 +42,9 @@ egui-test = ["egui", "dep:eframe"]
 
 [[bin]]
 name = "dump-test"
-path = "src/bin/dump_test.rs"
+path = "src/examples/dump_test.rs"
 
 [[bin]]
 name = "egui-test"
-path = "src/bin/egui_test.rs"
+path = "src/examples/egui_test.rs"
 required-features = ["egui-test"]
