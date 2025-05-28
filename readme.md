@@ -1,14 +1,24 @@
-# This is a fork of [secure-string](https://github.com/ISibboI/secure-string) with some slight adjustments
+## Secure Types
 
-## Features
-- Types that [zeroize](https://github.com/RustCrypto/utils/tree/master/zeroize) its contents when it is dropped
-- Masks the contents when it is displayed or debugged
-- For `Windows` calls `VirtualLock` to protect the contents from being swapped out to disk
-- For `Unix` calls `mlock` to prevent the contents from being swapped to disk and memory dumped
+This crate provides types to handle sensitive data more securely.
 
-### Note on `Windows` is not possible to prevent memory dumping
+## Types
 
-### This crate does not guarantee that any data is completely erased from memory
+### SecureVec
+
+Similar to `Vec` from the standard library, but with additional security features.
+- [Zeroizes](https://github.com/RustCrypto/utils/tree/master/zeroize) its contents when it is dropped
+- Allocated memory is protected using `VirtualLock` & `VirtualProtect` on Windows and `mlock` & `mprotect` on Unix.
+- Does not leave copies of the data on the heap during reallocation
+
+### SecureString
+
+Similar to `String` from the standard library. It is a wrapper around `SecureVec<u8>` so it has the same security features.
+
+These types are not perfect and still need work but the chances of of leaking data through one of the below reasons are greatly reduced:
+- Disk swaps (eg. due to insufficient RAM)
+- Reads/writes by other processes (eg. malware)
+- Core dumps
 
 ## Usage
 
@@ -16,40 +26,36 @@
 ```rust
 use secure_types::SecureString;
 
+// obviously this is an example, do not hardcode any important data
 let secret_string = SecureString::from("My sensitive data");
-let borrowed_string = secret_string.borrow();
-assert_eq!(borrowed_string, "My sensitive data");
+
+// access the secure_string as a &str
+secret_string.str_scope(|str| {
+   assert_eq!(str, "My sensitive data");
+});
 ```
 
 ### SecureVec
 ```rust
-use secure_types::{SecureVec, SecureBytes};
+use secure_types::SecureVec;
 
 let secret_vec = SecureVec::from(vec![1, 2, 3, 4, 5]);
-let borrowed_vec = secret_vec.borrow();
-assert_eq!(borrowed_vec, [1, 2, 3, 4, 5]);
 
-// there is also a SecureBytes type alias for convenience
-let secret_bytes = SecureBytes::from(vec![1, 2, 3, 4, 5]);
-let borrowed_bytes = secret_bytes.borrow();
-assert_eq!(borrowed_bytes, [1, 2, 3, 4, 5]);
+// access the secure_vec as a &[u8]
+secret_vec.slice_scope(|slice| {
+   assert_eq!(slice, [1, 2, 3, 4, 5]);
+});
+
 ```
 
-### SecureArray
-```rust
-use secure_types::SecureArray;
-
-let secret_array = SecureArray::from([1, 2, 3, 4, 5]);
-let borrowed_array = secret_array.borrow();
-assert_eq!(borrowed_array, [1, 2, 3, 4, 5]);
-```
 
 ### Feature Flags
-- `serde`: Enables serialization and deserialization of `SecureString` and `SecureVec`
-- `egui`: Allows the direct usage of `SecureString` for `egui` text editing, see [egui-test](src/bin/egui_test.rs) for an example
+- `serde`: Enables serialization and deserialization of `SecureString` and `SecureVec<u8>`
 
 
 ## Credits
+[zeroize](https://github.com/RustCrypto/utils/tree/master/zeroize)
+
 [secure-string](https://github.com/ISibboI/secure-string)
 
 [memsec](https://github.com/quininer/memsec)

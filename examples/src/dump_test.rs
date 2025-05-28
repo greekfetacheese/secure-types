@@ -1,8 +1,6 @@
-#[path = "../lib.rs"]
-mod lib;
-
 use std::io::{Write, Read};
 use zeroize::Zeroize;
+use secure_types::SecureString;
 
 
 // This code does not leave any copies of the string in memory
@@ -21,13 +19,13 @@ fn main() {
 
 // It's not perfect but does its job and doesn't leave any copies of the string in memory
 // Try running this test and with the last 3 lines commented and see the password being in memory
-fn secure_prompt(msg: &str) -> Result<lib::SecureString, std::io::Error> {
+fn secure_prompt(msg: &str) -> Result<SecureString, std::io::Error> {
     print!("{}", msg);
     std::io::stdout().flush()?;
 
     let mut buffer = [0u8; 1024];
     let bytes_read = std::io::stdin().read(&mut buffer)?;
-    let secure = lib::SecureString::from(String::from_utf8_lossy(&buffer[..bytes_read]).into_owned());
+    let secure = SecureString::from(String::from_utf8_lossy(&buffer[..bytes_read]).into_owned());
     buffer.zeroize();
     // make sure we overwrite the old string allocation
     print!("Press enter to continue");
