@@ -33,6 +33,9 @@ where
    _marker: PhantomData<T>,
 }
 
+unsafe impl<T: Zeroize + Send> Send for SecureVec<T> {}
+unsafe impl<T: Zeroize + Send + Sync> Sync for SecureVec<T> {}
+
 impl<T: Zeroize> SecureVec<T> {
    pub fn new() -> Self {
       let ptr = unsafe {
@@ -569,6 +572,7 @@ fn resolve_range_indices<R: RangeBounds<usize>>(range: R, len: usize) -> (usize,
 #[cfg(test)]
 mod tests {
    use super::*;
+   use std::sync::{Arc, Mutex};
 
    #[test]
    fn test_creation() {
@@ -576,6 +580,32 @@ mod tests {
       let _ = SecureVec::from_vec(vec);
       let _u8: SecureVec<u8> = SecureVec::new();
       let _u8: SecureVec<u8> = SecureVec::with_capacity(3);
+   }
+
+   #[test]
+   fn test_thread_safety() {
+      let vec: Vec<u8> = vec![];
+      let secure = SecureVec::from_vec(vec);
+      let secure = Arc::new(Mutex::new(secure));
+
+      let mut handles = Vec::new();
+      for i in 0..10u8 {
+         let secure_clone = secure.clone();
+         let handle = std::thread::spawn(move || {
+            let mut secure = secure_clone.lock().unwrap();
+            secure.push(i);
+         });
+         handles.push(handle);
+      }
+
+      for handle in handles {
+         handle.join().unwrap();
+      }
+
+      let sec = secure.lock().unwrap();
+      sec.slice_scope(|slice| {
+         assert_eq!(slice, &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+      });
    }
 
    #[test]
