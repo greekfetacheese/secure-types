@@ -95,8 +95,12 @@ impl<T: Zeroize> SecureVec<T> {
 
       let ptr = unsafe {
          let allocated_ptr = memsec::malloc_sized(aligned_size);
-         let ptr = allocated_ptr.ok_or(Error::AllocationFailed)?;
-         ptr.as_ptr() as *mut T
+         if allocated_ptr.is_none() {
+            vec.zeroize();
+            return Err(Error::AllocationFailed);
+         } else {
+            allocated_ptr.unwrap().as_ptr() as *mut T
+         }
       };
 
       // Copy data from Vec to secure memory
