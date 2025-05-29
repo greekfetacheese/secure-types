@@ -14,10 +14,14 @@ version = "0.2"
 [dependencies.zeroize]
 version = "1.8.1"
 
+[dependencies.thiserror]
+version = "2"
+
 [dependencies.serde]
 version = "1"
 optional = true
 
+[target.'cfg(windows)'.dependencies]
 [dependencies.windows-sys]
 version = "0.45"
 default-features = false

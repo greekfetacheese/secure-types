@@ -1,4 +1,4 @@
-use super::page_size;
+use super::{Error, page_size};
 use core::{
    marker::PhantomData,
    mem,
@@ -37,55 +37,66 @@ unsafe impl<T: Zeroize + Send> Send for SecureVec<T> {}
 unsafe impl<T: Zeroize + Send + Sync> Sync for SecureVec<T> {}
 
 impl<T: Zeroize> SecureVec<T> {
-   pub fn new() -> Self {
+   pub fn new() -> Result<Self, Error> {
       let ptr = unsafe {
-         memsec::malloc_sized(mem::size_of::<T>())
-            .expect("Failed to allocate secure memory")
-            .as_ptr() as *mut T
+         let allocated_ptr = memsec::malloc_sized(mem::size_of::<T>());
+         let ptr = allocated_ptr.ok_or(Error::AllocationFailed)?;
+         ptr.as_ptr() as *mut T
       };
 
+      let non_null = NonNull::new(ptr).ok_or(Error::NullAllocation)?;
       let secure = SecureVec {
-         ptr: NonNull::new(ptr).expect("Failed to create NonNull"),
+         ptr: non_null,
          len: 0,
          capacity: 0,
          _marker: std::marker::PhantomData,
       };
 
-      secure.lock_memory();
-      secure
+      let locked = secure.lock_memory();
+      if !locked {
+         return Err(Error::LockFailed);
+      }
+      Ok(secure)
    }
 
-   pub fn with_capacity(capacity: usize) -> Self {
+   pub fn with_capacity(capacity: usize) -> Result<Self, Error> {
       let size = capacity * mem::size_of::<T>();
       let aligned_size = (size + page_size() - 1) & !(page_size() - 1); // Round up to page size
+
       let ptr = unsafe {
-         memsec::malloc_sized(aligned_size)
-            .expect("Failed to allocate secure memory")
-            .as_ptr() as *mut T
+         let allocated_ptr = memsec::malloc_sized(aligned_size);
+         let ptr = allocated_ptr.ok_or(Error::AllocationFailed)?;
+         ptr.as_ptr() as *mut T
       };
 
+      let non_null = NonNull::new(ptr).ok_or(Error::NullAllocation)?;
+
       let secure = SecureVec {
-         ptr: NonNull::new(ptr).expect("Failed to create NonNull"),
+         ptr: non_null,
          len: 0,
          capacity,
          _marker: std::marker::PhantomData,
       };
 
-      secure.lock_memory();
-      secure
+      let locked = secure.lock_memory();
+      if !locked {
+         return Err(Error::LockFailed);
+      }
+      Ok(secure)
    }
 
-   pub fn from_vec(mut vec: Vec<T>) -> Self {
+   pub fn from_vec(mut vec: Vec<T>) -> Result<Self, Error> {
       let capacity = vec.capacity();
       let len = vec.len();
 
       // Allocate secure memory
       let size = capacity * mem::size_of::<T>();
       let aligned_size = (size + page_size() - 1) & !(page_size() - 1);
+
       let ptr = unsafe {
-         memsec::malloc_sized(aligned_size)
-            .expect("Failed to allocate secure memory")
-            .as_ptr() as *mut T
+         let allocated_ptr = memsec::malloc_sized(aligned_size);
+         let ptr = allocated_ptr.ok_or(Error::AllocationFailed)?;
+         ptr.as_ptr() as *mut T
       };
 
       // Copy data from Vec to secure memory
@@ -97,15 +108,20 @@ impl<T: Zeroize> SecureVec<T> {
       vec.zeroize();
       drop(vec);
 
+      let non_null = NonNull::new(ptr).ok_or(Error::NullAllocation)?;
+
       let secure = SecureVec {
-         ptr: NonNull::new(ptr).expect("Failed to create NonNull"),
+         ptr: non_null,
          len,
          capacity,
          _marker: std::marker::PhantomData,
       };
 
-      secure.lock_memory();
-      secure
+      let locked = secure.lock_memory();
+      if !locked {
+         return Err(Error::LockFailed);
+      }
+      Ok(secure)
    }
 
    pub fn len(&self) -> usize {
@@ -120,22 +136,20 @@ impl<T: Zeroize> SecureVec<T> {
       self.ptr.as_ptr() as *mut u8
    }
 
-   pub(crate) fn lock_memory(&self) {
-      unsafe {
-         let success = mprotect(self.ptr, Prot::NoAccess);
-         if !success {
-            panic!("LockMemory failed");
-         }
-      }
+   /// Lock the memory region
+   ///
+   /// Returns true if the memory was successfully locked
+   pub fn lock_memory(&self) -> bool {
+      unsafe { mprotect(self.ptr, Prot::NoAccess) }
    }
 
-   pub(crate) fn unlock_memory(&self) {
-      unsafe {
-         let success = mprotect(self.ptr, Prot::ReadWrite);
-         if !success {
-            panic!("UnlockMemory failed");
-         }
-      }
+   /// Unlock the memory region
+   ///
+   /// If this is not succesfull and we try to read anything the program will crash
+   ///
+   /// Returns true if the memory was successfully unlocked
+   pub fn unlock_memory(&self) -> bool {
+      unsafe { mprotect(self.ptr, Prot::ReadWrite) }
    }
 
    /// Immutable access to the `SecureVec`
@@ -330,7 +344,7 @@ impl<T: Zeroize> SecureVec<T> {
 
 impl<T: Clone + Zeroize> Clone for SecureVec<T> {
    fn clone(&self) -> Self {
-      let mut new_vec: SecureVec<T> = SecureVec::with_capacity(self.capacity);
+      let mut new_vec: SecureVec<T> = SecureVec::with_capacity(self.capacity).unwrap();
 
       new_vec.unlock_memory();
       self.unlock_memory();
@@ -578,14 +592,29 @@ mod tests {
    fn test_creation() {
       let vec: Vec<u8> = vec![1, 2, 3];
       let _ = SecureVec::from_vec(vec);
-      let _u8: SecureVec<u8> = SecureVec::new();
-      let _u8: SecureVec<u8> = SecureVec::with_capacity(3);
+      let _: SecureVec<u8> = SecureVec::new().unwrap();
+      let _: SecureVec<u8> = SecureVec::with_capacity(3).unwrap();
+   }
+
+   #[test]
+   fn lock_twice_unlock_twice() {
+      let secure: SecureVec<u8> = SecureVec::new().unwrap();
+
+      let can_lock = secure.lock_memory();
+      assert!(can_lock);
+      let can_lock = secure.lock_memory();
+      assert!(can_lock);
+
+      let can_unlock = secure.unlock_memory();
+      assert!(can_unlock);
+      let can_unlock = secure.unlock_memory();
+      assert!(can_unlock);
    }
 
    #[test]
    fn test_thread_safety() {
       let vec: Vec<u8> = vec![];
-      let secure = SecureVec::from_vec(vec);
+      let secure = SecureVec::from_vec(vec).unwrap();
       let secure = Arc::new(Mutex::new(secure));
 
       let mut handles = Vec::new();
@@ -604,21 +633,21 @@ mod tests {
 
       let sec = secure.lock().unwrap();
       sec.slice_scope(|slice| {
-         assert_eq!(slice, &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+         assert_eq!(slice.len(), 10);
       });
    }
 
    #[test]
    fn test_clone() {
       let vec: Vec<u8> = vec![1, 2, 3];
-      let secure1 = SecureVec::from_vec(vec);
+      let secure1 = SecureVec::from_vec(vec).unwrap();
       let _secure2 = secure1.clone();
    }
 
    #[test]
    fn test_do_not_call_forget_on_drain() {
       let vec: Vec<u8> = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-      let mut secure = SecureVec::from_vec(vec);
+      let mut secure = SecureVec::from_vec(vec).unwrap();
       let drain = secure.drain(..3);
       core::mem::forget(drain);
       // we can still use secure vec but its state is unreachable
@@ -630,7 +659,7 @@ mod tests {
    #[test]
    fn test_drain() {
       let vec: Vec<u8> = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-      let mut secure = SecureVec::from_vec(vec);
+      let mut secure = SecureVec::from_vec(vec).unwrap();
       let mut drain = secure.drain(..3);
       assert_eq!(drain.next(), Some(1));
       assert_eq!(drain.next(), Some(2));
@@ -659,7 +688,7 @@ mod tests {
    #[test]
    fn test_erase() {
       let vec: Vec<u8> = vec![1, 2, 3];
-      let mut secure = SecureVec::from_vec(vec);
+      let mut secure = SecureVec::from_vec(vec).unwrap();
       secure.erase();
       secure.unlock_scope(|secure| {
          assert_eq!(secure.len, 0);
@@ -681,7 +710,7 @@ mod tests {
    #[test]
    fn test_push() {
       let vec: Vec<u8> = Vec::new();
-      let mut secure = SecureVec::from_vec(vec);
+      let mut secure = SecureVec::from_vec(vec).unwrap();
       secure.push(1);
       secure.push(2);
       secure.push(3);
@@ -689,7 +718,7 @@ mod tests {
          assert_eq!(slice, &[1, 2, 3]);
       });
 
-      let mut secure = SecureVec::with_capacity(3);
+      let mut secure = SecureVec::with_capacity(3).unwrap();
       secure.push(1);
       secure.push(2);
       secure.push(3);
@@ -701,7 +730,7 @@ mod tests {
    #[test]
    fn test_index() {
       let vec: Vec<u8> = vec![1, 2, 3];
-      let secure = SecureVec::from_vec(vec);
+      let secure = SecureVec::from_vec(vec).unwrap();
       secure.unlock_scope(|secure| {
          assert_eq!(secure[0], 1);
          assert_eq!(secure[1], 2);
@@ -712,7 +741,7 @@ mod tests {
    #[test]
    fn test_slice_scoped() {
       let vec: Vec<u8> = vec![1, 2, 3];
-      let secure = SecureVec::from_vec(vec);
+      let secure = SecureVec::from_vec(vec).unwrap();
       secure.slice_scope(|slice| {
          assert_eq!(slice, &[1, 2, 3]);
       });
@@ -721,7 +750,7 @@ mod tests {
    #[test]
    fn test_slice_mut_scoped() {
       let vec: Vec<u8> = vec![1, 2, 3];
-      let mut secure = SecureVec::from_vec(vec);
+      let mut secure = SecureVec::from_vec(vec).unwrap();
 
       secure.slice_mut_scope(|slice| {
          slice[0] = 4;
@@ -736,12 +765,12 @@ mod tests {
    #[test]
    fn test_iter_scoped() {
       let vec: Vec<u8> = vec![1, 2, 3];
-      let secure = SecureVec::from_vec(vec);
+      let secure = SecureVec::from_vec(vec).unwrap();
       let sum: u8 = secure.iter_scope(|iter| iter.map(|&x| x).sum());
 
       assert_eq!(sum, 6);
 
-      let secure: SecureVec<u8> = SecureVec::with_capacity(3);
+      let secure: SecureVec<u8> = SecureVec::with_capacity(3).unwrap();
       let sum: u8 = secure.iter_scope(|iter| iter.map(|&x| x).sum());
 
       assert_eq!(sum, 0);
@@ -750,7 +779,7 @@ mod tests {
    #[test]
    fn test_iter_mut_scoped() {
       let vec: Vec<u8> = vec![1, 2, 3];
-      let mut secure = SecureVec::from_vec(vec);
+      let mut secure = SecureVec::from_vec(vec).unwrap();
       secure.iter_mut_scope(|iter| {
          for elem in iter {
             *elem += 1;

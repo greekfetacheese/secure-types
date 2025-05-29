@@ -1,4 +1,4 @@
-use super::vec::SecureVec;
+use super::{Error, vec::SecureVec};
 use core::{ops::Range, str::FromStr};
 use zeroize::Zeroize;
 
@@ -8,14 +8,14 @@ pub struct SecureString {
 }
 
 impl SecureString {
-   pub fn new() -> Self {
-      let vec = SecureVec::new();
-      SecureString { vec }
+   pub fn new() -> Result<Self, Error> {
+      let vec = SecureVec::new()?;
+      Ok(SecureString { vec })
    }
 
-   pub fn new_with_capacity(capacity: usize) -> Self {
-      let vec = SecureVec::with_capacity(capacity);
-      SecureString { vec }
+   pub fn new_with_capacity(capacity: usize) -> Result<Self, Error> {
+      let vec = SecureVec::with_capacity(capacity)?;
+      Ok(SecureString { vec })
    }
 
    pub fn erase(&mut self) {
@@ -108,7 +108,7 @@ impl SecureString {
             }
          });
 
-         let mut new_secure_vec = SecureVec::with_capacity(new_byte_len);
+         let mut new_secure_vec = SecureVec::with_capacity(new_byte_len).unwrap();
          for &b in temp_new_content.iter() {
             new_secure_vec.push(b);
          }
@@ -182,7 +182,7 @@ where
 {
    fn from(s: U) -> SecureString {
       SecureString {
-         vec: SecureVec::from_vec(s.into().into_bytes()),
+         vec: SecureVec::from_vec(s.into().into_bytes()).unwrap(),
       }
    }
 }
@@ -192,7 +192,7 @@ impl FromStr for SecureString {
 
    fn from_str(s: &str) -> Result<Self, Self::Err> {
       Ok(SecureString {
-         vec: SecureVec::from_vec(s.into()),
+         vec: SecureVec::from_vec(s.into()).unwrap(),
       })
    }
 }
@@ -314,7 +314,7 @@ mod tests {
    fn test_push_str() {
       let hello_world = "Hello, world!";
 
-      let mut string = SecureString::new();
+      let mut string = SecureString::new().unwrap();
       string.push_str(hello_world);
       string.str_scope(|str| {
          assert_eq!(str, hello_world);

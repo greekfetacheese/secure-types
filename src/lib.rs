@@ -7,6 +7,21 @@ pub use vec::{SecureBytes, SecureVec};
 pub use memsec;
 pub use zeroize::Zeroize;
 
+use thiserror::Error as ThisError;
+
+#[derive(ThisError, Debug)]
+pub enum Error {
+   #[error("Failed to allocate secure memory")]
+   AllocationFailed,
+   #[error("Allocated Ptr is null")]
+   NullAllocation,
+   #[error("Failed to lock memory")]
+   LockFailed,
+   #[error("Failed to unlock memory")]
+   UnlockFailed,
+}
+
+
 #[cfg(windows)]
 use windows_sys::Win32::System::SystemInformation::GetSystemInfo;
 
