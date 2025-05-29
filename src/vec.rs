@@ -420,7 +420,7 @@ impl<'de> serde::Deserialize<'de> for SecureVec<u8> {
             while let Some(byte) = seq.next_element::<u8>()? {
                vec.push(byte);
             }
-            Ok(SecureVec::from_vec(vec))
+            SecureVec::from_vec(vec).map_err(serde::de::Error::custom)
          }
       }
       deserializer.deserialize_seq(SecureVecVisitor)
@@ -676,10 +676,10 @@ mod tests {
    #[test]
    fn test_secure_vec_serde() {
       let vec: Vec<u8> = vec![1, 2, 3];
-      let secure = SecureVec::from_vec(vec);
-      let json = serde_json::to_string(&secure).expect("Serialization failed");
+      let secure = SecureVec::from_vec(vec).unwrap();
+      let json = serde_json::to_vec(&secure).expect("Serialization failed");
       let deserialized: SecureVec<u8> =
-         serde_json::from_str(&json).expect("Deserialization failed");
+         serde_json::from_slice(&json).expect("Deserialization failed");
       deserialized.slice_scope(|slice| {
          assert_eq!(slice, &[1, 2, 3]);
       });

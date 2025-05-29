@@ -19,6 +19,7 @@ version = "2"
 
 [dependencies.serde]
 version = "1"
+features = ["derive"]
 optional = true
 
 [target.'cfg(windows)'.dependencies]
@@ -34,6 +35,7 @@ version = "1"
 
 [dev-dependencies.serde]
 version = "1"
+features = ["derive"]
 
 [features]
 serde = ["dep:serde"]

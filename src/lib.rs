@@ -10,6 +10,7 @@ pub use zeroize::Zeroize;
 use thiserror::Error as ThisError;
 
 #[derive(ThisError, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 pub enum Error {
    #[error("Failed to allocate secure memory")]
    AllocationFailed,
