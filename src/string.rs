@@ -73,10 +73,7 @@ impl SecureString {
    where
       F: FnOnce(&mut SecureString) -> R,
    {
-      self.vec.unlock_memory();
-      let result = f(self);
-      self.vec.lock_memory();
-      result
+      f(self)
    }
 
    pub fn insert_text_at_char_idx(&mut self, char_idx: usize, text_to_insert: &str) -> usize {
@@ -316,6 +313,19 @@ mod tests {
 
       let mut string = SecureString::new().unwrap();
       string.push_str(hello_world);
+      string.str_scope(|str| {
+         assert_eq!(str, hello_world);
+      });
+   }
+
+   #[test]
+   fn test_mut_scope() {
+      let hello_world = "Hello, world!";
+      let mut string = SecureString::from("Hello, ");
+      string.mut_scope(|string| {
+         string.push_str("world!");
+      });
+
       string.str_scope(|str| {
          assert_eq!(str, hello_world);
       });

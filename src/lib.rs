@@ -4,7 +4,9 @@ pub mod vec;
 pub use string::SecureString;
 pub use vec::{SecureBytes, SecureVec};
 
+use core::ptr::NonNull;
 pub use memsec;
+use memsec::Prot;
 pub use zeroize::Zeroize;
 
 use thiserror::Error as ThisError;
@@ -50,6 +52,15 @@ pub fn page_size() -> usize {
          (*si.as_ptr()).dwPageSize as usize
       }
    }
+}
+
+pub fn mprotect<T>(ptr: NonNull<T>, prot: Prot::Ty) -> bool {
+   let success = unsafe { memsec::mprotect(ptr, prot) };
+   if !success {
+      #[cfg(test)]
+      eprintln!("mprotect failed");
+   }
+   success
 }
 
 #[cfg(windows)]

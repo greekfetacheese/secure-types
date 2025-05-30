@@ -194,13 +194,13 @@ impl<T: Zeroize> SecureVec<T> {
       #[cfg(windows)]
       {
          let encrypt_ok = self.encypt_memory();
-         let mprotect_ok = unsafe { memsec::mprotect(self.ptr, Prot::NoAccess) };
+         let mprotect_ok = super::mprotect(self.ptr, Prot::NoAccess);
          (encrypt_ok, mprotect_ok)
       }
 
       #[cfg(unix)]
       {
-         let mprotect_ok = unsafe { memsec::mprotect(self.ptr, Prot::NoAccess) };
+         let mprotect_ok = super::mprotect(self.ptr, Prot::NoAccess);
          (true, mprotect_ok)
       }
    }
@@ -213,7 +213,7 @@ impl<T: Zeroize> SecureVec<T> {
    pub(crate) fn unlock_memory(&self) -> (bool, bool) {
       #[cfg(windows)]
       {
-         let mprotect_ok = unsafe { memsec::mprotect(self.ptr, Prot::ReadWrite) };
+         let mprotect_ok = super::mprotect(self.ptr, Prot::ReadWrite);
 
          if !mprotect_ok {
             return (false, false);
@@ -225,7 +225,7 @@ impl<T: Zeroize> SecureVec<T> {
 
       #[cfg(unix)]
       {
-         let mprotect_ok = unsafe { memsec::mprotect(self.ptr, Prot::ReadWrite) };
+         let mprotect_ok = super::mprotect(self.ptr, Prot::ReadWrite);
          (true, mprotect_ok)
       }
    }
