@@ -26,6 +26,8 @@ pub enum Error {
    UnlockFailed,
 }
 
+#[cfg(all(test, windows))]
+use windows_sys::Win32::Foundation::GetLastError;
 #[cfg(windows)]
 use windows_sys::Win32::Security::Cryptography::{
    CRYPTPROTECTMEMORY_BLOCK_SIZE, CRYPTPROTECTMEMORY_SAME_PROCESS, CryptProtectMemory,
@@ -74,8 +76,14 @@ pub fn crypt_protect_memory(ptr: *mut u8, size_in_bytes: usize) -> bool {
    };
 
    if result == 0 {
-      // let error_code = unsafe { windows_sys::Win32::System::Diagnostics::Debug::GetLastError() };
-      // println!("CryptProtectMemory failed with error: {}", error_code);
+      #[cfg(test)]
+      {
+         let error_code = unsafe { GetLastError() };
+         eprintln!(
+            "CryptProtectMemory failed with error code: {}",
+            error_code
+         );
+      }
       return false;
    } else {
       true
@@ -105,6 +113,14 @@ pub fn crypt_unprotect_memory(ptr: *mut u8, size_in_bytes: usize) -> bool {
    };
 
    if result == 0 {
+      #[cfg(test)]
+      {
+         let error_code = unsafe { GetLastError() };
+         eprintln!(
+            "CryptUnprotectMemory failed with error code: {}",
+            error_code
+         );
+      }
       return false;
    } else {
       true

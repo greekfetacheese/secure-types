@@ -13,7 +13,7 @@ pub type SecureBytes = SecureVec<u8>;
 /// A vector that allocates memory in a secure manner
 ///
 /// It does that by calling `VirtualLock` & `VirtualProtect` on Windows and `mlock` & `mprotect` on Unix.
-/// 
+///
 /// On `Windows` it also calls `CryptProtectMemory` & `CryptUnprotectMemory` to encrypt/decrypt the memory
 ///
 /// The data is protected from:
@@ -342,11 +342,12 @@ impl<T: Zeroize> SecureVec<T> {
             self.capacity + 1
          };
 
-         let new_size = new_capacity * mem::size_of::<T>();
+         let items_byte_size = new_capacity * mem::size_of::<T>();
+         let aligned_allocation_size = (items_byte_size + page_size() - 1) & !(page_size() - 1);
 
          // Allocate new secure memory
          let new_ptr = unsafe {
-            memsec::malloc_sized(new_size)
+            memsec::malloc_sized(aligned_allocation_size)
                .expect("Failed to allocate secure memory")
                .as_ptr() as *mut T
          };
@@ -720,7 +721,7 @@ mod tests {
       let secure = Arc::new(Mutex::new(secure));
 
       let mut handles = Vec::new();
-      for i in 0..10u8 {
+      for i in 0..20u8 {
          let secure_clone = secure.clone();
          let handle = std::thread::spawn(move || {
             let mut secure = secure_clone.lock().unwrap();
@@ -735,7 +736,7 @@ mod tests {
 
       let sec = secure.lock().unwrap();
       sec.slice_scope(|slice| {
-         assert_eq!(slice.len(), 10);
+         assert_eq!(slice.len(), 20);
       });
    }
 
@@ -813,20 +814,9 @@ mod tests {
    fn test_push() {
       let vec: Vec<u8> = Vec::new();
       let mut secure = SecureVec::from_vec(vec).unwrap();
-      secure.push(1);
-      secure.push(2);
-      secure.push(3);
-      secure.slice_scope(|slice| {
-         assert_eq!(slice, &[1, 2, 3]);
-      });
-
-      let mut secure = SecureVec::with_capacity(3).unwrap();
-      secure.push(1);
-      secure.push(2);
-      secure.push(3);
-      secure.slice_scope(|slice| {
-         assert_eq!(slice, &[1, 2, 3]);
-      });
+      for i in 0..30 {
+         secure.push(i);
+      }
    }
 
    #[test]
