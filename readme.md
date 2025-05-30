@@ -9,6 +9,7 @@ This crate provides types to handle sensitive data more securely.
 Similar to `Vec` from the standard library, but with additional security features.
 - [Zeroizes](https://github.com/RustCrypto/utils/tree/master/zeroize) its contents when it is dropped
 - Allocated memory is protected using `VirtualLock` & `VirtualProtect` on Windows and `mlock` & `mprotect` on Unix.
+- Uses `CryptProtectMemory` & `CryptUnprotectMemory` on Windows to encrypt/decrypt the memory
 - Does not leave copies of the data on the heap during reallocation
 
 ### SecureString

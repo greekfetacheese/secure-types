@@ -5,7 +5,7 @@ use core::{
    ops::{Bound, RangeBounds},
    ptr::{self, NonNull},
 };
-use memsec::{Prot, mprotect};
+use memsec::Prot;
 use zeroize::Zeroize;
 
 pub type SecureBytes = SecureVec<u8>;
@@ -13,6 +13,8 @@ pub type SecureBytes = SecureVec<u8>;
 /// A vector that allocates memory in a secure manner
 ///
 /// It does that by calling `VirtualLock` & `VirtualProtect` on Windows and `mlock` & `mprotect` on Unix.
+/// 
+/// On `Windows` it also calls `CryptProtectMemory` & `CryptUnprotectMemory` to encrypt/decrypt the memory
 ///
 /// The data is protected from:
 ///
@@ -38,8 +40,12 @@ unsafe impl<T: Zeroize + Send + Sync> Sync for SecureVec<T> {}
 
 impl<T: Zeroize> SecureVec<T> {
    pub fn new() -> Result<Self, Error> {
+      // Give at least a capacity of 1 so encryption/decryption can be done.
+      let capacity = 1;
+      let size = capacity * mem::size_of::<T>();
+      let aligned_size = (size + page_size() - 1) & !(page_size() - 1);
       let ptr = unsafe {
-         let allocated_ptr = memsec::malloc_sized(mem::size_of::<T>());
+         let allocated_ptr = memsec::malloc_sized(aligned_size);
          let ptr = allocated_ptr.ok_or(Error::AllocationFailed)?;
          ptr.as_ptr() as *mut T
       };
@@ -48,18 +54,27 @@ impl<T: Zeroize> SecureVec<T> {
       let secure = SecureVec {
          ptr: non_null,
          len: 0,
-         capacity: 0,
+         capacity,
          _marker: std::marker::PhantomData,
       };
 
-      let locked = secure.lock_memory();
+      let (encrypted, locked) = secure.lock_memory();
       if !locked {
          return Err(Error::LockFailed);
       }
+
+      if !encrypted {
+         return Err(Error::CryptProtectMemoryFailed);
+      }
+
       Ok(secure)
    }
 
-   pub fn with_capacity(capacity: usize) -> Result<Self, Error> {
+   pub fn with_capacity(mut capacity: usize) -> Result<Self, Error> {
+      if capacity == 0 {
+         capacity = 1;
+      }
+
       let size = capacity * mem::size_of::<T>();
       let aligned_size = (size + page_size() - 1) & !(page_size() - 1); // Round up to page size
 
@@ -78,14 +93,23 @@ impl<T: Zeroize> SecureVec<T> {
          _marker: std::marker::PhantomData,
       };
 
-      let locked = secure.lock_memory();
+      let (encrypted, locked) = secure.lock_memory();
       if !locked {
          return Err(Error::LockFailed);
       }
+
+      if !encrypted {
+         return Err(Error::CryptProtectMemoryFailed);
+      }
+
       Ok(secure)
    }
 
    pub fn from_vec(mut vec: Vec<T>) -> Result<Self, Error> {
+      if vec.capacity() == 0 {
+         vec.reserve(1);
+      }
+
       let capacity = vec.capacity();
       let len = vec.len();
 
@@ -121,10 +145,15 @@ impl<T: Zeroize> SecureVec<T> {
          _marker: std::marker::PhantomData,
       };
 
-      let locked = secure.lock_memory();
+      let (encrypted, locked) = secure.lock_memory();
       if !locked {
          return Err(Error::LockFailed);
       }
+
+      if !encrypted {
+         return Err(Error::CryptProtectMemoryFailed);
+      }
+
       Ok(secure)
    }
 
@@ -140,20 +169,65 @@ impl<T: Zeroize> SecureVec<T> {
       self.ptr.as_ptr() as *mut u8
    }
 
+   fn allocated_byte_size(&self) -> usize {
+      (self.capacity * mem::size_of::<T>() + page_size() - 1) & !(page_size() - 1)
+   }
+
+   #[cfg(windows)]
+   fn encypt_memory(&self) -> bool {
+      let ptr = self.as_ptr() as *mut u8;
+      super::crypt_protect_memory(ptr, self.allocated_byte_size())
+   }
+
+   #[cfg(windows)]
+   fn decrypt_memory(&self) -> bool {
+      let ptr = self.as_ptr() as *mut u8;
+      super::crypt_unprotect_memory(ptr, self.allocated_byte_size())
+   }
+
    /// Lock the memory region
    ///
-   /// Returns true if the memory was successfully locked
-   pub fn lock_memory(&self) -> bool {
-      unsafe { mprotect(self.ptr, Prot::NoAccess) }
+   /// On Windows also calls `CryptProtectMemory` to encrypt the memory
+   ///
+   /// On Unix it just calls `mprotect` to lock the memory
+   pub(crate) fn lock_memory(&self) -> (bool, bool) {
+      #[cfg(windows)]
+      {
+         let encrypt_ok = self.encypt_memory();
+         let mprotect_ok = unsafe { memsec::mprotect(self.ptr, Prot::NoAccess) };
+         (encrypt_ok, mprotect_ok)
+      }
+
+      #[cfg(unix)]
+      {
+         let mprotect_ok = unsafe { memsec::mprotect(self.ptr, Prot::NoAccess) };
+         (true, mprotect_ok)
+      }
    }
 
    /// Unlock the memory region
    ///
-   /// If this is not succesfull and we try to read anything the program will crash
+   /// On Windows also calls `CryptUnprotectMemory` to decrypt the memory
    ///
-   /// Returns true if the memory was successfully unlocked
-   pub fn unlock_memory(&self) -> bool {
-      unsafe { mprotect(self.ptr, Prot::ReadWrite) }
+   /// On Unix it just calls `mprotect` to unlock the memory
+   pub(crate) fn unlock_memory(&self) -> (bool, bool) {
+      #[cfg(windows)]
+      {
+         let mprotect_ok = unsafe { memsec::mprotect(self.ptr, Prot::ReadWrite) };
+
+         if !mprotect_ok {
+            return (false, false);
+         }
+
+         let decrypt_ok = self.decrypt_memory();
+         (decrypt_ok, mprotect_ok)
+      }
+
+      #[cfg(unix)]
+      {
+         let mprotect_ok = unsafe { memsec::mprotect(self.ptr, Prot::ReadWrite) };
+         (true, mprotect_ok)
+      }
    }
 
    /// Immutable access to the `SecureVec`
@@ -601,18 +675,42 @@ mod tests {
    }
 
    #[test]
-   fn lock_twice_unlock_twice() {
+   fn lock_unlock() {
       let secure: SecureVec<u8> = SecureVec::new().unwrap();
+      let size = secure.allocated_byte_size();
+      assert_eq!(size > 0, true);
 
-      let can_lock = secure.lock_memory();
-      assert!(can_lock);
-      let can_lock = secure.lock_memory();
-      assert!(can_lock);
+      let (decrypted, unlocked) = secure.unlock_memory();
+      assert!(decrypted);
+      assert!(unlocked);
 
-      let can_unlock = secure.unlock_memory();
-      assert!(can_unlock);
-      let can_unlock = secure.unlock_memory();
-      assert!(can_unlock);
+      let (encrypted, locked) = secure.lock_memory();
+      assert!(encrypted);
+      assert!(locked);
+
+      let secure: SecureVec<u8> = SecureVec::from_vec(vec![]).unwrap();
+      let size = secure.allocated_byte_size();
+      assert_eq!(size > 0, true);
+
+      let (decrypted, unlocked) = secure.unlock_memory();
+      assert!(decrypted);
+      assert!(unlocked);
+
+      let (encrypted, locked) = secure.lock_memory();
+      assert!(encrypted);
+      assert!(locked);
+
+      let secure: SecureVec<u8> = SecureVec::with_capacity(0).unwrap();
+      let size = secure.allocated_byte_size();
+      assert_eq!(size > 0, true);
+
+      let (decrypted, unlocked) = secure.unlock_memory();
+      assert!(decrypted);
+      assert!(unlocked);
+
+      let (encrypted, locked) = secure.lock_memory();
+      assert!(encrypted);
+      assert!(locked);
    }
 
    #[test]

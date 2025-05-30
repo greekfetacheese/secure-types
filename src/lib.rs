@@ -16,13 +16,21 @@ pub enum Error {
    AllocationFailed,
    #[error("Allocated Ptr is null")]
    NullAllocation,
+   #[error("CryptProtectMemory failed")]
+   CryptProtectMemoryFailed,
+   #[error("CryptUnprotectMemory failed")]
+   CryptUnprotectMemoryFailed,
    #[error("Failed to lock memory")]
    LockFailed,
    #[error("Failed to unlock memory")]
    UnlockFailed,
 }
 
-
+#[cfg(windows)]
+use windows_sys::Win32::Security::Cryptography::{
+   CRYPTPROTECTMEMORY_BLOCK_SIZE, CRYPTPROTECTMEMORY_SAME_PROCESS, CryptProtectMemory,
+   CryptUnprotectMemory,
+};
 #[cfg(windows)]
 use windows_sys::Win32::System::SystemInformation::GetSystemInfo;
 
@@ -39,5 +47,66 @@ pub fn page_size() -> usize {
          GetSystemInfo(si.as_mut_ptr());
          (*si.as_ptr()).dwPageSize as usize
       }
+   }
+}
+
+#[cfg(windows)]
+pub fn crypt_protect_memory(ptr: *mut u8, size_in_bytes: usize) -> bool {
+   if size_in_bytes == 0 {
+      return true; // Nothing to encrypt
+   }
+
+   if size_in_bytes % (CRYPTPROTECTMEMORY_BLOCK_SIZE as usize) != 0 {
+      // not a multiple of CRYPTPROTECTMEMORY_BLOCK_SIZE
+      return false;
+   }
+
+   if size_in_bytes > u32::MAX as usize {
+      return false;
+   }
+
+   let result = unsafe {
+      CryptProtectMemory(
+         ptr as *mut core::ffi::c_void,
+         size_in_bytes as u32,
+         CRYPTPROTECTMEMORY_SAME_PROCESS,
+      )
+   };
+
+   if result == 0 {
+      // let error_code = unsafe { windows_sys::Win32::System::Diagnostics::Debug::GetLastError() };
+      // println!("CryptProtectMemory failed with error: {}", error_code);
+      return false;
+   } else {
+      true
+   }
+}
+
+#[cfg(windows)]
+pub fn crypt_unprotect_memory(ptr: *mut u8, size_in_bytes: usize) -> bool {
+   if size_in_bytes == 0 {
+      return true;
+   }
+
+   if size_in_bytes % (CRYPTPROTECTMEMORY_BLOCK_SIZE as usize) != 0 {
+      return false;
+   }
+
+   if size_in_bytes > u32::MAX as usize {
+      return false;
+   }
+
+   let result = unsafe {
+      CryptUnprotectMemory(
+         ptr as *mut core::ffi::c_void,
+         size_in_bytes as u32,
+         CRYPTPROTECTMEMORY_SAME_PROCESS,
+      )
+   };
+
+   if result == 0 {
+      return false;
+   } else {
+      true
    }
 }

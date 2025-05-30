@@ -28,6 +28,7 @@ version = "0.45"
 default-features = false
 features = [
    "Win32_System_SystemInformation",
+   "Win32_Security_Cryptography"
 ]
 
 [dev-dependencies.serde_json]
