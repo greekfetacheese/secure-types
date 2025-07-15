@@ -8,6 +8,7 @@ repository = "https://github.com/greekfetacheese/secure-types"
 readme = "readme.md"
 keywords = ["security", "secure", "memory", "zeroize", "no_std"]
 categories = ["memory-management", "no-std", "security"]
+license = "MIT OR Apache-2.0"
 
 [dependencies.memsec]
 version = "0.7.0"
