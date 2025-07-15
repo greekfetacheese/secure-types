@@ -20,7 +20,6 @@ use memsec::Prot;
 
 pub type SecureBytes = SecureVec<u8>;
 
-
 /// A securely allocated, growable vector, analogous to `std::vec::Vec`.
 ///
 /// `SecureVec<T>` is designed to hold a sequence of sensitive data elements. It serves as the
@@ -247,6 +246,7 @@ impl<T: Zeroize> SecureVec<T> {
       self.ptr.as_ptr() as *mut u8
    }
 
+   #[allow(dead_code)]
    fn allocated_byte_size(&self) -> usize {
       let size = self.capacity * mem::size_of::<T>();
       #[cfg(feature = "std")]

@@ -34,7 +34,7 @@ use zeroize::Zeroize;
 ///
 /// // Create a SecureString
 /// let mut secret = SecureString::from("my_super_secret");
-/// 
+///
 /// // The memory is locked here
 ///
 /// // Safely append more data.
@@ -221,7 +221,6 @@ impl SecureString {
       self.vec.len = new_len;
    }
 }
-
 
 impl From<&str> for SecureString {
    fn from(s: &str) -> SecureString {

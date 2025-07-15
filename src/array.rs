@@ -10,8 +10,6 @@ use super::page_size;
 #[cfg(feature = "std")]
 use memsec::Prot;
 
-
-
 /// A fixed-size array allocated in a secure memory region.
 ///
 /// `SecureArray` provides the same core security guarantees as the other types in this
@@ -147,6 +145,7 @@ where
       self.ptr.as_ptr() as *mut u8
    }
 
+   #[allow(dead_code)]
    fn allocated_byte_size(&self) -> usize {
       let size = self.len() * mem::size_of::<T>();
       #[cfg(feature = "std")]

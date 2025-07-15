@@ -9,16 +9,13 @@ version = "0.7.0"
 optional = true
 
 [target.'cfg(unix)'.dependencies]
-[dependencies.libc]
-version = "0.2"
-optional = true
+libc = { version = "0.2" }
 
 [dependencies.zeroize]
 version = "1.8.1"
 
 [dependencies.thiserror]
 version = "2"
-optional = true
 
 [dependencies.serde]
 version = "1"
@@ -26,14 +23,10 @@ features = ["derive"]
 optional = true
 
 [target.'cfg(windows)'.dependencies]
-[dependencies.windows-sys]
-version = "0.60.2"
-default-features = false
-features = [
+windows-sys = { version = "0.60.2", default-features = false, features = [
    "Win32_System_SystemInformation",
-   "Win32_Security_Cryptography"
-]
-optional = true
+   "Win32_Security_Cryptography",
+] }
 
 [dev-dependencies.serde_json]
 version = "1"
@@ -44,6 +37,6 @@ features = ["derive"]
 
 [features]
 default = ["std"]
-std = ["memsec", "thiserror", "dep:libc", "dep:windows-sys"]
+std = ["memsec"]
 serde = ["dep:serde"]
 no_std = []

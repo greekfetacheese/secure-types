@@ -70,15 +70,14 @@ pub use array::SecureArray;
 pub use string::SecureString;
 pub use vec::{SecureBytes, SecureVec};
 
-pub use zeroize::Zeroize;
 use core::ptr::NonNull;
+pub use zeroize::Zeroize;
 
 #[cfg(feature = "std")]
 pub use memsec;
 #[cfg(feature = "std")]
 use memsec::Prot;
 
-#[cfg(feature = "std")]
 use thiserror::Error as ThisError;
 
 #[cfg(feature = "std")]
@@ -101,7 +100,6 @@ pub enum Error {
 
 #[cfg(not(feature = "std"))]
 #[derive(Debug)]
-#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 pub enum Error {
    AllocationFailed,
    NullAllocation,
