@@ -3,6 +3,11 @@ name = "secure-types"
 version = "0.1.0"
 authors = ["Michalis Molfetas"]
 edition = "2024"
+description = "Secure data types that protect sensitive data in memory via locking, encryption, and zeroization."
+repository = "https://github.com/greekfetacheese/secure-types"
+readme = "readme.md"
+keywords = ["security", "secure", "memory", "zeroize", "no_std"]
+categories = ["memory-management", "no-std", "security"]
 
 [dependencies.memsec]
 version = "0.7.0"
