@@ -1,7 +1,54 @@
+#[cfg(feature = "std")]
+use std::vec::Vec;
+
 use super::{Error, vec::SecureVec};
-use core::{ops::Range, str::FromStr};
+use core::ops::Range;
 use zeroize::Zeroize;
 
+/// A securely allocated, growable UTF-8 string, analogous to `std::string::String`.
+///
+/// It is a wrapper around `SecureVec<u8>` and inherits all of its security guarantees,
+/// ensuring that sensitive string data like passwords, API keys, or personal information
+/// is handled with care.
+///
+/// ## Security Model
+///
+/// `SecureString` enforces the same security model as `SecureVec`:
+/// - **Zeroization on Drop**: The string's buffer is securely wiped clean.
+/// - **Memory Locking & Encryption**: When the `std` feature is enabled, the buffer is
+///   protected against OS-level spying via disk swaps or memory inspection tools.
+///
+/// Access to the string contents is provided through scoped methods like `str_scope`,
+/// which ensure the memory is only unlocked for the briefest possible time.
+///
+/// ## Security Considerations
+///
+/// While the crate protects the memory, you must still be careful not to leak the data.
+/// For example, creating a new, unsecured `String` from the unlocked slice and returning
+/// it from the scope would leak the sensitive data if not handled correctly.
+///
+/// # Examples
+///
+/// ```
+/// use secure_types::SecureString;
+///
+/// // Create a SecureString
+/// let mut secret = SecureString::from("my_super_secret");
+/// 
+/// // The memory is locked here
+///
+/// // Safely append more data.
+/// secret.push_str("_password");
+///
+/// // The memory is locked here.
+///
+/// // Use a scope to safely access the content as a &str.
+/// secret.str_scope(|exposed_str| {
+///     assert_eq!(exposed_str, "my_super_secret_password");
+/// });
+///
+/// // When `secret` is dropped, its data zeroized.
+/// ```
 #[derive(Clone)]
 pub struct SecureString {
    vec: SecureVec<u8>,
@@ -76,6 +123,7 @@ impl SecureString {
       f(self)
    }
 
+   #[cfg(feature = "std")]
    pub fn insert_text_at_char_idx(&mut self, char_idx: usize, text_to_insert: &str) -> usize {
       let chars_to_insert_count = text_to_insert.chars().count();
       if chars_to_insert_count == 0 {
@@ -111,7 +159,7 @@ impl SecureString {
          }
          temp_new_content.zeroize();
 
-         let mut old_vec_to_drop = std::mem::replace(&mut self.vec, new_secure_vec);
+         let mut old_vec_to_drop = core::mem::replace(&mut self.vec, new_secure_vec);
          old_vec_to_drop.erase();
       } else {
          self.vec.unlock_memory();
@@ -140,7 +188,8 @@ impl SecureString {
       chars_to_insert_count
    }
 
-   pub fn delete_text_char_range(&mut self, char_range: std::ops::Range<usize>) {
+   #[cfg(feature = "std")]
+   pub fn delete_text_char_range(&mut self, char_range: core::ops::Range<usize>) {
       if char_range.start >= char_range.end {
          return;
       }
@@ -173,24 +222,20 @@ impl SecureString {
    }
 }
 
-impl<U> From<U> for SecureString
-where
-   U: Into<String>,
-{
-   fn from(s: U) -> SecureString {
-      SecureString {
-         vec: SecureVec::from_vec(s.into().into_bytes()).unwrap(),
-      }
-   }
-}
 
-impl FromStr for SecureString {
-   type Err = core::convert::Infallible;
+impl From<&str> for SecureString {
+   fn from(s: &str) -> SecureString {
+      let bytes = s.as_bytes();
+      let len = bytes.len();
 
-   fn from_str(s: &str) -> Result<Self, Self::Err> {
-      Ok(SecureString {
-         vec: SecureVec::from_vec(s.into()).unwrap(),
-      })
+      let mut new_vec = SecureVec::with_capacity(len).unwrap();
+      new_vec.len = len;
+
+      new_vec.slice_mut_scope(|slice| {
+         slice[..len].copy_from_slice(bytes);
+      });
+
+      SecureString { vec: new_vec }
    }
 }
 
@@ -228,6 +273,7 @@ impl<'de> serde::Deserialize<'de> for SecureString {
    }
 }
 
+#[cfg(feature = "std")]
 fn char_to_byte_idx(s_bytes: &[u8], char_idx: usize) -> usize {
    core::str::from_utf8(s_bytes)
       .ok()
@@ -235,7 +281,7 @@ fn char_to_byte_idx(s_bytes: &[u8], char_idx: usize) -> usize {
       .unwrap_or(s_bytes.len()) // Fallback to end if char_idx is out of bounds
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests {
    use super::*;
 
@@ -245,14 +291,18 @@ mod tests {
       let hello_world2 = String::from(hello_world);
 
       let _ = SecureString::from(hello_world);
-      let _ = SecureString::from(hello_world2);
+      let _ = SecureString::from(hello_world2.as_str());
    }
 
    #[test]
    fn test_clone() {
       let hello_world = "Hello, world!";
       let secure1 = SecureString::from(hello_world);
-      let _secure2 = secure1.clone();
+      let secure2 = secure1.clone();
+
+      secure2.str_scope(|str| {
+         assert_eq!(str, hello_world);
+      });
    }
 
    #[test]

@@ -1,16 +1,87 @@
+//! # Secure Types
+//!
+//! This crate provides heap-allocated data structures (`SecureVec`, `SecureArray`, `SecureString`)
+//! designed to handle sensitive information in memory with enhanced security.
+//!
+//! ## Core Security Guarantees
+//!
+//! The primary goal is to protect secret data (like passwords, private keys, or credentials)
+//! from being exposed through common vulnerabilities.
+//!
+//! 1.  **Zeroization on Drop**: All secure types implement the `Zeroize` trait, ensuring their
+//!     memory is securely overwritten with zeros when they are dropped. This prevents stale
+//!     data from being recoverable in deallocated memory.
+//!
+//! 2.  **Memory Locking (`std` only)**: When compiled with the `std` feature (the default),
+//!     the crate uses OS-level primitives to lock memory pages, preventing them from being
+//!     swapped to disk.
+//!     - On Windows: `VirtualLock` and `VirtualProtect`.
+//!     - On Unix: `mlock` and `mprotect`.
+//!
+//! 3.  **Memory Encryption (`std` on Windows only)**: On Windows, memory is also encrypted
+//!     in place using `CryptProtectMemory`, providing an additional layer of protection
+//!     against memory inspection.
+//!
+//! 4.  **Scoped Access**: Data is protected by default. To access it, you must use scoped
+//!     methods like `.unlocked_scope(|slice| { ... })`, which temporarily makes the data
+//!     accessible and automatically re-locks it afterward.
+//!
+//! ## Usage Example
+//!
+//! Here's a quick example of how to use `SecureString`:
+//!
+//! ```rust
+//! use secure_types::SecureString;
+//!
+//! // Create a string from a sensitive literal.
+//! // The original data is securely zeroized after being copied.
+//! let mut secret = SecureString::from("my_super_secret_password");
+//!
+//! // The memory is locked and protected here. Direct access is not possible.
+//!
+//! // Use a scope to safely access the content as a &str.
+//! secret.str_scope(|unlocked_str| {
+//!     assert_eq!(unlocked_str, "my_super_secret_password");
+//!     println!("The secret is: {}", unlocked_str);
+//! });
+//!
+//! // The memory is automatically locked again when the scope ends.
+//!
+//! // When `secret` goes out of scope, its memory will be securely zeroized.
+//! ```
+//!
+//! ## Feature Flags
+//!
+//! - `std` (default): Enables all OS-level security features like memory locking and encryption.
+//! - `serde`: Enables serialization and deserialization for `SecureString` and `SecureBytes` via the Serde framework.
+//! - `no_std`: Compiles the crate in a `no_std` environment. In this mode, only the **Zeroize on Drop**
+//!   guarantee is provided. This is useful for embedded systems or WebAssembly.
+
+#![cfg_attr(feature = "no_std", no_std)]
+
+#[cfg(feature = "no_std")]
+extern crate alloc;
+
+pub mod array;
 pub mod string;
 pub mod vec;
 
+pub use array::SecureArray;
 pub use string::SecureString;
 pub use vec::{SecureBytes, SecureVec};
 
-use core::ptr::NonNull;
-pub use memsec;
-use memsec::Prot;
 pub use zeroize::Zeroize;
+use core::ptr::NonNull;
 
+#[cfg(feature = "std")]
+pub use memsec;
+#[cfg(feature = "std")]
+use memsec::Prot;
+
+#[cfg(feature = "std")]
 use thiserror::Error as ThisError;
 
+#[cfg(feature = "std")]
 #[derive(ThisError, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 pub enum Error {
@@ -28,16 +99,25 @@ pub enum Error {
    UnlockFailed,
 }
 
-#[cfg(all(test, windows))]
+#[cfg(not(feature = "std"))]
+#[derive(Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
+pub enum Error {
+   AllocationFailed,
+   NullAllocation,
+}
+
+#[cfg(all(feature = "std", test, windows))]
 use windows_sys::Win32::Foundation::GetLastError;
-#[cfg(windows)]
+#[cfg(all(feature = "std", windows))]
 use windows_sys::Win32::Security::Cryptography::{
    CRYPTPROTECTMEMORY_BLOCK_SIZE, CRYPTPROTECTMEMORY_SAME_PROCESS, CryptProtectMemory,
    CryptUnprotectMemory,
 };
-#[cfg(windows)]
+#[cfg(all(feature = "std", windows))]
 use windows_sys::Win32::System::SystemInformation::GetSystemInfo;
 
+#[cfg(feature = "std")]
 pub fn page_size() -> usize {
    #[cfg(unix)]
    {
@@ -54,6 +134,7 @@ pub fn page_size() -> usize {
    }
 }
 
+#[cfg(feature = "std")]
 pub fn mprotect<T>(ptr: NonNull<T>, prot: Prot::Ty) -> bool {
    let success = unsafe { memsec::mprotect(ptr, prot) };
    if !success {
@@ -63,7 +144,7 @@ pub fn mprotect<T>(ptr: NonNull<T>, prot: Prot::Ty) -> bool {
    success
 }
 
-#[cfg(windows)]
+#[cfg(all(feature = "std", windows))]
 pub fn crypt_protect_memory(ptr: *mut u8, size_in_bytes: usize) -> bool {
    if size_in_bytes == 0 {
       return true; // Nothing to encrypt
@@ -101,7 +182,7 @@ pub fn crypt_protect_memory(ptr: *mut u8, size_in_bytes: usize) -> bool {
    }
 }
 
-#[cfg(windows)]
+#[cfg(all(feature = "std", windows))]
 pub fn crypt_unprotect_memory(ptr: *mut u8, size_in_bytes: usize) -> bool {
    if size_in_bytes == 0 {
       return true;
