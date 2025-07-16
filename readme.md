@@ -6,7 +6,7 @@ The goal is to protect secret data (like passwords, private keys, or credentials
 
 ## Key Features
 
-- **Zeroization on Drop**: Memory is securely wiped clean when dropped.
+- **Zeroization on Drop**: Memory is wiped when dropped.
 - **Memory Locking**: (std-only) OS-level protection against being swapped to disk.
 - **Memory Encryption**: (Windows-only) `CryptProtectMemory` for in-memory encryption.
 - **Scoped Access**: Data is protected by default and only accessible within safe blocks.
@@ -16,7 +16,7 @@ The goal is to protect secret data (like passwords, private keys, or credentials
 ## Usage
 
 ```rust
-use secure_typed::SecureString;
+use secure_types::SecureString;
 
 // Create a string from a sensitive literal.
 let mut secret = SecureString::from("my_super_secret_password");
@@ -30,7 +30,7 @@ secret.str_scope(|unlocked_str| {
 For a `SecureVec`:
 
 ```rust
-use secure_typed::SecureVec;
+use secure_types::SecureVec;
 
 let secret_vec = SecureVec::from_vec(vec!).unwrap();
 
