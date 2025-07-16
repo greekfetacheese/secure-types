@@ -61,7 +61,7 @@ impl SecureString {
    }
 
    pub fn new_with_capacity(capacity: usize) -> Result<Self, Error> {
-      let vec = SecureVec::with_capacity(capacity)?;
+      let vec = SecureVec::new_with_capacity(capacity)?;
       Ok(SecureString { vec })
    }
 
@@ -153,7 +153,7 @@ impl SecureString {
             }
          });
 
-         let mut new_secure_vec = SecureVec::with_capacity(new_byte_len).unwrap();
+         let mut new_secure_vec = SecureVec::new_with_capacity(new_byte_len).unwrap();
          for &b in temp_new_content.iter() {
             new_secure_vec.push(b);
          }
@@ -236,7 +236,7 @@ impl From<&str> for SecureString {
       let bytes = s.as_bytes();
       let len = bytes.len();
 
-      let mut new_vec = SecureVec::with_capacity(len).unwrap();
+      let mut new_vec = SecureVec::new_with_capacity(len).unwrap();
       new_vec.len = len;
 
       new_vec.slice_mut_scope(|slice| {

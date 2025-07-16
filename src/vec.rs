@@ -11,7 +11,7 @@ use core::{
    ops::{Bound, RangeBounds},
    ptr::{self, NonNull},
 };
-use zeroize::Zeroize;
+use zeroize::{DefaultIsZeroes, Zeroize};
 
 #[cfg(feature = "std")]
 use super::page_size;
@@ -130,7 +130,7 @@ impl<T: Zeroize> SecureVec<T> {
       Ok(secure)
    }
 
-   pub fn with_capacity(mut capacity: usize) -> Result<Self, Error> {
+   pub fn new_with_capacity(mut capacity: usize) -> Result<Self, Error> {
       if capacity == 0 {
          capacity = 1;
       }
@@ -232,6 +232,35 @@ impl<T: Zeroize> SecureVec<T> {
       }
 
       Ok(secure)
+   }
+
+   /// Create a new `SecureVec` from a mutable slice.
+   /// The slice is zeroized afterwards
+   pub fn from_slice_mut(slice: &mut [T]) -> Result<Self, Error>
+   where
+      T: Clone + DefaultIsZeroes,
+   {
+      let mut secure_vec = SecureVec::new_with_capacity(slice.len())?;
+      secure_vec.len = slice.len();
+      secure_vec.slice_mut_scope(|dest_slice| {
+         dest_slice.clone_from_slice(slice);
+      });
+      slice.zeroize();
+      Ok(secure_vec)
+   }
+
+   /// Create a new `SecureVec` from a slice.
+   /// The slice is not zeroized, you are responsible for zeroizing it
+   pub fn from_slice(slice: &[T]) -> Result<Self, Error>
+   where
+      T: Clone,
+   {
+      let mut secure_vec = SecureVec::new_with_capacity(slice.len())?;
+      secure_vec.len = slice.len();
+      secure_vec.slice_mut_scope(|dest_slice| {
+         dest_slice.clone_from_slice(slice);
+      });
+      Ok(secure_vec)
    }
 
    pub fn len(&self) -> usize {
@@ -540,7 +569,7 @@ impl<T: Zeroize> SecureVec<T> {
 
 impl<T: Clone + Zeroize> Clone for SecureVec<T> {
    fn clone(&self) -> Self {
-      let mut new_vec: SecureVec<T> = SecureVec::with_capacity(self.capacity).unwrap();
+      let mut new_vec: SecureVec<T> = SecureVec::new_with_capacity(self.capacity).unwrap();
 
       new_vec.unlock_memory();
       self.unlock_memory();
@@ -795,11 +824,28 @@ mod tests {
    use std::sync::{Arc, Mutex};
 
    #[test]
-   fn test_creation() {
+   fn test_from_methods() {
       let vec: Vec<u8> = vec![1, 2, 3];
-      let _ = SecureVec::from_vec(vec);
-      let _: SecureVec<u8> = SecureVec::new().unwrap();
-      let _: SecureVec<u8> = SecureVec::with_capacity(3).unwrap();
+      let secure_vec = SecureVec::from_vec(vec).unwrap();
+
+      secure_vec.slice_scope(|slice| {
+         assert_eq!(slice, &[1, 2, 3]);
+      });
+
+      let mut slice = [3u8, 5];
+      let secure_slice = SecureVec::from_slice_mut(&mut slice).unwrap();
+      assert_eq!(slice, [0, 0]);
+
+      secure_slice.slice_scope(|slice| {
+         assert_eq!(slice, &[3, 5]);
+      });
+
+      let slice = [3u8, 5];
+      let secure_slice = SecureVec::from_slice(&slice).unwrap();
+
+      secure_slice.slice_scope(|slice| {
+         assert_eq!(slice, &[3, 5]);
+      });
    }
 
    #[test]
@@ -828,7 +874,7 @@ mod tests {
       assert!(encrypted);
       assert!(locked);
 
-      let secure: SecureVec<u8> = SecureVec::with_capacity(0).unwrap();
+      let secure: SecureVec<u8> = SecureVec::new_with_capacity(0).unwrap();
       let size = secure.allocated_byte_size();
       assert_eq!(size > 0, true);
 
@@ -989,7 +1035,7 @@ mod tests {
 
       assert_eq!(sum, 6);
 
-      let secure: SecureVec<u8> = SecureVec::with_capacity(3).unwrap();
+      let secure: SecureVec<u8> = SecureVec::new_with_capacity(3).unwrap();
       let sum: u8 = secure.iter_scope(|iter| iter.map(|&x| x).sum());
 
       assert_eq!(sum, 0);
