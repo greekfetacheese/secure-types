@@ -222,6 +222,15 @@ impl SecureString {
    }
 }
 
+
+#[cfg(feature = "std")]
+impl From<String> for SecureString {
+   fn from(s: String) -> SecureString {
+      let vec = SecureVec::from_vec(s.into_bytes()).unwrap();
+      SecureString { vec }
+   }
+}
+
 impl From<&str> for SecureString {
    fn from(s: &str) -> SecureString {
       let bytes = s.as_bytes();
@@ -285,18 +294,9 @@ mod tests {
    use super::*;
 
    #[test]
-   fn test_creation() {
-      let hello_world = "Hello, world!";
-      let hello_world2 = String::from(hello_world);
-
-      let _ = SecureString::from(hello_world);
-      let _ = SecureString::from(hello_world2.as_str());
-   }
-
-   #[test]
    fn test_clone() {
-      let hello_world = "Hello, world!";
-      let secure1 = SecureString::from(hello_world);
+      let hello_world = "Hello, world!".to_string();
+      let secure1 = SecureString::from(hello_world.clone());
       let secure2 = secure1.clone();
 
       secure2.str_scope(|str| {
