@@ -460,76 +460,89 @@ impl<T: Zeroize> SecureVec<T> {
    }
 
    pub fn push(&mut self, value: T) {
-      if self.len >= self.capacity {
-         // Reallocate
-         let new_capacity = if self.capacity == 0 {
-            1
-         } else {
-            self.capacity + 1
-         };
+      // Ensure there is enough capacity for at least one more element.
+      // The `reserve` method will handle reallocation if necessary, using
+      // an amortized growth strategy. It leaves the vector
+      // locked upon returning.
+      self.reserve(1);
 
-         let items_byte_size = new_capacity * mem::size_of::<T>();
+      self.unlock_memory();
 
-         // Allocate new memory
+      unsafe {
+         // Write the new value at the end of the vector.
+         core::ptr::write(self.ptr.as_ptr().add(self.len), value);
+
+         self.len += 1;
+      }
+
+      self.lock_memory();
+   }
+
+   /// Ensures that the vector has enough capacity for at least `additional` more elements.
+   ///
+   /// If more capacity is needed, it will reallocate. This may cause the buffer location to change.
+   ///
+   /// # Panics
+   ///
+   /// Panics if the new capacity overflows `usize` or if the allocation fails.
+   pub fn reserve(&mut self, additional: usize) {
+      if self.len() + additional <= self.capacity {
+         return;
+      }
+
+      // Use an amortized growth strategy to avoid reallocating on every push
+      let required_capacity = self.len() + additional;
+      let new_capacity = (self.capacity.max(1) * 2).max(required_capacity);
+
+      let new_items_byte_size = new_capacity * mem::size_of::<T>();
+
+      // Allocate new memory
+      #[cfg(feature = "std")]
+      let new_ptr = unsafe {
+         let aligned_allocation_size = (new_items_byte_size + page_size() - 1) & !(page_size() - 1);
+         memsec::malloc_sized(aligned_allocation_size)
+            .expect("Failed to allocate memory for SecureVec reserve")
+            .as_ptr() as *mut T
+      };
+
+      #[cfg(not(feature = "std"))]
+      let new_ptr = {
+         let layout = Layout::from_size_align(new_items_byte_size, mem::align_of::<T>())
+            .expect("Failed to create layout for SecureVec reserve");
+         let ptr = unsafe { alloc::alloc(layout) as *mut T };
+         if ptr.is_null() {
+            panic!("Memory allocation failed for SecureVec reserve");
+         }
+         ptr
+      };
+
+      // Copy data to new pointer, then erase and free old memory
+      unsafe {
+         self.unlock_memory();
+         core::ptr::copy_nonoverlapping(self.ptr.as_ptr(), new_ptr, self.len());
+
+         // Erase and free the old memory
+         if self.capacity > 0 {
+            let slice = core::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len);
+            for elem in slice.iter_mut() {
+               elem.zeroize();
+            }
+         }
          #[cfg(feature = "std")]
-         let new_ptr = unsafe {
-            let aligned_allocation_size = (items_byte_size + page_size() - 1) & !(page_size() - 1);
-            memsec::malloc_sized(aligned_allocation_size)
-               .expect("Failed to allocate memory")
-               .as_ptr() as *mut T
-         };
+         memsec::free(self.ptr);
 
          #[cfg(not(feature = "std"))]
-         let new_ptr = {
-            let layout = Layout::from_size_align(items_byte_size, mem::align_of::<T>())
-               .expect("Failed to allocate memory");
-            let ptr = unsafe { alloc::alloc(layout) as *mut T };
-            if ptr.is_null() {
-               panic!("Null pointer returned from alloc");
-            }
-            ptr
-         };
-
-         // Copy data to new pointer, erase and free old memory
-         unsafe {
-            self.unlock_memory();
-            core::ptr::copy_nonoverlapping(self.ptr.as_ptr(), new_ptr, self.len);
-            if self.capacity > 0 {
-               let slice = core::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len);
-               for elem in slice.iter_mut() {
-                  elem.zeroize();
-               }
-            }
-            #[cfg(feature = "std")]
-            memsec::free(self.ptr);
-
-            #[cfg(not(feature = "std"))]
-            {
-               let old_size = self.capacity * mem::size_of::<T>();
-               let old_layout = Layout::from_size_align_unchecked(old_size, mem::align_of::<T>());
-               dealloc(self.ptr.as_ptr() as *mut u8, old_layout);
-            }
-         }
-
-         // Update pointer and capacity
-         self.ptr = NonNull::new(new_ptr).expect("Failed to create NonNull");
-         self.capacity = new_capacity;
-
-         // write and lock
-         unsafe {
-            core::ptr::write(self.ptr.as_ptr().add(self.len), value);
-            self.len += 1;
-            self.lock_memory();
-         }
-      } else {
-         // Unlock, write, and relock
-         unsafe {
-            self.unlock_memory();
-            core::ptr::write(self.ptr.as_ptr().add(self.len), value);
-            self.len += 1;
-            self.lock_memory();
+         {
+            let old_size = self.capacity * mem::size_of::<T>();
+            let old_layout = Layout::from_size_align_unchecked(old_size, mem::align_of::<T>());
+            dealloc(self.ptr.as_ptr() as *mut u8, old_layout);
          }
       }
+
+      // Update pointer and capacity, then re-lock the new memory region
+      self.ptr = NonNull::new(new_ptr).expect("New pointer was null");
+      self.capacity = new_capacity;
+      self.lock_memory();
    }
 
    /// Creates a draining iterator that removes the specified range from the vector
@@ -985,6 +998,31 @@ mod tests {
       for i in 0..30 {
          secure.push(i);
       }
+   }
+
+   #[test]
+   fn test_reserve() {
+      let mut secure: SecureVec<u8> = SecureVec::new().unwrap();
+      secure.reserve(10);
+      assert_eq!(secure.capacity, 10);
+   }
+
+   #[test]
+   fn test_reserve_doubling() {
+      let mut secure: SecureVec<u8> = SecureVec::new().unwrap();
+      secure.reserve(10);
+
+      for i in 0..9 {
+         secure.push(i);
+      }
+
+      secure.push(9);
+      assert_eq!(secure.capacity, 10);
+      assert_eq!(secure.len(), 10);
+
+      secure.push(10);
+      assert_eq!(secure.capacity, 20);
+      assert_eq!(secure.len(), 11);
    }
 
    #[test]

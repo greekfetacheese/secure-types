@@ -1,6 +1,3 @@
-#[cfg(feature = "std")]
-use std::vec::Vec;
-
 use super::{Error, vec::SecureVec};
 use core::ops::Range;
 use zeroize::Zeroize;
@@ -123,7 +120,6 @@ impl SecureString {
       f(self)
    }
 
-   #[cfg(feature = "std")]
    pub fn insert_text_at_char_idx(&mut self, char_idx: usize, text_to_insert: &str) -> usize {
       let chars_to_insert_count = text_to_insert.chars().count();
       if chars_to_insert_count == 0 {
@@ -133,61 +129,45 @@ impl SecureString {
       let bytes_to_insert = text_to_insert.as_bytes();
       let insert_len = bytes_to_insert.len();
 
-      // Get byte_idx based on current content (before modification)
+      // Get the byte index corresponding to the character index
       let byte_idx = self
          .vec
          .slice_scope(|current_bytes| char_to_byte_idx(current_bytes, char_idx));
 
+      self.vec.reserve(insert_len);
+
       let old_byte_len = self.vec.len();
-      let new_byte_len = old_byte_len + insert_len;
 
-      if new_byte_len > self.vec.capacity {
-         // Reallocation
-         let mut temp_new_content = Vec::with_capacity(new_byte_len);
-         self.vec.slice_scope(|current_bytes| {
-            temp_new_content.extend_from_slice(&current_bytes[..byte_idx]);
-            temp_new_content.extend_from_slice(bytes_to_insert);
-            if byte_idx < old_byte_len {
-               // Ensure we don't slice out of bounds if inserting at end
-               temp_new_content.extend_from_slice(&current_bytes[byte_idx..]);
-            }
-         });
+      // Perform the insertion in-place
+      self.vec.unlock_memory();
+      unsafe {
+         let ptr = self.vec.as_mut_ptr();
 
-         let mut new_secure_vec = SecureVec::new_with_capacity(new_byte_len).unwrap();
-         for &b in temp_new_content.iter() {
-            new_secure_vec.push(b);
-         }
-         temp_new_content.zeroize();
-
-         let _old_secure_vec = core::mem::replace(&mut self.vec, new_secure_vec);
-      } else {
-         self.vec.unlock_memory();
-         unsafe {
-            let ptr = self.vec.as_mut_ptr();
-
-            if byte_idx < old_byte_len {
-               core::ptr::copy(
-                  ptr.add(byte_idx),
-                  ptr.add(byte_idx + insert_len),
-                  old_byte_len - byte_idx,
-               );
-            }
-
-            core::ptr::copy_nonoverlapping(
-               bytes_to_insert.as_ptr(),
+         // Shift the "tail" of the string (from the insertion point to the end)
+         // to the right to make a gap for the new content.
+         if byte_idx < old_byte_len {
+            core::ptr::copy(
                ptr.add(byte_idx),
-               insert_len,
+               ptr.add(byte_idx + insert_len),
+               old_byte_len - byte_idx,
             );
-
-            self.vec.len = new_byte_len;
          }
-         self.vec.lock_memory();
+
+         // Copy the new text into the newly created gap.
+         core::ptr::copy_nonoverlapping(
+            bytes_to_insert.as_ptr(),
+            ptr.add(byte_idx),
+            insert_len,
+         );
+
+         self.vec.len += insert_len;
       }
+
+      self.vec.lock_memory();
 
       chars_to_insert_count
    }
 
-   #[cfg(feature = "std")]
    pub fn delete_text_char_range(&mut self, char_range: core::ops::Range<usize>) {
       if char_range.start >= char_range.end {
          return;
@@ -220,7 +200,6 @@ impl SecureString {
       self.vec.len = new_len;
    }
 }
-
 
 #[cfg(feature = "std")]
 impl From<String> for SecureString {
@@ -280,7 +259,6 @@ impl<'de> serde::Deserialize<'de> for SecureString {
    }
 }
 
-#[cfg(feature = "std")]
 fn char_to_byte_idx(s_bytes: &[u8], char_idx: usize) -> usize {
    core::str::from_utf8(s_bytes)
       .ok()
