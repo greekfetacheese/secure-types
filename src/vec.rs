@@ -38,7 +38,7 @@ pub type SecureBytes = SecureVec<u8>;
 /// ## Program Termination
 ///
 /// Direct indexing (e.g., `vec[0]`) on a locked vector will cause the operating system
-/// to terminate the process with an access violation error. This is by design.
+/// to terminate the process with an access violation error.
 ///
 /// Always use the provided scope methods (`slice_scope`, `slice_mut_scope`) for safe access.
 ///
@@ -569,21 +569,15 @@ impl<T: Zeroize> SecureVec<T> {
 
 impl<T: Clone + Zeroize> Clone for SecureVec<T> {
    fn clone(&self) -> Self {
-      let mut new_vec: SecureVec<T> = SecureVec::new_with_capacity(self.capacity).unwrap();
-
-      new_vec.unlock_memory();
-      self.unlock_memory();
-
-      unsafe {
-         for i in 0..self.len {
-            let value = (*self.ptr.as_ptr().add(i)).clone();
-            core::ptr::write(new_vec.ptr.as_ptr().add(i), value);
-         }
-      }
-
+      let mut new_vec = SecureVec::new_with_capacity(self.capacity).unwrap();
       new_vec.len = self.len;
-      self.lock_memory();
-      new_vec.lock_memory();
+
+      self.slice_scope(|src_slice| {
+         new_vec.slice_mut_scope(|dest_slice| {
+            dest_slice.clone_from_slice(src_slice);
+         });
+      });
+
       new_vec
    }
 }
@@ -666,13 +660,8 @@ impl<'de> serde::Deserialize<'de> for SecureVec<u8> {
 /// This struct is created by the `drain` method on `SecureVec`.
 ///
 /// # Safety
-///
-/// The `Drain` iterator relies on being dropped to correctly handle memory
-/// (moving tail elements, zeroizing drained portions, and relocking memory).
-/// If `mem::forget` is called on `Drain`, the `SecureVec` will have its length
-/// zeroed, but the memory for the drained elements and tail might not be
-/// properly zeroized or relocked, potentially leading to data exposure if
-/// `memsec::free` doesn't zeroize.
+/// The returned `Drain` iterator must not be forgotten (via `mem::forget`).
+/// Forgetting the iterator sets the len of `SecureVec` to 0 and the memory will remain unlocked
 pub struct Drain<'a, T: Zeroize + 'a> {
    vec_ref: &'a mut SecureVec<T>,
    drain_start_index: usize,
@@ -917,7 +906,13 @@ mod tests {
    fn test_clone() {
       let vec: Vec<u8> = vec![1, 2, 3];
       let secure1 = SecureVec::from_vec(vec).unwrap();
-      let _secure2 = secure1.clone();
+      let secure2 = secure1.clone();
+
+      secure1.slice_scope(|slice| {
+         secure2.slice_scope(|slice2| {
+            assert_eq!(slice, slice2);
+         });
+      });
    }
 
    #[test]

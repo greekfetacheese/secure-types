@@ -159,8 +159,7 @@ impl SecureString {
          }
          temp_new_content.zeroize();
 
-         let mut old_vec_to_drop = core::mem::replace(&mut self.vec, new_secure_vec);
-         old_vec_to_drop.erase();
+         let _old_secure_vec = core::mem::replace(&mut self.vec, new_secure_vec);
       } else {
          self.vec.unlock_memory();
          unsafe {

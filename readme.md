@@ -32,10 +32,10 @@ For a `SecureVec`:
 ```rust
 use secure_types::SecureVec;
 
-let secret_vec = SecureVec::from_vec(vec!).unwrap();
+let secret_vec = SecureVec::from_vec(vec![1, 2, 3]).unwrap();
 
 secret_vec.slice_scope(|slice| {
-   assert_eq!(slice, &);
+   assert_eq!(slice, &[1, 2, 3]);
 });
 ```
 
@@ -44,11 +44,10 @@ secret_vec.slice_scope(|slice| {
 This crate is designed to mitigate certain risks but is not a perfect solution. It primarily protects secrets in program memory against:
 
 - **Disk Swapping**: The OS writing secrets to a page file.
-- **Cold Boot Attacks**: Recovering data from RAM after a shutdown.
 - **Malicious Memory Reads**: Malware that can steal data by reading a process's memory.
 - **Process Memory Dumps**: Data being exposed in a core dump.
 
-It **does not** protect against an attacker who can directly read your programs's memory (e.g., via admin rights or a kernel-level exploit, especially on Unix where we dont encrypt the memory).
+It **does not** protect against an attacker who can directly read your programs's memory (e.g., via admin rights or a kernel-level exploit, especially on Unix where we dont encrypt the memory, On Windows this shouldn't be an issue since the memory is first encrypted and then locked).
 
 ## Feature Flags
 
