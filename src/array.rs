@@ -350,7 +350,7 @@ impl<const LENGTH: usize> serde::Serialize for SecureArray<u8, LENGTH> {
    where
       S: serde::Serializer,
    {
-      self.unlocked_scope(|slice| serializer.serialize_bytes(slice))
+      self.unlocked_scope(|slice| serializer.collect_seq(slice.iter()))
    }
 }
 

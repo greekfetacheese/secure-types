@@ -649,8 +649,7 @@ impl serde::Serialize for SecureVec<u8> {
    where
       S: serde::Serializer,
    {
-      let res = self.slice_scope(|slice| serializer.collect_seq(slice.iter()));
-      res
+      self.slice_scope(|slice| serializer.collect_seq(slice.iter()))
    }
 }
 

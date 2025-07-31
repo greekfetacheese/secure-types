@@ -218,3 +218,46 @@ pub fn crypt_unprotect_memory(ptr: *mut u8, size_in_bytes: usize) -> bool {
       true
    }
 }
+
+#[cfg(test)]
+mod tests {
+   #[cfg(feature = "serde")]
+   #[test]
+   fn test_array_and_secure_vec_serde_compatibility() {
+      use super::*;
+      let array: SecureArray<u8, 3> = SecureArray::new([1, 2, 3]).unwrap();
+      let vec: SecureVec<u8> = array.clone().into();
+
+      let array_json_string = serde_json::to_string(&array).unwrap();
+      let array_json_bytes = serde_json::to_vec(&array).unwrap();
+      let vec_json_string = serde_json::to_string(&vec).unwrap();
+      let vec_json_bytes = serde_json::to_vec(&vec).unwrap();
+
+      assert_eq!(array_json_string, vec_json_string);
+      assert_eq!(array_json_bytes, vec_json_bytes);
+
+      let deserialized_array_from_string: SecureArray<u8, 3> =
+         serde_json::from_str(&array_json_string).unwrap();
+
+      let deserialized_array_from_bytes: SecureArray<u8, 3> =
+         serde_json::from_slice(&array_json_bytes).unwrap();
+
+      let deserialized_vec_from_string: SecureVec<u8> =
+         serde_json::from_str(&vec_json_string).unwrap();
+
+      let deserialized_vec_from_bytes: SecureVec<u8> =
+         serde_json::from_slice(&vec_json_bytes).unwrap();
+
+      deserialized_array_from_string.unlocked_scope(|slice| {
+         deserialized_vec_from_string.slice_scope(|slice2| {
+            assert_eq!(slice, slice2);
+         });
+      });
+
+      deserialized_array_from_bytes.unlocked_scope(|slice| {
+         deserialized_vec_from_bytes.slice_scope(|slice2| {
+            assert_eq!(slice, slice2);
+         });
+      });
+   }
+}
