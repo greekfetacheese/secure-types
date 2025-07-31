@@ -336,12 +336,19 @@ mod tests {
 
    #[cfg(feature = "serde")]
    #[test]
-   fn test_secure_string_serde() {
+   fn test_serde() {
       let hello_world = "Hello, world!";
       let secure = SecureString::from(hello_world);
-      let json = serde_json::to_string(&secure).expect("Serialization failed");
-      let deserialized: SecureString = serde_json::from_str(&json).expect("Deserialization failed");
-      deserialized.str_scope(|str| {
+      let json_string = serde_json::to_string(&secure).expect("Serialization failed");
+      let json_bytes = serde_json::to_vec(&secure).expect("Serialization failed");
+      let deserialized_string: SecureString = serde_json::from_str(&json_string).expect("Deserialization failed");
+      let deserialized_bytes: SecureString = serde_json::from_slice(&json_bytes).expect("Deserialization failed");
+
+      deserialized_string.str_scope(|str| {
+         assert_eq!(str, hello_world);
+      });
+
+      deserialized_bytes.str_scope(|str| {
          assert_eq!(str, hello_world);
       });
    }

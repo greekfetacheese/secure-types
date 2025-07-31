@@ -344,6 +344,57 @@ where
    }
 }
 
+#[cfg(feature = "serde")]
+impl<const LENGTH: usize> serde::Serialize for SecureArray<u8, LENGTH> {
+   fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+   where
+      S: serde::Serializer,
+   {
+      self.unlocked_scope(|slice| serializer.serialize_bytes(slice))
+   }
+}
+
+#[cfg(feature = "serde")]
+impl<'de, const LENGTH: usize> serde::Deserialize<'de> for SecureArray<u8, LENGTH> {
+   fn deserialize<D>(deserializer: D) -> Result<SecureArray<u8, LENGTH>, D::Error>
+   where
+      D: serde::Deserializer<'de>,
+   {
+      struct SecureArrayVisitor<const L: usize>;
+
+      impl<'de, const L: usize> serde::de::Visitor<'de> for SecureArrayVisitor<L> {
+         type Value = SecureArray<u8, L>;
+
+         fn expecting(&self, formatter: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+            write!(formatter, "a byte array of length {}", L)
+         }
+
+         fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+         where
+            A: serde::de::SeqAccess<'de>,
+         {
+            let mut data: SecureVec<u8> =
+               SecureVec::new_with_capacity(L).map_err(serde::de::Error::custom)?;
+            while let Some(byte) = seq.next_element()? {
+               data.push(byte);
+            }
+
+            // Check that the deserialized data has the exact length required.
+            if data.len() != L {
+               return Err(serde::de::Error::invalid_length(
+                  data.len(),
+                  &self,
+               ));
+            }
+
+            SecureArray::try_from(data).map_err(serde::de::Error::custom)
+         }
+      }
+
+      deserializer.deserialize_bytes(SecureArrayVisitor::<LENGTH>)
+   }
+}
+
 #[cfg(all(test, feature = "std"))]
 mod tests {
    use super::*;
@@ -494,6 +545,28 @@ mod tests {
 
       array.unlocked_scope(|slice| {
          assert_eq!(slice, &[1, 100, 3]);
+      });
+   }
+
+   #[cfg(feature = "serde")]
+   #[test]
+   fn test_serde() {
+      let array: SecureArray<u8, 3> = SecureArray::new([1, 2, 3]).unwrap();
+      let json_string = serde_json::to_string(&array).expect("Serialization failed");
+      let json_bytes = serde_json::to_vec(&array).expect("Serialization failed");
+      
+      let deserialized_string: SecureArray<u8, 3> =
+         serde_json::from_str(&json_string).expect("Deserialization failed");
+
+      let deserialized_bytes: SecureArray<u8, 3> =
+         serde_json::from_slice(&json_bytes).expect("Deserialization failed");
+
+      deserialized_string.unlocked_scope(|slice| {
+         assert_eq!(slice, &[1, 2, 3]);
+      });
+
+      deserialized_bytes.unlocked_scope(|slice| {
+         assert_eq!(slice, &[1, 2, 3]);
       });
    }
 }
