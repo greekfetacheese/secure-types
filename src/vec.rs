@@ -4,7 +4,7 @@ use alloc::{Layout, alloc, dealloc};
 #[cfg(feature = "std")]
 use std::vec::Vec;
 
-use super::Error;
+use super::{Error, SecureArray};
 use core::{
    marker::PhantomData,
    mem,
@@ -595,6 +595,22 @@ impl<T: Clone + Zeroize> Clone for SecureVec<T> {
    }
 }
 
+impl<const LENGTH: usize> From<SecureArray<u8, LENGTH>> for SecureVec<u8> {
+   fn from(array: SecureArray<u8, LENGTH>) -> Self {
+      let mut new_vec = SecureVec::new_with_capacity(LENGTH)
+         .expect("Failed to allocate SecureVec during conversion");
+      new_vec.len = array.len();
+
+      array.unlocked_scope(|array_slice| {
+         new_vec.slice_mut_scope(|vec_slice| {
+            vec_slice.copy_from_slice(array_slice);
+         });
+      });
+
+      new_vec
+   }
+}
+
 impl<T: Zeroize> Drop for SecureVec<T> {
    fn drop(&mut self) {
       self.erase();
@@ -847,6 +863,16 @@ mod tests {
 
       secure_slice.slice_scope(|slice| {
          assert_eq!(slice, &[3, 5]);
+      });
+   }
+
+   #[test]
+   fn test_from_secure_array() {
+      let array: SecureArray<u8, 3> = SecureArray::new([1, 2, 3]).unwrap();
+      let vec: SecureVec<u8> = array.into();
+      assert_eq!(vec.len(), 3);
+      vec.slice_scope(|slice| {
+         assert_eq!(slice, &[1, 2, 3]);
       });
    }
 

@@ -96,6 +96,8 @@ pub enum Error {
    LockFailed,
    #[error("Failed to unlock memory")]
    UnlockFailed,
+   #[error("Source length does not match the fixed size of the destination array")]
+   LengthMismatch,
 }
 
 #[cfg(not(feature = "std"))]

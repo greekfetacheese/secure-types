@@ -1,7 +1,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::{Layout, alloc, dealloc};
 
-use super::Error;
+use super::{Error, SecureVec};
 use core::{marker::PhantomData, mem, ptr::NonNull};
 use zeroize::Zeroize;
 
@@ -310,6 +310,30 @@ impl<T: Clone + Zeroize, const LENGTH: usize> Clone for SecureArray<T, LENGTH> {
    }
 }
 
+impl<const LENGTH: usize> TryFrom<SecureVec<u8>> for SecureArray<u8, LENGTH> {
+   type Error = Error;
+
+   /// Tries to convert a `SecureVec<u8>` into a `SecureArray<u8, LENGTH>`.
+   ///
+   /// This operation will only succeed if `vec.len() == LENGTH`.
+   /// The original `SecureVec` is consumed.
+   fn try_from(vec: SecureVec<u8>) -> Result<Self, Self::Error> {
+      if vec.len() != LENGTH {
+         return Err(Error::LengthMismatch);
+      }
+
+      let mut new_array = Self::empty()?;
+
+      vec.slice_scope(|vec_slice| {
+         new_array.unlocked_mut_scope(|array_slice| {
+            array_slice.copy_from_slice(vec_slice);
+         });
+      });
+
+      Ok(new_array)
+   }
+}
+
 impl<T, const LENGTH: usize> TryFrom<[T; LENGTH]> for SecureArray<T, LENGTH>
 where
    T: Zeroize,
@@ -329,6 +353,16 @@ mod tests {
    #[test]
    fn test_creation() {
       let array: SecureArray<u8, 3> = SecureArray::new([1, 2, 3]).unwrap();
+      assert_eq!(array.len(), 3);
+      array.unlocked_scope(|slice| {
+         assert_eq!(slice, &[1, 2, 3]);
+      });
+   }
+
+   #[test]
+   fn test_from_secure_vec() {
+      let vec: SecureVec<u8> = SecureVec::from_slice(&[1, 2, 3]).unwrap();
+      let array: SecureArray<u8, 3> = vec.try_into().unwrap();
       assert_eq!(array.len(), 3);
       array.unlocked_scope(|slice| {
          assert_eq!(slice, &[1, 2, 3]);

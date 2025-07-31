@@ -71,7 +71,7 @@ impl SecureString {
    }
 
    pub fn drain(&mut self, range: Range<usize>) {
-      let _ = self.vec.drain(range);
+      let _d = self.vec.drain(range);
    }
 
    pub fn char_len(&self) -> usize {
@@ -225,6 +225,14 @@ impl From<&str> for SecureString {
    }
 }
 
+impl From<SecureVec<u8>> for SecureString {
+   fn from(vec: SecureVec<u8>) -> Self {
+      let mut new_string = SecureString::new().unwrap();
+      new_string.vec = vec;
+      new_string
+   }
+}
+
 #[cfg(feature = "serde")]
 impl serde::Serialize for SecureString {
    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -278,6 +286,21 @@ mod tests {
 
       secure2.str_scope(|str| {
          assert_eq!(str, hello_world);
+      });
+   }
+
+   #[test]
+   fn test_from_secure_vec() {
+      let hello_world = "Hello, world!".to_string();
+      let vec: SecureVec<u8> = SecureVec::from_slice(hello_world.as_bytes()).unwrap();
+      
+      let string = SecureString::from(hello_world);
+      let string2 = SecureString::from(vec);
+
+      string.str_scope(|str| {
+         string2.str_scope(|str2| {
+            assert_eq!(str, str2);
+         });
       });
    }
 
