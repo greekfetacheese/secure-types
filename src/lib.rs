@@ -54,8 +54,7 @@
 //!
 //! - `std` (default): Enables all OS-level security features like memory locking and encryption.
 //! - `serde`: Enables serialization and deserialization for `SecureString` and `SecureBytes` via the Serde framework.
-//! - `no_std`: Compiles the crate in a `no_std` environment. In this mode, only the **Zeroize on Drop**
-//!   guarantee is provided. This is useful for embedded systems or WebAssembly.
+//! - `no_std`: Compiles the crate in a `no_std` environment. In this mode, only the **Zeroize on Drop** applys.
 
 #![cfg_attr(feature = "no_std", no_std)]
 
@@ -118,6 +117,7 @@ use windows_sys::Win32::Security::Cryptography::{
 use windows_sys::Win32::System::SystemInformation::GetSystemInfo;
 
 #[cfg(feature = "std")]
+/// Returns the page size depending on the OS
 pub fn page_size() -> usize {
    #[cfg(unix)]
    {
@@ -132,6 +132,12 @@ pub fn page_size() -> usize {
          (*si.as_ptr()).dwPageSize as usize
       }
    }
+}
+
+#[cfg(feature = "std")]
+/// Returns the page aligned size of a given size
+pub fn page_aligned_size(size: usize) -> usize {
+   (size + page_size() - 1) & !(page_size() - 1)
 }
 
 #[cfg(feature = "std")]

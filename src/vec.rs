@@ -14,7 +14,7 @@ use core::{
 use zeroize::{DefaultIsZeroes, Zeroize};
 
 #[cfg(feature = "std")]
-use super::page_size;
+use super::page_aligned_size;
 #[cfg(feature = "std")]
 use memsec::Prot;
 
@@ -90,7 +90,7 @@ impl<T: Zeroize> SecureVec<T> {
 
       #[cfg(feature = "std")]
       let ptr = unsafe {
-         let aligned_size = (size + page_size() - 1) & !(page_size() - 1);
+         let aligned_size = page_aligned_size(size);
          let allocated_ptr = memsec::malloc_sized(aligned_size);
          let ptr = allocated_ptr.ok_or(Error::AllocationFailed)?;
          ptr.as_ptr() as *mut T
@@ -139,7 +139,7 @@ impl<T: Zeroize> SecureVec<T> {
 
       #[cfg(feature = "std")]
       let ptr = unsafe {
-         let aligned_size = (size + page_size() - 1) & !(page_size() - 1);
+         let aligned_size = page_aligned_size(size);
          let allocated_ptr = memsec::malloc_sized(aligned_size);
          let ptr = allocated_ptr.ok_or(Error::AllocationFailed)?;
          ptr.as_ptr() as *mut T
@@ -193,7 +193,7 @@ impl<T: Zeroize> SecureVec<T> {
       let size = capacity * mem::size_of::<T>();
 
       let ptr = unsafe {
-         let aligned_size = (size + page_size() - 1) & !(page_size() - 1);
+         let aligned_size = page_aligned_size(size);
          let allocated_ptr = memsec::malloc_sized(aligned_size);
          if allocated_ptr.is_none() {
             vec.zeroize();
@@ -276,11 +276,11 @@ impl<T: Zeroize> SecureVec<T> {
    }
 
    #[allow(dead_code)]
-   fn allocated_byte_size(&self) -> usize {
+   fn aligned_size(&self) -> usize {
       let size = self.capacity * mem::size_of::<T>();
       #[cfg(feature = "std")]
       {
-         (size + page_size() - 1) & !(page_size() - 1)
+         page_aligned_size(size)
       }
       #[cfg(not(feature = "std"))]
       {
@@ -291,13 +291,13 @@ impl<T: Zeroize> SecureVec<T> {
    #[cfg(all(feature = "std", windows))]
    fn encypt_memory(&self) -> bool {
       let ptr = self.as_ptr() as *mut u8;
-      super::crypt_protect_memory(ptr, self.allocated_byte_size())
+      super::crypt_protect_memory(ptr, self.aligned_size())
    }
 
    #[cfg(all(feature = "std", windows))]
    fn decrypt_memory(&self) -> bool {
       let ptr = self.as_ptr() as *mut u8;
-      super::crypt_unprotect_memory(ptr, self.allocated_byte_size())
+      super::crypt_unprotect_memory(ptr, self.aligned_size())
    }
 
    /// Lock the memory region
@@ -460,10 +460,6 @@ impl<T: Zeroize> SecureVec<T> {
    }
 
    pub fn push(&mut self, value: T) {
-      // Ensure there is enough capacity for at least one more element.
-      // The `reserve` method will handle reallocation if necessary, using
-      // an amortized growth strategy. It leaves the vector
-      // locked upon returning.
       self.reserve(1);
 
       self.unlock_memory();
@@ -499,7 +495,7 @@ impl<T: Zeroize> SecureVec<T> {
       // Allocate new memory
       #[cfg(feature = "std")]
       let new_ptr = unsafe {
-         let aligned_allocation_size = (new_items_byte_size + page_size() - 1) & !(page_size() - 1);
+         let aligned_allocation_size = page_aligned_size(new_items_byte_size);
          memsec::malloc_sized(aligned_allocation_size)
             .expect("Failed to allocate memory for SecureVec reserve")
             .as_ptr() as *mut T
@@ -878,7 +874,7 @@ mod tests {
    #[test]
    fn lock_unlock() {
       let secure: SecureVec<u8> = SecureVec::new().unwrap();
-      let size = secure.allocated_byte_size();
+      let size = secure.aligned_size();
       assert_eq!(size > 0, true);
 
       let (decrypted, unlocked) = secure.unlock_memory();
@@ -890,7 +886,7 @@ mod tests {
       assert!(locked);
 
       let secure: SecureVec<u8> = SecureVec::from_vec(vec![]).unwrap();
-      let size = secure.allocated_byte_size();
+      let size = secure.aligned_size();
       assert_eq!(size > 0, true);
 
       let (decrypted, unlocked) = secure.unlock_memory();
@@ -902,7 +898,7 @@ mod tests {
       assert!(locked);
 
       let secure: SecureVec<u8> = SecureVec::new_with_capacity(0).unwrap();
-      let size = secure.allocated_byte_size();
+      let size = secure.aligned_size();
       assert_eq!(size > 0, true);
 
       let (decrypted, unlocked) = secure.unlock_memory();

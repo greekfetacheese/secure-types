@@ -6,7 +6,7 @@ use core::{marker::PhantomData, mem, ptr::NonNull};
 use zeroize::Zeroize;
 
 #[cfg(feature = "std")]
-use super::page_size;
+use super::page_aligned_size;
 #[cfg(feature = "std")]
 use memsec::Prot;
 
@@ -63,7 +63,7 @@ where
 
       #[cfg(feature = "std")]
       let new_ptr = {
-         let aligned_size = (size + page_size() - 1) & !(page_size() - 1);
+         let aligned_size = page_aligned_size(size);
          let allocated_ptr = unsafe { memsec::malloc_sized(aligned_size) };
          allocated_ptr.ok_or(Error::AllocationFailed)?.as_ptr() as *mut T
       };
@@ -146,11 +146,11 @@ where
    }
 
    #[allow(dead_code)]
-   fn allocated_byte_size(&self) -> usize {
+   fn aligned_size(&self) -> usize {
       let size = self.len() * mem::size_of::<T>();
       #[cfg(feature = "std")]
       {
-         (size + page_size() - 1) & !(page_size() - 1)
+         page_aligned_size(size)
       }
       #[cfg(not(feature = "std"))]
       {
@@ -161,13 +161,13 @@ where
    #[cfg(all(feature = "std", windows))]
    fn encypt_memory(&self) -> bool {
       let ptr = self.as_ptr() as *mut u8;
-      super::crypt_protect_memory(ptr, self.allocated_byte_size())
+      super::crypt_protect_memory(ptr, self.aligned_size())
    }
 
    #[cfg(all(feature = "std", windows))]
    fn decrypt_memory(&self) -> bool {
       let ptr = self.as_ptr() as *mut u8;
-      super::crypt_unprotect_memory(ptr, self.allocated_byte_size())
+      super::crypt_unprotect_memory(ptr, self.aligned_size())
    }
 
    pub(crate) fn lock_memory(&self) -> (bool, bool) {
@@ -430,6 +430,34 @@ mod tests {
    }
 
    #[test]
+   fn lock_unlock() {
+      let array = [1, 2, 3];
+      let secure: SecureArray<u8, 3> = SecureArray::new(array).unwrap();
+      let size = secure.aligned_size();
+      assert_eq!(size > 0, true);
+
+      let (decrypted, unlocked) = secure.unlock_memory();
+      assert!(decrypted);
+      assert!(unlocked);
+
+      let (encrypted, locked) = secure.lock_memory();
+      assert!(encrypted);
+      assert!(locked);
+
+      let secure: SecureArray<u8, 3> = SecureArray::empty().unwrap();
+      let size = secure.aligned_size();
+      assert_eq!(size > 0, true);
+
+      let (decrypted, unlocked) = secure.unlock_memory();
+      assert!(decrypted);
+      assert!(unlocked);
+
+      let (encrypted, locked) = secure.lock_memory();
+      assert!(encrypted);
+      assert!(locked);
+   }
+
+   #[test]
    fn test_clone() {
       let mut array1: SecureArray<u8, 3> = SecureArray::empty().unwrap();
       array1.unlocked_mut_scope(|slice| {
@@ -554,7 +582,7 @@ mod tests {
       let array: SecureArray<u8, 3> = SecureArray::new([1, 2, 3]).unwrap();
       let json_string = serde_json::to_string(&array).expect("Serialization failed");
       let json_bytes = serde_json::to_vec(&array).expect("Serialization failed");
-      
+
       let deserialized_string: SecureArray<u8, 3> =
          serde_json::from_str(&json_string).expect("Deserialization failed");
 

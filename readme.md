@@ -47,7 +47,6 @@ This crate is designed to mitigate certain risks but is not a perfect solution. 
 - **Malicious Memory Reads**: Malware that can steal data by reading a process's memory.
 - **Process Memory Dumps**: Data being exposed in a core dump.
 
-It **does not** protect against an attacker who can directly read your programs's memory (e.g., via admin rights or a kernel-level exploit, especially on Unix where we dont encrypt the memory, On Windows this shouldn't be an issue since the memory is first encrypted and then locked).
 
 ## Feature Flags
 

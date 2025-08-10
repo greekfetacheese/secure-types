@@ -13,7 +13,7 @@ use zeroize::Zeroize;
 /// `SecureString` enforces the same security model as `SecureVec`:
 /// - **Zeroization on Drop**: The string's buffer is securely wiped clean.
 /// - **Memory Locking & Encryption**: When the `std` feature is enabled, the buffer is
-///   protected against OS-level spying via disk swaps or memory inspection tools.
+///   protected against disk swaps or memory inspection tools.
 ///
 /// Access to the string contents is provided through scoped methods like `str_scope`,
 /// which ensure the memory is only unlocked for the briefest possible time.
