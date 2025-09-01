@@ -40,7 +40,7 @@
 //! // The memory is locked and protected here. Direct access is not possible.
 //!
 //! // Use a scope to safely access the content as a &str.
-//! secret.str_scope(|unlocked_str| {
+//! secret.unlock_str(|unlocked_str| {
 //!     assert_eq!(unlocked_str, "my_super_secret_password");
 //!     println!("The secret is: {}", unlocked_str);
 //! });
@@ -151,24 +151,24 @@ pub fn mprotect<T>(ptr: NonNull<T>, prot: Prot::Ty) -> bool {
 }
 
 #[cfg(all(feature = "std", windows))]
-pub fn crypt_protect_memory(ptr: *mut u8, size_in_bytes: usize) -> bool {
-   if size_in_bytes == 0 {
+pub fn crypt_protect_memory(ptr: *mut u8, aligned_size: usize) -> bool {
+   if aligned_size == 0 {
       return true; // Nothing to encrypt
    }
 
-   if size_in_bytes % (CRYPTPROTECTMEMORY_BLOCK_SIZE as usize) != 0 {
+   if aligned_size % (CRYPTPROTECTMEMORY_BLOCK_SIZE as usize) != 0 {
       // not a multiple of CRYPTPROTECTMEMORY_BLOCK_SIZE
       return false;
    }
 
-   if size_in_bytes > u32::MAX as usize {
+   if aligned_size > u32::MAX as usize {
       return false;
    }
 
    let result = unsafe {
       CryptProtectMemory(
          ptr as *mut core::ffi::c_void,
-         size_in_bytes as u32,
+         aligned_size as u32,
          CRYPTPROTECTMEMORY_SAME_PROCESS,
       )
    };
@@ -254,14 +254,14 @@ mod tests {
       let deserialized_vec_from_bytes: SecureVec<u8> =
          serde_json::from_slice(&vec_json_bytes).unwrap();
 
-      deserialized_array_from_string.unlocked_scope(|slice| {
-         deserialized_vec_from_string.slice_scope(|slice2| {
+      deserialized_array_from_string.unlock(|slice| {
+         deserialized_vec_from_string.unlock_slice(|slice2| {
             assert_eq!(slice, slice2);
          });
       });
 
-      deserialized_array_from_bytes.unlocked_scope(|slice| {
-         deserialized_vec_from_bytes.slice_scope(|slice2| {
+      deserialized_array_from_bytes.unlock(|slice| {
+         deserialized_vec_from_bytes.unlock_slice(|slice2| {
             assert_eq!(slice, slice2);
          });
       });

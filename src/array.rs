@@ -32,7 +32,7 @@ use memsec::Prot;
 /// let key_data = [1u8; 32];
 /// let secure_key: SecureArray<u8, 32> = SecureArray::new(key_data).unwrap();
 ///
-/// secure_key.unlocked_scope(|unlocked_slice| {
+/// secure_key.unlock(|unlocked_slice| {
 ///     assert_eq!(unlocked_slice.len(), 32);
 ///     assert_eq!(unlocked_slice[0], 1);
 /// });
@@ -216,8 +216,8 @@ where
       }
    }
 
-   /// Provides scoped, immutable access to the array's data as a slice.
-   pub fn unlocked_scope<F, R>(&self, f: F) -> R
+   /// Immutable access to the array's data as a `&[T]`
+   pub fn unlock<F, R>(&self, f: F) -> R
    where
       F: FnOnce(&[T]) -> R,
    {
@@ -228,8 +228,8 @@ where
       result
    }
 
-   /// Provides scoped, mutable access to the array's data as a mutable slice.
-   pub fn unlocked_mut_scope<F, R>(&mut self, f: F) -> R
+   /// Mutable access to the array's data as a `&mut [T]`
+   pub fn unlock_mut<F, R>(&mut self, f: F) -> R
    where
       F: FnOnce(&mut [T]) -> R,
    {
@@ -242,7 +242,7 @@ where
 
    /// Securely erases the contents of the array by zeroizing the memory.
    pub fn erase(&mut self) {
-      self.unlocked_mut_scope(|slice| {
+      self.unlock_mut(|slice| {
          for element in slice.iter_mut() {
             element.zeroize();
          }
@@ -301,8 +301,8 @@ impl<T: Zeroize, const LENGTH: usize> Drop for SecureArray<T, LENGTH> {
 impl<T: Clone + Zeroize, const LENGTH: usize> Clone for SecureArray<T, LENGTH> {
    fn clone(&self) -> Self {
       let mut new_array = Self::empty().unwrap();
-      self.unlocked_scope(|src_slice| {
-         new_array.unlocked_mut_scope(|dest_slice| {
+      self.unlock(|src_slice| {
+         new_array.unlock_mut(|dest_slice| {
             dest_slice.clone_from_slice(src_slice);
          });
       });
@@ -324,8 +324,8 @@ impl<const LENGTH: usize> TryFrom<SecureVec<u8>> for SecureArray<u8, LENGTH> {
 
       let mut new_array = Self::empty()?;
 
-      vec.slice_scope(|vec_slice| {
-         new_array.unlocked_mut_scope(|array_slice| {
+      vec.unlock_slice(|vec_slice| {
+         new_array.unlock_mut(|array_slice| {
             array_slice.copy_from_slice(vec_slice);
          });
       });
@@ -350,7 +350,7 @@ impl<const LENGTH: usize> serde::Serialize for SecureArray<u8, LENGTH> {
    where
       S: serde::Serializer,
    {
-      self.unlocked_scope(|slice| serializer.collect_seq(slice.iter()))
+      self.unlock(|slice| serializer.collect_seq(slice.iter()))
    }
 }
 
@@ -405,7 +405,7 @@ mod tests {
    fn test_creation() {
       let array: SecureArray<u8, 3> = SecureArray::new([1, 2, 3]).unwrap();
       assert_eq!(array.len(), 3);
-      array.unlocked_scope(|slice| {
+      array.unlock(|slice| {
          assert_eq!(slice, &[1, 2, 3]);
       });
    }
@@ -415,7 +415,7 @@ mod tests {
       let vec: SecureVec<u8> = SecureVec::from_slice(&[1, 2, 3]).unwrap();
       let array: SecureArray<u8, 3> = vec.try_into().unwrap();
       assert_eq!(array.len(), 3);
-      array.unlocked_scope(|slice| {
+      array.unlock(|slice| {
          assert_eq!(slice, &[1, 2, 3]);
       });
    }
@@ -424,7 +424,7 @@ mod tests {
    fn test_erase() {
       let mut array: SecureArray<u8, 3> = SecureArray::new([1, 2, 3]).unwrap();
       array.erase();
-      array.unlocked_scope(|slice| {
+      array.unlock(|slice| {
          assert_eq!(slice, &[0u8; 3]);
       });
    }
@@ -460,7 +460,7 @@ mod tests {
    #[test]
    fn test_clone() {
       let mut array1: SecureArray<u8, 3> = SecureArray::empty().unwrap();
-      array1.unlocked_mut_scope(|slice| {
+      array1.unlock_mut(|slice| {
          slice[0] = 1;
          slice[1] = 2;
          slice[2] = 3;
@@ -468,11 +468,11 @@ mod tests {
 
       let array2 = array1.clone();
 
-      array2.unlocked_scope(|slice| {
+      array2.unlock(|slice| {
          assert_eq!(slice, &[1, 2, 3]);
       });
 
-      array1.unlocked_scope(|slice| {
+      array1.unlock(|slice| {
          assert_eq!(slice, &[1, 2, 3]);
       });
    }
@@ -487,7 +487,7 @@ mod tests {
          let array_clone = Arc::clone(&arc_array);
          let handle = std::thread::spawn(move || {
             let mut guard = array_clone.lock().unwrap();
-            guard.unlocked_mut_scope(|slice| {
+            guard.unlock_mut(|slice| {
                slice[0] += 1;
             });
          });
@@ -499,7 +499,7 @@ mod tests {
       }
 
       let final_array = arc_array.lock().unwrap();
-      final_array.unlocked_scope(|slice| {
+      final_array.unlock(|slice| {
          assert_eq!(slice[0], 6);
       });
    }
@@ -567,11 +567,11 @@ mod tests {
    fn test_mutable_access_in_scope() {
       let mut array: SecureArray<u8, 3> = SecureArray::new([1, 2, 3]).unwrap();
 
-      array.unlocked_mut_scope(|slice| {
+      array.unlock_mut(|slice| {
          slice[1] = 100;
       });
 
-      array.unlocked_scope(|slice| {
+      array.unlock(|slice| {
          assert_eq!(slice, &[1, 100, 3]);
       });
    }
@@ -589,11 +589,11 @@ mod tests {
       let deserialized_bytes: SecureArray<u8, 3> =
          serde_json::from_slice(&json_bytes).expect("Deserialization failed");
 
-      deserialized_string.unlocked_scope(|slice| {
+      deserialized_string.unlock(|slice| {
          assert_eq!(slice, &[1, 2, 3]);
       });
 
-      deserialized_bytes.unlocked_scope(|slice| {
+      deserialized_bytes.unlock(|slice| {
          assert_eq!(slice, &[1, 2, 3]);
       });
    }

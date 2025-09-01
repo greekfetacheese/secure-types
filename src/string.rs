@@ -40,7 +40,7 @@ use zeroize::Zeroize;
 /// // The memory is locked here.
 ///
 /// // Use a scope to safely access the content as a &str.
-/// secret.str_scope(|exposed_str| {
+/// secret.unlock_str(|exposed_str| {
 ///     assert_eq!(exposed_str, "my_super_secret_password");
 /// });
 ///
@@ -75,7 +75,7 @@ impl SecureString {
    }
 
    pub fn char_len(&self) -> usize {
-      self.str_scope(|s| s.chars().count())
+      self.unlock_str(|s| s.chars().count())
    }
 
    /// Push a `&str` into the `SecureString`
@@ -94,11 +94,11 @@ impl SecureString {
    ///  You can actually return a new allocated `String` from this function
    ///
    ///  If you do that you are responsible for zeroizing its contents
-   pub fn str_scope<F, R>(&self, f: F) -> R
+   pub fn unlock_str<F, R>(&self, f: F) -> R
    where
       F: FnOnce(&str) -> R,
    {
-      self.vec.slice_scope(|slice| {
+      self.vec.unlock_slice(|slice| {
          let str = core::str::from_utf8(slice).unwrap();
          let result = f(str);
          result
@@ -113,7 +113,7 @@ impl SecureString {
    /// You can actually return a new allocated `String` from this function
    ///
    /// If you do that you are responsible for zeroizing its contents
-   pub fn mut_scope<F, R>(&mut self, f: F) -> R
+   pub fn unlock_mut<F, R>(&mut self, f: F) -> R
    where
       F: FnOnce(&mut SecureString) -> R,
    {
@@ -132,7 +132,7 @@ impl SecureString {
       // Get the byte index corresponding to the character index
       let byte_idx = self
          .vec
-         .slice_scope(|current_bytes| char_to_byte_idx(current_bytes, char_idx));
+         .unlock_slice(|current_bytes| char_to_byte_idx(current_bytes, char_idx));
 
       self.vec.reserve(insert_len);
 
@@ -173,13 +173,13 @@ impl SecureString {
          return;
       }
 
-      let (byte_start, byte_end) = self.str_scope(|str| {
+      let (byte_start, byte_end) = self.unlock_str(|str| {
          let byte_start = char_to_byte_idx(str.as_bytes(), char_range.start);
          let byte_end = char_to_byte_idx(str.as_bytes(), char_range.end);
          (byte_start, byte_end)
       });
 
-      let new_len = self.vec.slice_mut_scope(|current_bytes| {
+      let new_len = self.vec.unlock_slice_mut(|current_bytes| {
          if byte_start >= byte_end || byte_end > current_bytes.len() {
             return 0;
          }
@@ -217,7 +217,7 @@ impl From<&str> for SecureString {
       let mut new_vec = SecureVec::new_with_capacity(len).unwrap();
       new_vec.len = len;
 
-      new_vec.slice_mut_scope(|slice| {
+      new_vec.unlock_slice_mut(|slice| {
          slice[..len].copy_from_slice(bytes);
       });
 
@@ -239,7 +239,7 @@ impl serde::Serialize for SecureString {
    where
       S: serde::Serializer,
    {
-      let res = self.str_scope(|str| serializer.serialize_str(str));
+      let res = self.unlock_str(|str| serializer.serialize_str(str));
       res
    }
 }
@@ -284,7 +284,7 @@ mod tests {
       let secure1 = SecureString::from(hello_world.clone());
       let secure2 = secure1.clone();
 
-      secure2.str_scope(|str| {
+      secure2.unlock_str(|str| {
          assert_eq!(str, hello_world);
       });
    }
@@ -297,8 +297,8 @@ mod tests {
       let string = SecureString::from(hello_world);
       let string2 = SecureString::from(vec);
 
-      string.str_scope(|str| {
-         string2.str_scope(|str2| {
+      string.unlock_str(|str| {
+         string2.unlock_str(|str2| {
             assert_eq!(str, str2);
          });
       });
@@ -309,7 +309,7 @@ mod tests {
       let hello_world = "My name is ";
       let mut secure = SecureString::from(hello_world);
       secure.insert_text_at_char_idx(12, "Mike");
-      secure.str_scope(|str| {
+      secure.unlock_str(|str| {
          assert_eq!(str, "My name is Mike");
       });
    }
@@ -319,7 +319,7 @@ mod tests {
       let hello_world = "My name is Mike";
       let mut secure = SecureString::from(hello_world);
       secure.delete_text_char_range(10..17);
-      secure.str_scope(|str| {
+      secure.unlock_str(|str| {
          assert_eq!(str, "My name is");
       });
    }
@@ -329,7 +329,7 @@ mod tests {
       let hello_world = "Hello, world!";
       let mut secure = SecureString::from(hello_world);
       secure.drain(0..7);
-      secure.str_scope(|str| {
+      secure.unlock_str(|str| {
          assert_eq!(str, "world!");
       });
    }
@@ -344,11 +344,11 @@ mod tests {
       let deserialized_string: SecureString = serde_json::from_str(&json_string).expect("Deserialization failed");
       let deserialized_bytes: SecureString = serde_json::from_slice(&json_bytes).expect("Deserialization failed");
 
-      deserialized_string.str_scope(|str| {
+      deserialized_string.unlock_str(|str| {
          assert_eq!(str, hello_world);
       });
 
-      deserialized_bytes.str_scope(|str| {
+      deserialized_bytes.unlock_str(|str| {
          assert_eq!(str, hello_world);
       });
    }
@@ -357,7 +357,7 @@ mod tests {
    fn test_str_scope() {
       let hello_word = "Hello, world!";
       let string = SecureString::from(hello_word);
-      let _exposed_string = string.str_scope(|str| {
+      let _exposed_string = string.unlock_str(|str| {
          assert_eq!(str, hello_word);
          String::from(str)
       });
@@ -369,7 +369,7 @@ mod tests {
 
       let mut string = SecureString::new().unwrap();
       string.push_str(hello_world);
-      string.str_scope(|str| {
+      string.unlock_str(|str| {
          assert_eq!(str, hello_world);
       });
    }
@@ -378,11 +378,11 @@ mod tests {
    fn test_mut_scope() {
       let hello_world = "Hello, world!";
       let mut string = SecureString::from("Hello, ");
-      string.mut_scope(|string| {
+      string.unlock_mut(|string| {
          string.push_str("world!");
       });
 
-      string.str_scope(|str| {
+      string.unlock_str(|str| {
          assert_eq!(str, hello_world);
       });
    }

@@ -60,7 +60,7 @@ pub type SecureBytes = SecureVec<u8>;
 /// // The memory is locked here.
 ///
 /// // Use a scope to safely access the contents as a slice.
-/// secret_key.slice_scope(|unlocked_slice| {
+/// secret_key.unlock_slice(|unlocked_slice| {
 ///     assert_eq!(unlocked_slice, &[0xAB, 0xCD, 0xEF]);
 ///     println!("Secret Key: {:?}", unlocked_slice);
 /// });
@@ -242,7 +242,7 @@ impl<T: Zeroize> SecureVec<T> {
    {
       let mut secure_vec = SecureVec::new_with_capacity(slice.len())?;
       secure_vec.len = slice.len();
-      secure_vec.slice_mut_scope(|dest_slice| {
+      secure_vec.unlock_slice_mut(|dest_slice| {
          dest_slice.clone_from_slice(slice);
       });
       slice.zeroize();
@@ -257,7 +257,7 @@ impl<T: Zeroize> SecureVec<T> {
    {
       let mut secure_vec = SecureVec::new_with_capacity(slice.len())?;
       secure_vec.len = slice.len();
-      secure_vec.slice_mut_scope(|dest_slice| {
+      secure_vec.unlock_slice_mut(|dest_slice| {
          dest_slice.clone_from_slice(slice);
       });
       Ok(secure_vec)
@@ -357,7 +357,7 @@ impl<T: Zeroize> SecureVec<T> {
    }
 
    /// Immutable access to the `SecureVec`
-   pub fn unlock_scope<F, R>(&self, f: F) -> R
+   pub fn unlock<F, R>(&self, f: F) -> R
    where
       F: FnOnce(&SecureVec<T>) -> R,
    {
@@ -368,7 +368,7 @@ impl<T: Zeroize> SecureVec<T> {
    }
 
    /// Immutable access to the `SecureVec` as `&[T]`
-   pub fn slice_scope<F, R>(&self, f: F) -> R
+   pub fn unlock_slice<F, R>(&self, f: F) -> R
    where
       F: FnOnce(&[T]) -> R,
    {
@@ -382,7 +382,7 @@ impl<T: Zeroize> SecureVec<T> {
    }
 
    /// Mutable access to the `SecureVec` as `&mut [T]`
-   pub fn slice_mut_scope<F, R>(&mut self, f: F) -> R
+   pub fn unlock_slice_mut<F, R>(&mut self, f: F) -> R
    where
       F: FnOnce(&mut [T]) -> R,
    {
@@ -402,7 +402,7 @@ impl<T: Zeroize> SecureVec<T> {
    /// You can actually return a new allocated `Vec` from this function
    ///
    /// If you do that you are responsible for zeroizing its contents
-   pub fn iter_scope<F, R>(&self, f: F) -> R
+   pub fn unlock_iter<F, R>(&self, f: F) -> R
    where
       F: FnOnce(core::slice::Iter<T>) -> R,
    {
@@ -423,7 +423,7 @@ impl<T: Zeroize> SecureVec<T> {
    /// You can actually return a new allocated `Vec` from this function
    ///
    /// If you do that you are responsible for zeroizing its contents
-   pub fn iter_mut_scope<F, R>(&mut self, f: F) -> R
+   pub fn unlock_iter_mut<F, R>(&mut self, f: F) -> R
    where
       F: FnOnce(core::slice::IterMut<T>) -> R,
    {
@@ -581,8 +581,8 @@ impl<T: Clone + Zeroize> Clone for SecureVec<T> {
       let mut new_vec = SecureVec::new_with_capacity(self.capacity).unwrap();
       new_vec.len = self.len;
 
-      self.slice_scope(|src_slice| {
-         new_vec.slice_mut_scope(|dest_slice| {
+      self.unlock_slice(|src_slice| {
+         new_vec.unlock_slice_mut(|dest_slice| {
             dest_slice.clone_from_slice(src_slice);
          });
       });
@@ -597,8 +597,8 @@ impl<const LENGTH: usize> From<SecureArray<u8, LENGTH>> for SecureVec<u8> {
          .expect("Failed to allocate SecureVec during conversion");
       new_vec.len = array.len();
 
-      array.unlocked_scope(|array_slice| {
-         new_vec.slice_mut_scope(|vec_slice| {
+      array.unlock(|array_slice| {
+         new_vec.unlock_slice_mut(|vec_slice| {
             vec_slice.copy_from_slice(array_slice);
          });
       });
@@ -645,7 +645,7 @@ impl serde::Serialize for SecureVec<u8> {
    where
       S: serde::Serializer,
    {
-      self.slice_scope(|slice| serializer.collect_seq(slice.iter()))
+      self.unlock_slice(|slice| serializer.collect_seq(slice.iter()))
    }
 }
 
@@ -841,7 +841,7 @@ mod tests {
       let vec: Vec<u8> = vec![1, 2, 3];
       let secure_vec = SecureVec::from_vec(vec).unwrap();
 
-      secure_vec.slice_scope(|slice| {
+      secure_vec.unlock_slice(|slice| {
          assert_eq!(slice, &[1, 2, 3]);
       });
 
@@ -849,14 +849,14 @@ mod tests {
       let secure_slice = SecureVec::from_slice_mut(&mut slice).unwrap();
       assert_eq!(slice, [0, 0]);
 
-      secure_slice.slice_scope(|slice| {
+      secure_slice.unlock_slice(|slice| {
          assert_eq!(slice, &[3, 5]);
       });
 
       let slice = [3u8, 5];
       let secure_slice = SecureVec::from_slice(&slice).unwrap();
 
-      secure_slice.slice_scope(|slice| {
+      secure_slice.unlock_slice(|slice| {
          assert_eq!(slice, &[3, 5]);
       });
    }
@@ -866,7 +866,7 @@ mod tests {
       let array: SecureArray<u8, 3> = SecureArray::new([1, 2, 3]).unwrap();
       let vec: SecureVec<u8> = array.into();
       assert_eq!(vec.len(), 3);
-      vec.slice_scope(|slice| {
+      vec.unlock_slice(|slice| {
          assert_eq!(slice, &[1, 2, 3]);
       });
    }
@@ -931,7 +931,7 @@ mod tests {
       }
 
       let sec = secure.lock().unwrap();
-      sec.slice_scope(|slice| {
+      sec.unlock_slice(|slice| {
          assert_eq!(slice.len(), 5);
       });
    }
@@ -942,8 +942,8 @@ mod tests {
       let secure1 = SecureVec::from_vec(vec).unwrap();
       let secure2 = secure1.clone();
 
-      secure1.slice_scope(|slice| {
-         secure2.slice_scope(|slice2| {
+      secure1.unlock_slice(|slice| {
+         secure2.unlock_slice(|slice2| {
             assert_eq!(slice, slice2);
          });
       });
@@ -956,7 +956,7 @@ mod tests {
       let drain = secure.drain(..3);
       core::mem::forget(drain);
       // we can still use secure vec but its state is unreachable
-      secure.slice_scope(|secure| {
+      secure.unlock_slice(|secure| {
          assert_eq!(secure.len(), 0);
       });
    }
@@ -971,7 +971,7 @@ mod tests {
       assert_eq!(drain.next(), Some(3));
       assert_eq!(drain.next(), None);
       drop(drain);
-      secure.slice_scope(|secure| {
+      secure.unlock_slice(|secure| {
          assert_eq!(secure.len(), 7);
          assert_eq!(secure, &[4, 5, 6, 7, 8, 9, 10]);
       });
@@ -985,7 +985,7 @@ mod tests {
       let json = serde_json::to_vec(&secure).expect("Serialization failed");
       let deserialized: SecureVec<u8> =
          serde_json::from_slice(&json).expect("Deserialization failed");
-      deserialized.slice_scope(|slice| {
+      deserialized.unlock_slice(|slice| {
          assert_eq!(slice, &[1, 2, 3]);
       });
    }
@@ -995,7 +995,7 @@ mod tests {
       let vec: Vec<u8> = vec![1, 2, 3];
       let mut secure = SecureVec::from_vec(vec).unwrap();
       secure.erase();
-      secure.unlock_scope(|secure| {
+      secure.unlock(|secure| {
          assert_eq!(secure.len, 0);
          assert_eq!(secure.capacity, 3);
       });
@@ -1003,7 +1003,7 @@ mod tests {
       secure.push(1);
       secure.push(2);
       secure.push(3);
-      secure.unlock_scope(|secure| {
+      secure.unlock(|secure| {
          assert_eq!(secure[0], 1);
          assert_eq!(secure[1], 2);
          assert_eq!(secure[2], 3);
@@ -1050,7 +1050,7 @@ mod tests {
    fn test_index() {
       let vec: Vec<u8> = vec![1, 2, 3];
       let secure = SecureVec::from_vec(vec).unwrap();
-      secure.unlock_scope(|secure| {
+      secure.unlock(|secure| {
          assert_eq!(secure[0], 1);
          assert_eq!(secure[1], 2);
          assert_eq!(secure[2], 3);
@@ -1061,7 +1061,7 @@ mod tests {
    fn test_slice_scoped() {
       let vec: Vec<u8> = vec![1, 2, 3];
       let secure = SecureVec::from_vec(vec).unwrap();
-      secure.slice_scope(|slice| {
+      secure.unlock_slice(|slice| {
          assert_eq!(slice, &[1, 2, 3]);
       });
    }
@@ -1071,12 +1071,12 @@ mod tests {
       let vec: Vec<u8> = vec![1, 2, 3];
       let mut secure = SecureVec::from_vec(vec).unwrap();
 
-      secure.slice_mut_scope(|slice| {
+      secure.unlock_slice_mut(|slice| {
          slice[0] = 4;
          assert_eq!(slice, &mut [4, 2, 3]);
       });
 
-      secure.slice_scope(|slice| {
+      secure.unlock_slice(|slice| {
          assert_eq!(slice, &[4, 2, 3]);
       });
    }
@@ -1085,12 +1085,12 @@ mod tests {
    fn test_iter_scoped() {
       let vec: Vec<u8> = vec![1, 2, 3];
       let secure = SecureVec::from_vec(vec).unwrap();
-      let sum: u8 = secure.iter_scope(|iter| iter.map(|&x| x).sum());
+      let sum: u8 = secure.unlock_iter(|iter| iter.map(|&x| x).sum());
 
       assert_eq!(sum, 6);
 
       let secure: SecureVec<u8> = SecureVec::new_with_capacity(3).unwrap();
-      let sum: u8 = secure.iter_scope(|iter| iter.map(|&x| x).sum());
+      let sum: u8 = secure.unlock_iter(|iter| iter.map(|&x| x).sum());
 
       assert_eq!(sum, 0);
    }
@@ -1099,13 +1099,13 @@ mod tests {
    fn test_iter_mut_scoped() {
       let vec: Vec<u8> = vec![1, 2, 3];
       let mut secure = SecureVec::from_vec(vec).unwrap();
-      secure.iter_mut_scope(|iter| {
+      secure.unlock_iter_mut(|iter| {
          for elem in iter {
             *elem += 1;
          }
       });
 
-      secure.slice_scope(|slice| {
+      secure.unlock_slice(|slice| {
          assert_eq!(slice, &[2, 3, 4]);
       });
    }

@@ -9,14 +9,14 @@ fn main() {
 
    // The memory is locked and protected here. Direct access is not possible.
 
-   secure_array.unlocked_mut_scope(|unlocked_slice| {
+   secure_array.unlock_mut(|unlocked_slice| {
       unlocked_slice[0] = 1;
       unlocked_slice[1] = 2;
       unlocked_slice[2] = 3;
    });
 
    // Use a scope to safely access the content as a slice.
-   secure_array.unlocked_scope(|unlocked_slice| {
+   secure_array.unlock(|unlocked_slice| {
       assert_eq!(unlocked_slice, &[1, 2, 3]);
       println!("The secret is: {:?}", unlocked_slice);
    }); // The memory is automatically locked again when the scope ends.

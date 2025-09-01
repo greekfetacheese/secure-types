@@ -8,17 +8,17 @@ fn main() {
    // The memory is locked and protected here. Direct access is not possible.
 
    // Use a scope to safely access the content as a &str.
-   secure_string.str_scope(|unlocked_str| {
+   secure_string.unlock_str(|unlocked_str| {
       assert_eq!(unlocked_str, "my_secret");
       println!("The secret is: {}", unlocked_str);
    }); // The memory is automatically locked again when the scope ends.
 
    // Use mut scope if you need to pass it as a mutable reference
-   secure_string.mut_scope(|mut_string| {
+   secure_string.unlock_mut(|mut_string| {
       mutate_secure_string(mut_string);
    });
 
-   secure_string.str_scope(|unlocked_str| {
+   secure_string.unlock_str(|unlocked_str| {
       assert_eq!(unlocked_str, "my_secret_password");
       println!("The secret is: {}", unlocked_str);
    });
