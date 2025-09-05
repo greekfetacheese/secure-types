@@ -137,6 +137,10 @@ where
       LENGTH
    }
 
+   pub fn is_empty(&self) -> bool {
+      self.len() == 0
+   }
+
    pub fn as_ptr(&self) -> *const T {
       self.ptr.as_ptr()
    }
@@ -256,8 +260,7 @@ impl<T: Zeroize, const LENGTH: usize> core::ops::Index<usize> for SecureArray<T,
       assert!(index < self.len(), "Index out of bounds");
       unsafe {
          let ptr = self.ptr.as_ptr().add(index);
-         let reference = &*ptr;
-         reference
+         &*ptr
       }
    }
 }
@@ -267,8 +270,7 @@ impl<T: Zeroize, const LENGTH: usize> core::ops::IndexMut<usize> for SecureArray
       assert!(index < self.len(), "Index out of bounds");
       unsafe {
          let ptr = self.ptr.as_ptr().add(index);
-         let reference = &mut *ptr;
-         reference
+         &mut *ptr
       }
    }
 }

@@ -182,7 +182,7 @@ pub fn crypt_protect_memory(ptr: *mut u8, aligned_size: usize) -> bool {
             error_code
          );
       }
-      return false;
+      false
    } else {
       true
    }
@@ -219,7 +219,7 @@ pub fn crypt_unprotect_memory(ptr: *mut u8, size_in_bytes: usize) -> bool {
             error_code
          );
       }
-      return false;
+      false
    } else {
       true
    }

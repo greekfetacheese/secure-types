@@ -70,6 +70,10 @@ impl SecureString {
       self.vec.len()
    }
 
+   pub fn is_empty(&self) -> bool {
+      self.vec.is_empty()
+   }
+
    pub fn drain(&mut self, range: Range<usize>) {
       let _d = self.vec.drain(range);
    }
@@ -100,8 +104,7 @@ impl SecureString {
    {
       self.vec.unlock_slice(|slice| {
          let str = core::str::from_utf8(slice).unwrap();
-         let result = f(str);
-         result
+         f(str)
       })
    }
 

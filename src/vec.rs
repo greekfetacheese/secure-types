@@ -194,12 +194,12 @@ impl<T: Zeroize> SecureVec<T> {
 
       let ptr = unsafe {
          let aligned_size = page_aligned_size(size);
-         let allocated_ptr = memsec::malloc_sized(aligned_size);
-         if allocated_ptr.is_none() {
-            vec.zeroize();
-            return Err(Error::AllocationFailed);
+         let allocated_ptr_opt = memsec::malloc_sized(aligned_size);
+         if let Some(allocated_ptr) = allocated_ptr_opt {
+            allocated_ptr.as_ptr() as *mut T
          } else {
-            allocated_ptr.unwrap().as_ptr() as *mut T
+            vec.zeroize();
+            return Err(Error::AllocationFailed)
          }
       };
 
@@ -265,6 +265,10 @@ impl<T: Zeroize> SecureVec<T> {
 
    pub fn len(&self) -> usize {
       self.len
+   }
+
+   pub fn is_empty(&self) -> bool {
+      self.len() == 0
    }
 
    pub fn as_ptr(&self) -> *const T {
@@ -633,8 +637,7 @@ impl<T: Zeroize> core::ops::Index<usize> for SecureVec<T> {
       assert!(index < self.len, "Index out of bounds");
       unsafe {
          let ptr = self.ptr.as_ptr().add(index);
-         let reference = &*ptr;
-         reference
+         &*ptr
       }
    }
 }
@@ -729,16 +732,16 @@ impl<'a, T: Zeroize> Drop for Drain<'a, T> {
          // The vec_ref's memory is currently unlocked.
          if mem::needs_drop::<T>() {
             let mut current_ptr =
-               self.vec_ref.ptr.as_ptr().add(self.current_drain_iter_index) as *mut T;
-            let end_ptr = self.vec_ref.ptr.as_ptr().add(self.drain_end_index) as *mut T;
+               self.vec_ref.ptr.as_ptr().add(self.current_drain_iter_index);
+            let end_ptr = self.vec_ref.ptr.as_ptr().add(self.drain_end_index);
             while current_ptr < end_ptr {
                ptr::drop_in_place(current_ptr);
                current_ptr = current_ptr.add(1);
             }
          }
 
-         let hole_dst_ptr = self.vec_ref.ptr.as_ptr().add(self.drain_start_index) as *mut T;
-         let tail_src_ptr = self.vec_ref.ptr.as_ptr().add(self.drain_end_index) as *mut T;
+         let hole_dst_ptr = self.vec_ref.ptr.as_ptr().add(self.drain_start_index);
+         let tail_src_ptr = self.vec_ref.ptr.as_ptr().add(self.drain_end_index);
 
          if self.tail_len > 0 {
             ptr::copy(tail_src_ptr, hole_dst_ptr, self.tail_len);
@@ -756,8 +759,8 @@ impl<'a, T: Zeroize> Drop for Drain<'a, T> {
          //       These need to be dropped if T:Drop, as ptr::copy doesn't drop the source.
          // After any necessary drops, this entire region must be zeroized.
 
-         let mut current_cleanup_ptr = self.vec_ref.ptr.as_ptr().add(new_len) as *mut T;
-         let end_cleanup_ptr = self.vec_ref.ptr.as_ptr().add(self.original_vec_len) as *mut T;
+         let mut current_cleanup_ptr = self.vec_ref.ptr.as_ptr().add(new_len);
+         let end_cleanup_ptr = self.vec_ref.ptr.as_ptr().add(self.original_vec_len);
 
          // Determine the start of the original tail's memory region
          let original_tail_start_ptr_val = tail_src_ptr as usize;
