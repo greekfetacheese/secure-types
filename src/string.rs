@@ -206,6 +206,9 @@ impl SecureString {
 
 #[cfg(feature = "std")]
 impl From<String> for SecureString {
+   /// Creates a new `SecureString` from a `String`.
+   ///
+   /// The `String` is zeroized afterwards.
    fn from(s: String) -> SecureString {
       let vec = SecureVec::from_vec(s.into_bytes()).unwrap();
       SecureString { vec }
@@ -213,6 +216,9 @@ impl From<String> for SecureString {
 }
 
 impl From<&str> for SecureString {
+   /// Creates a new `SecureString` from a `&str`.
+   ///
+   /// The `&str` is not zeroized, you are responsible for zeroizing it.
    fn from(s: &str) -> SecureString {
       let bytes = s.as_bytes();
       let len = bytes.len();
@@ -282,13 +288,22 @@ mod tests {
    use super::*;
 
    #[test]
-   fn test_clone() {
-      let hello_world = "Hello, world!".to_string();
-      let secure1 = SecureString::from(hello_world.clone());
-      let secure2 = secure1.clone();
+   fn test_creation() {
+      let hello_world = "Hello, world!";
+      let secure = SecureString::from(hello_world);
 
-      secure2.unlock_str(|str| {
+      secure.unlock_str(|str| {
          assert_eq!(str, hello_world);
+      });
+   }
+
+   #[test]
+   fn test_from_string() {
+      let hello_world = String::from("Hello, world!");
+      let string = SecureString::from(hello_world);
+
+      string.unlock_str(|str| {
+         assert_eq!(str, "Hello, world!");
       });
    }
 
@@ -296,7 +311,7 @@ mod tests {
    fn test_from_secure_vec() {
       let hello_world = "Hello, world!".to_string();
       let vec: SecureVec<u8> = SecureVec::from_slice(hello_world.as_bytes()).unwrap();
-      
+
       let string = SecureString::from(hello_world);
       let string2 = SecureString::from(vec);
 
@@ -304,6 +319,17 @@ mod tests {
          string2.unlock_str(|str2| {
             assert_eq!(str, str2);
          });
+      });
+   }
+
+   #[test]
+   fn test_clone() {
+      let hello_world = "Hello, world!".to_string();
+      let secure1 = SecureString::from(hello_world.clone());
+      let secure2 = secure1.clone();
+
+      secure2.unlock_str(|str| {
+         assert_eq!(str, hello_world);
       });
    }
 
@@ -342,10 +368,15 @@ mod tests {
    fn test_serde() {
       let hello_world = "Hello, world!";
       let secure = SecureString::from(hello_world);
+
       let json_string = serde_json::to_string(&secure).expect("Serialization failed");
       let json_bytes = serde_json::to_vec(&secure).expect("Serialization failed");
-      let deserialized_string: SecureString = serde_json::from_str(&json_string).expect("Deserialization failed");
-      let deserialized_bytes: SecureString = serde_json::from_slice(&json_bytes).expect("Deserialization failed");
+
+      let deserialized_string: SecureString =
+         serde_json::from_str(&json_string).expect("Deserialization failed");
+
+      let deserialized_bytes: SecureString =
+         serde_json::from_slice(&json_bytes).expect("Deserialization failed");
 
       deserialized_string.unlock_str(|str| {
          assert_eq!(str, hello_world);
@@ -357,7 +388,7 @@ mod tests {
    }
 
    #[test]
-   fn test_str_scope() {
+   fn test_unlock_str() {
       let hello_word = "Hello, world!";
       let string = SecureString::from(hello_word);
       let _exposed_string = string.unlock_str(|str| {
@@ -378,7 +409,7 @@ mod tests {
    }
 
    #[test]
-   fn test_mut_scope() {
+   fn test_unlock_mut() {
       let hello_world = "Hello, world!";
       let mut string = SecureString::from("Hello, ");
       string.unlock_mut(|string| {

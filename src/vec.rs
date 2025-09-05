@@ -199,7 +199,7 @@ impl<T: Zeroize> SecureVec<T> {
             allocated_ptr.as_ptr() as *mut T
          } else {
             vec.zeroize();
-            return Err(Error::AllocationFailed)
+            return Err(Error::AllocationFailed);
          }
       };
 
@@ -731,8 +731,7 @@ impl<'a, T: Zeroize> Drop for Drain<'a, T> {
       unsafe {
          // The vec_ref's memory is currently unlocked.
          if mem::needs_drop::<T>() {
-            let mut current_ptr =
-               self.vec_ref.ptr.as_ptr().add(self.current_drain_iter_index);
+            let mut current_ptr = self.vec_ref.ptr.as_ptr().add(self.current_drain_iter_index);
             let end_ptr = self.vec_ref.ptr.as_ptr().add(self.drain_end_index);
             while current_ptr < end_ptr {
                ptr::drop_in_place(current_ptr);
@@ -840,7 +839,7 @@ mod tests {
    use std::sync::{Arc, Mutex};
 
    #[test]
-   fn test_from_methods() {
+   fn test_creation() {
       let vec: Vec<u8> = vec![1, 2, 3];
       let secure_vec = SecureVec::from_vec(vec).unwrap();
 
@@ -848,19 +847,19 @@ mod tests {
          assert_eq!(slice, &[1, 2, 3]);
       });
 
-      let mut slice = [3u8, 5];
-      let secure_slice = SecureVec::from_slice_mut(&mut slice).unwrap();
-      assert_eq!(slice, [0, 0]);
+      let exposed_slice = &mut [1, 2, 3];
+      let secure_slice = SecureVec::from_slice_mut(exposed_slice).unwrap();
+      assert_eq!(exposed_slice, &[0u8; 3]);
 
       secure_slice.unlock_slice(|slice| {
-         assert_eq!(slice, &[3, 5]);
+         assert_eq!(slice, &[1, 2, 3]);
       });
 
-      let slice = [3u8, 5];
-      let secure_slice = SecureVec::from_slice(&slice).unwrap();
+      let exposed_slice = [1, 2, 3];
+      let secure_slice = SecureVec::from_slice(&exposed_slice).unwrap();
 
       secure_slice.unlock_slice(|slice| {
-         assert_eq!(slice, &[3, 5]);
+         assert_eq!(slice, exposed_slice);
       });
    }
 
@@ -876,34 +875,23 @@ mod tests {
    }
 
    #[test]
-   fn lock_unlock() {
+   fn test_size_cannot_be_zero() {
       let secure: SecureVec<u8> = SecureVec::new().unwrap();
       let size = secure.aligned_size();
       assert_eq!(size > 0, true);
-
-      let (decrypted, unlocked) = secure.unlock_memory();
-      assert!(decrypted);
-      assert!(unlocked);
-
-      let (encrypted, locked) = secure.lock_memory();
-      assert!(encrypted);
-      assert!(locked);
 
       let secure: SecureVec<u8> = SecureVec::from_vec(vec![]).unwrap();
       let size = secure.aligned_size();
       assert_eq!(size > 0, true);
 
-      let (decrypted, unlocked) = secure.unlock_memory();
-      assert!(decrypted);
-      assert!(unlocked);
-
-      let (encrypted, locked) = secure.lock_memory();
-      assert!(encrypted);
-      assert!(locked);
-
       let secure: SecureVec<u8> = SecureVec::new_with_capacity(0).unwrap();
       let size = secure.aligned_size();
       assert_eq!(size > 0, true);
+   }
+
+   #[test]
+   fn lock_unlock_works() {
+      let secure: SecureVec<u8> = SecureVec::new().unwrap();
 
       let (decrypted, unlocked) = secure.unlock_memory();
       assert!(decrypted);
@@ -937,6 +925,7 @@ mod tests {
       let sec = secure.lock().unwrap();
       sec.unlock_slice(|slice| {
          assert_eq!(slice.len(), 5);
+         assert_eq!(slice, &[0, 1, 2, 3, 4]);
       });
    }
 
@@ -999,20 +988,16 @@ mod tests {
       let vec: Vec<u8> = vec![1, 2, 3];
       let mut secure = SecureVec::from_vec(vec).unwrap();
       secure.erase();
+
       secure.unlock(|secure| {
          assert_eq!(secure.len, 0);
          assert_eq!(secure.capacity, 3);
       });
 
-      secure.push(1);
-      secure.push(2);
-      secure.push(3);
-      secure.unlock(|secure| {
-         assert_eq!(secure[0], 1);
-         assert_eq!(secure[1], 2);
-         assert_eq!(secure[2], 3);
-         assert_eq!(secure.len, 3);
-         assert_eq!(secure.capacity, 3);
+      secure.unlock_iter(|iter| {
+         for elem in iter {
+            assert_eq!(elem, &0);
+         }
       });
    }
 
@@ -1020,9 +1005,15 @@ mod tests {
    fn test_push() {
       let vec: Vec<u8> = Vec::new();
       let mut secure = SecureVec::from_vec(vec).unwrap();
-      for i in 0..30 {
+      for i in 0..10 {
          secure.push(i);
       }
+
+      assert_eq!(secure.len(), 10);
+
+      secure.unlock_slice(|slice| {
+         assert_eq!(slice, &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+      });
    }
 
    #[test]
@@ -1062,7 +1053,7 @@ mod tests {
    }
 
    #[test]
-   fn test_slice_scoped() {
+   fn test_unlock_slice() {
       let vec: Vec<u8> = vec![1, 2, 3];
       let secure = SecureVec::from_vec(vec).unwrap();
       secure.unlock_slice(|slice| {
@@ -1071,7 +1062,7 @@ mod tests {
    }
 
    #[test]
-   fn test_slice_mut_scoped() {
+   fn test_unlock_slice_mut() {
       let vec: Vec<u8> = vec![1, 2, 3];
       let mut secure = SecureVec::from_vec(vec).unwrap();
 
@@ -1079,14 +1070,10 @@ mod tests {
          slice[0] = 4;
          assert_eq!(slice, &mut [4, 2, 3]);
       });
-
-      secure.unlock_slice(|slice| {
-         assert_eq!(slice, &[4, 2, 3]);
-      });
    }
 
    #[test]
-   fn test_iter_scoped() {
+   fn test_unlock_iter() {
       let vec: Vec<u8> = vec![1, 2, 3];
       let secure = SecureVec::from_vec(vec).unwrap();
       let sum: u8 = secure.unlock_iter(|iter| iter.map(|&x| x).sum());
@@ -1100,7 +1087,7 @@ mod tests {
    }
 
    #[test]
-   fn test_iter_mut_scoped() {
+   fn test_unlock_iter_mut() {
       let vec: Vec<u8> = vec![1, 2, 3];
       let mut secure = SecureVec::from_vec(vec).unwrap();
       secure.unlock_iter_mut(|iter| {

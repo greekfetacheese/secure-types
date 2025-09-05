@@ -85,6 +85,8 @@ use thiserror::Error as ThisError;
 pub enum Error {
    #[error("Failed to allocate secure memory")]
    AllocationFailed,
+   #[error("Length cannot be zero")]
+   LengthCannotBeZero,
    #[error("Allocated Ptr is null")]
    NullAllocation,
    #[error("CryptProtectMemory failed")]

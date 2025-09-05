@@ -58,7 +58,7 @@ where
       let size = LENGTH * mem::size_of::<T>();
       if size == 0 {
          // Cannot create a zero-sized secure array
-         return Err(Error::AllocationFailed);
+         return Err(Error::LengthCannotBeZero);
       }
 
       #[cfg(feature = "std")]
@@ -442,7 +442,7 @@ mod tests {
       let exposed = &[1, 2, 3];
       let array: SecureArray<u8, 3> = SecureArray::from_slice(exposed).unwrap();
       assert_eq!(array.len(), 3);
-      
+
       array.unlock(|slice| {
          assert_eq!(slice, &[1, 2, 3]);
       });
@@ -471,21 +471,27 @@ mod tests {
    }
 
    #[test]
-   fn lock_unlock() {
-      let exposed: &mut [u8; 3] = &mut [1, 2, 3];
-      let secure: SecureArray<u8, 3> = SecureArray::from_slice_mut(exposed).unwrap();
+   fn test_size_cannot_be_zero() {
+      let secure: SecureArray<u8, 3> = SecureArray::from_slice(&[1, 2, 3]).unwrap();
       let size = secure.aligned_size();
       assert_eq!(size > 0, true);
 
-      let (decrypted, unlocked) = secure.unlock_memory();
-      assert!(decrypted);
-      assert!(unlocked);
-
-      let (encrypted, locked) = secure.lock_memory();
-      assert!(encrypted);
-      assert!(locked);
-
       let secure: SecureArray<u8, 3> = SecureArray::empty().unwrap();
+      let size = secure.aligned_size();
+      assert_eq!(size > 0, true);
+   }
+
+   #[test]
+   #[should_panic]
+   fn test_length_cannot_be_zero() {
+      let secure_vec = SecureVec::new().unwrap();
+      let _secure_array: SecureArray<u8, 0> = SecureArray::try_from(secure_vec).unwrap();
+   }
+
+   #[test]
+   fn lock_unlock() {
+      let exposed: &mut [u8; 3] = &mut [1, 2, 3];
+      let secure: SecureArray<u8, 3> = SecureArray::from_slice_mut(exposed).unwrap();
       let size = secure.aligned_size();
       assert_eq!(size > 0, true);
 
@@ -543,6 +549,8 @@ mod tests {
       let final_array = arc_array.lock().unwrap();
       final_array.unlock(|slice| {
          assert_eq!(slice[0], 6);
+         assert_eq!(slice[1], 2);
+         assert_eq!(slice[2], 3);
       });
    }
 
@@ -607,7 +615,7 @@ mod tests {
    }
 
    #[test]
-   fn test_mutable_access_in_scope() {
+   fn test_unlock_mut() {
       let exposed: &mut [u8; 3] = &mut [1, 2, 3];
       let mut array: SecureArray<u8, 3> = SecureArray::from_slice_mut(exposed).unwrap();
 
