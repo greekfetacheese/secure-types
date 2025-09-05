@@ -29,8 +29,8 @@ use memsec::Prot;
 /// ```
 /// use secure_types::SecureArray;
 ///
-/// let key_data = [1u8; 32];
-/// let secure_key: SecureArray<u8, 32> = SecureArray::new(key_data).unwrap();
+/// let exposed_key: &mut [u8; 32] = &mut [1u8; 32];
+/// let secure_key: SecureArray<u8, 32> = SecureArray::from_slice_mut(exposed_key).unwrap();
 ///
 /// secure_key.unlock(|unlocked_slice| {
 ///     assert_eq!(unlocked_slice.len(), 32);
@@ -101,8 +101,10 @@ where
       Ok(secure_array)
    }
 
-   /// Creates a new SecureArray from a given array.
-   pub fn new(mut content: [T; LENGTH]) -> Result<Self, Error> {
+   /// Creates a new SecureArray from a `&mut [T; LENGTH]`.
+   ///
+   /// The passed slice is zeroized afterwards
+   pub fn from_slice_mut(content: &mut [T; LENGTH]) -> Result<Self, Error> {
       let secure_array = Self::empty()?;
 
       secure_array.unlock_memory();
@@ -117,6 +119,38 @@ where
       }
 
       content.zeroize();
+
+      let (encrypted, locked) = secure_array.lock_memory();
+
+      #[cfg(feature = "std")]
+      if !locked {
+         return Err(Error::LockFailed);
+      }
+
+      #[cfg(feature = "std")]
+      if !encrypted {
+         return Err(Error::CryptProtectMemoryFailed);
+      }
+
+      Ok(secure_array)
+   }
+
+   /// Creates a new SecureArray from a `&[T; LENGTH]`.
+   ///
+   /// The array is not zeroized, you are responsible for zeroizing it
+   pub fn from_slice(content: &[T; LENGTH]) -> Result<Self, Error> {
+      let secure_array = Self::empty()?;
+
+      secure_array.unlock_memory();
+
+      unsafe {
+         // Copy the data from the source array into the secure memory region
+         core::ptr::copy_nonoverlapping(
+            content.as_ptr(),
+            secure_array.ptr.as_ptr(),
+            LENGTH,
+         );
+      }
 
       let (encrypted, locked) = secure_array.lock_memory();
 
@@ -336,16 +370,6 @@ impl<const LENGTH: usize> TryFrom<SecureVec<u8>> for SecureArray<u8, LENGTH> {
    }
 }
 
-impl<T, const LENGTH: usize> TryFrom<[T; LENGTH]> for SecureArray<T, LENGTH>
-where
-   T: Zeroize,
-{
-   type Error = Error;
-   fn try_from(s: [T; LENGTH]) -> Result<Self, Error> {
-      Self::new(s)
-   }
-}
-
 #[cfg(feature = "serde")]
 impl<const LENGTH: usize> serde::Serialize for SecureArray<u8, LENGTH> {
    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -405,11 +429,25 @@ mod tests {
 
    #[test]
    fn test_creation() {
-      let array: SecureArray<u8, 3> = SecureArray::new([1, 2, 3]).unwrap();
+      let exposed_mut = &mut [1, 2, 3];
+      let array: SecureArray<u8, 3> = SecureArray::from_slice_mut(exposed_mut).unwrap();
       assert_eq!(array.len(), 3);
+
       array.unlock(|slice| {
          assert_eq!(slice, &[1, 2, 3]);
       });
+
+      assert_eq!(exposed_mut, &[0u8; 3]);
+
+      let exposed = &[1, 2, 3];
+      let array: SecureArray<u8, 3> = SecureArray::from_slice(exposed).unwrap();
+      assert_eq!(array.len(), 3);
+      
+      array.unlock(|slice| {
+         assert_eq!(slice, &[1, 2, 3]);
+      });
+
+      assert_eq!(exposed, &[1, 2, 3]);
    }
 
    #[test]
@@ -424,7 +462,8 @@ mod tests {
 
    #[test]
    fn test_erase() {
-      let mut array: SecureArray<u8, 3> = SecureArray::new([1, 2, 3]).unwrap();
+      let exposed: &mut [u8; 3] = &mut [1, 2, 3];
+      let mut array: SecureArray<u8, 3> = SecureArray::from_slice_mut(exposed).unwrap();
       array.erase();
       array.unlock(|slice| {
          assert_eq!(slice, &[0u8; 3]);
@@ -433,8 +472,8 @@ mod tests {
 
    #[test]
    fn lock_unlock() {
-      let array = [1, 2, 3];
-      let secure: SecureArray<u8, 3> = SecureArray::new(array).unwrap();
+      let exposed: &mut [u8; 3] = &mut [1, 2, 3];
+      let secure: SecureArray<u8, 3> = SecureArray::from_slice_mut(exposed).unwrap();
       let size = secure.aligned_size();
       assert_eq!(size > 0, true);
 
@@ -481,7 +520,8 @@ mod tests {
 
    #[test]
    fn test_thread_safety() {
-      let array = SecureArray::new([1, 2, 3]).unwrap();
+      let exposed: &mut [u8; 3] = &mut [1, 2, 3];
+      let array: SecureArray<u8, 3> = SecureArray::from_slice_mut(exposed).unwrap();
       let arc_array = Arc::new(Mutex::new(array));
       let mut handles = Vec::new();
 
@@ -511,7 +551,8 @@ mod tests {
       let arg = "CRASH_TEST_ARRAY_LOCKED";
 
       if std::env::args().any(|a| a == arg) {
-         let array: SecureArray<u8, 3> = SecureArray::new([1, 2, 3]).unwrap();
+         let exposed: &mut [u8; 3] = &mut [1, 2, 3];
+         let array: SecureArray<u8, 3> = SecureArray::from_slice_mut(exposed).unwrap();
          let _value = core::hint::black_box(array[0]);
 
          std::process::exit(1);
@@ -567,7 +608,8 @@ mod tests {
 
    #[test]
    fn test_mutable_access_in_scope() {
-      let mut array: SecureArray<u8, 3> = SecureArray::new([1, 2, 3]).unwrap();
+      let exposed: &mut [u8; 3] = &mut [1, 2, 3];
+      let mut array: SecureArray<u8, 3> = SecureArray::from_slice_mut(exposed).unwrap();
 
       array.unlock_mut(|slice| {
          slice[1] = 100;
@@ -581,7 +623,8 @@ mod tests {
    #[cfg(feature = "serde")]
    #[test]
    fn test_serde() {
-      let array: SecureArray<u8, 3> = SecureArray::new([1, 2, 3]).unwrap();
+      let exposed: &mut [u8; 3] = &mut [1, 2, 3];
+      let array: SecureArray<u8, 3> = SecureArray::from_slice_mut(exposed).unwrap();
       let json_string = serde_json::to_string(&array).expect("Serialization failed");
       let json_bytes = serde_json::to_vec(&array).expect("Serialization failed");
 

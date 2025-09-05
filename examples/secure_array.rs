@@ -1,11 +1,10 @@
-use secure_types::{SecureArray, Zeroize};
+use secure_types::SecureArray;
 
 fn main() {
    // Obviously this is an example, you should not hardcode sensitive data in your code
-   let mut exposed_array = [3u8; 3];
-   let mut secure_array = SecureArray::new(exposed_array).unwrap();
-
-   exposed_array.zeroize();
+   // It is better to use the `from_slice_mut` method which takes a mutable slice and zeroizes it afterwards
+   let exposed_array: &mut [u8; 3] = &mut [1, 2, 3];
+   let mut secure_array = SecureArray::from_slice_mut(exposed_array).unwrap();
 
    // The memory is locked and protected here. Direct access is not possible.
 

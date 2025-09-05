@@ -866,7 +866,8 @@ mod tests {
 
    #[test]
    fn test_from_secure_array() {
-      let array: SecureArray<u8, 3> = SecureArray::new([1, 2, 3]).unwrap();
+      let exposed: &mut [u8; 3] = &mut [1, 2, 3];
+      let array: SecureArray<u8, 3> = SecureArray::from_slice_mut(exposed).unwrap();
       let vec: SecureVec<u8> = array.into();
       assert_eq!(vec.len(), 3);
       vec.unlock_slice(|slice| {

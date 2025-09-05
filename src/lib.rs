@@ -231,7 +231,8 @@ mod tests {
    #[test]
    fn test_array_and_secure_vec_serde_compatibility() {
       use super::*;
-      let array: SecureArray<u8, 3> = SecureArray::new([1, 2, 3]).unwrap();
+      let exposed_array: &mut [u8; 3] = &mut [1, 2, 3];
+      let array: SecureArray<u8, 3> = SecureArray::from_slice_mut(exposed_array).unwrap();
       let vec: SecureVec<u8> = array.clone().into();
 
       let array_json_string = serde_json::to_string(&array).unwrap();
