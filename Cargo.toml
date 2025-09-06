@@ -1,6 +1,6 @@
 [package]
 name = "secure-types"
-version = "0.1.4"
+version = "0.2.0"
 authors = ["Michalis Molfetas"]
 edition = "2024"
 description = "Secure data types that protect sensitive data in memory via locking, encryption, and zeroization."
