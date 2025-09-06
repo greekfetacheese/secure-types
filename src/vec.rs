@@ -916,8 +916,9 @@ mod tests {
          handle.join().unwrap();
       }
 
-      let sec = secure.lock().unwrap();
-      sec.unlock_slice(|slice| {
+      let mut sec = secure.lock().unwrap();
+      sec.unlock_slice_mut(|slice| {
+         slice.sort();
          assert_eq!(slice.len(), 5);
          assert_eq!(slice, &[0, 1, 2, 3, 4]);
       });
