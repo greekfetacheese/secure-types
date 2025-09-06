@@ -12,22 +12,30 @@ use memsec::Prot;
 
 /// A fixed-size array allocated in a secure memory region.
 ///
-/// `SecureArray` provides the same core security guarantees as the other types in this
-/// crate, including zeroization on drop and optional memory locking/encryption when
-// compiled with the `std` feature.
+/// ## Security Model
 ///
-/// It is ideal for secrets of a known, fixed length.
+/// When compiled with the `std` feature (the default), it provides several layers of protection:
+/// - **Zeroization on Drop**: The memory is zeroized when the array is dropped.
+/// - **Memory Locking**: The underlying memory pages are locked using `mlock` & `madvise` for (Unix) or
+///   `VirtualLock` & `VirtualProtect` for (Windows) to prevent the OS from memory-dump/swap to disk or other processes accessing the memory.
+/// - **Memory Encryption**: On Windows, the memory is also encrypted using `CryptProtectMemory`.
+///
+/// In a `no_std` environment, it falls back to providing only the **zeroization-on-drop** guarantee.
 ///
 /// # Program Termination
 ///
 /// Direct indexing (e.g., `array[0]`) on a locked array will cause the operating system
 /// to terminate the process with an access violation error. Always use the provided
-/// scope methods (`unlocked_scope`, `unlocked_mut_scope`) for safe access.
+/// scope methods (`unlock`, `unlock_mut`) for safe access.
+/// 
+/// # Notes
+/// 
+/// If you return a new allocated `[T; LENGTH]` from one of the unlock methods you are responsible for zeroizing the memory.
 ///
-/// # Examples
+/// # Example
 ///
 /// ```
-/// use secure_types::SecureArray;
+/// use secure_types::{SecureArray, Zeroize};
 ///
 /// let exposed_key: &mut [u8; 32] = &mut [1u8; 32];
 /// let secure_key: SecureArray<u8, 32> = SecureArray::from_slice_mut(exposed_key).unwrap();
@@ -36,6 +44,15 @@ use memsec::Prot;
 ///     assert_eq!(unlocked_slice.len(), 32);
 ///     assert_eq!(unlocked_slice[0], 1);
 /// });
+/// 
+/// // Not recommended but if you allocate a new [u8; LENGTH] make sure to zeroize it
+/// let mut exposed = secure_key.unlock(|unlocked_slice| {
+///     [unlocked_slice[0], unlocked_slice[1], unlocked_slice[2]]
+/// });
+/// 
+/// // Do what you need to to do with the new array
+/// // When you are done with it, zeroize it
+/// exposed.zeroize();
 /// ```
 pub struct SecureArray<T, const LENGTH: usize>
 where
@@ -53,6 +70,7 @@ where
    T: Zeroize,
 {
    /// Creates an empty (but allocated) SecureArray.
+   ///
    /// The memory is allocated but not initialized, and it's the caller's responsibility to fill it.
    pub fn empty() -> Result<Self, Error> {
       let size = LENGTH * mem::size_of::<T>();
@@ -352,7 +370,8 @@ impl<const LENGTH: usize> TryFrom<SecureVec<u8>> for SecureArray<u8, LENGTH> {
    /// Tries to convert a `SecureVec<u8>` into a `SecureArray<u8, LENGTH>`.
    ///
    /// This operation will only succeed if `vec.len() == LENGTH`.
-   /// The original `SecureVec` is consumed.
+   /// 
+   /// The `SecureVec` is consumed.
    fn try_from(vec: SecureVec<u8>) -> Result<Self, Self::Error> {
       if vec.len() != LENGTH {
          return Err(Error::LengthMismatch);

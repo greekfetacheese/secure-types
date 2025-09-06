@@ -2,32 +2,21 @@ use super::{Error, vec::SecureVec};
 use core::ops::Range;
 use zeroize::Zeroize;
 
-/// A securely allocated, growable UTF-8 string, analogous to `std::string::String`.
+/// A securely allocated, growable UTF-8 string, just like `std::string::String`.
 ///
-/// It is a wrapper around `SecureVec<u8>` and inherits all of its security guarantees,
-/// ensuring that sensitive string data like passwords, API keys, or personal information
-/// is handled with care.
+/// It is a wrapper around [SecureVec<u8>] and inherits all of its security guarantees.
 ///
-/// ## Security Model
-///
-/// `SecureString` enforces the same security model as `SecureVec`:
-/// - **Zeroization on Drop**: The string's buffer is securely wiped clean.
-/// - **Memory Locking & Encryption**: When the `std` feature is enabled, the buffer is
-///   protected against disk swaps or memory inspection tools.
-///
-/// Access to the string contents is provided through scoped methods like `str_scope`,
+/// Access to the string contents is provided through scoped methods like `unlock_str`,
 /// which ensure the memory is only unlocked for the briefest possible time.
+/// 
+/// # Notes
+/// 
+/// If you return a new allocated `String` from one of the unlock methods you are responsible for zeroizing the memory.
 ///
-/// ## Security Considerations
-///
-/// While the crate protects the memory, you must still be careful not to leak the data.
-/// For example, creating a new, unsecured `String` from the unlocked slice and returning
-/// it from the scope would leak the sensitive data if not handled correctly.
-///
-/// # Examples
+/// # Example
 ///
 /// ```
-/// use secure_types::SecureString;
+/// use secure_types::{SecureString, Zeroize};
 ///
 /// // Create a SecureString
 /// let mut secret = SecureString::from("my_super_secret");
@@ -43,6 +32,15 @@ use zeroize::Zeroize;
 /// secret.unlock_str(|exposed_str| {
 ///     assert_eq!(exposed_str, "my_super_secret_password");
 /// });
+/// 
+/// // Not recommended but if you allocate a new String make sure to zeroize it
+/// let mut exposed = secret.unlock_str(|exposed_str| {
+///     String::from(exposed_str)
+/// });
+/// 
+/// // Do what you need to to do with the new string
+/// // When you are done with it, zeroize it
+/// exposed.zeroize();
 ///
 /// // When `secret` is dropped, its data zeroized.
 /// ```
@@ -66,6 +64,9 @@ impl SecureString {
       self.vec.erase();
    }
 
+   /// Returns the length of the inner `SecureVec`
+   ///
+   /// If you want the character length use [`char_len`](Self::char_len)
    pub fn len(&self) -> usize {
       self.vec.len()
    }
@@ -90,14 +91,7 @@ impl SecureString {
       }
    }
 
-   /// Access the `SecureString` as `&str`
-   ///
-   /// ## Use with caution
-   ///
-   ///
-   ///  You can actually return a new allocated `String` from this function
-   ///
-   ///  If you do that you are responsible for zeroizing its contents
+   /// Immutable access as `&str`
    pub fn unlock_str<F, R>(&self, f: F) -> R
    where
       F: FnOnce(&str) -> R,
@@ -109,13 +103,6 @@ impl SecureString {
    }
 
    /// Mutable access to the `SecureString`
-   ///
-   /// ## Use with caution
-   ///
-   ///
-   /// You can actually return a new allocated `String` from this function
-   ///
-   /// If you do that you are responsible for zeroizing its contents
    pub fn unlock_mut<F, R>(&mut self, f: F) -> R
    where
       F: FnOnce(&mut SecureString) -> R,
@@ -123,6 +110,23 @@ impl SecureString {
       f(self)
    }
 
+   /// Inserts text at the given character index
+   /// 
+   /// # Returns
+   /// 
+   /// The number of characters inserted
+   ///
+   /// # Example
+   ///
+   /// ```
+   /// use secure_types::SecureString;
+   ///
+   /// let mut string = SecureString::from("GreekFeta");
+   /// string.insert_text_at_char_idx(9, "Cheese");
+   /// string.unlock_str(|str| {
+   ///     assert_eq!(str, "GreekFetaCheese");
+   /// });
+   /// ```
    pub fn insert_text_at_char_idx(&mut self, char_idx: usize, text_to_insert: &str) -> usize {
       let chars_to_insert_count = text_to_insert.chars().count();
       if chars_to_insert_count == 0 {
@@ -171,6 +175,19 @@ impl SecureString {
       chars_to_insert_count
    }
 
+   /// Deletes the text in the given character range
+   ///
+   /// # Example
+   ///
+   /// ```
+   /// use secure_types::SecureString;
+   ///
+   /// let mut string = SecureString::from("GreekFetaCheese");
+   /// string.delete_text_char_range(9..15);
+   /// string.unlock_str(|str| {
+   ///     assert_eq!(str, "GreekFeta");
+   /// });
+   /// ```
    pub fn delete_text_char_range(&mut self, char_range: core::ops::Range<usize>) {
       if char_range.start >= char_range.end {
          return;

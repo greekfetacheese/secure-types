@@ -1,58 +1,91 @@
 # Secure Types
 
-This crate provides data structures (`SecureVec`, `SecureArray`, `SecureString`) designed to handle sensitive information in memory with enhanced security.
+The goal of this crate is to provide a simple way to handle sensitive data in memory (eg. passwords, private keys, etc).
 
-The goal is to protect secret data (like passwords, private keys, or credentials) from being exposed through common vulnerabilities.
+Currently there are 3 types:
 
-## Key Features
+- `SecureString`: For working with strings.
+- `SecureVec`: For working with `Vec<T>`.
+- `SecureArray`: For working with `&[T; LENGTH]`.
+
+## Features
 
 - **Zeroization on Drop**: Memory is wiped when dropped.
-- **Memory Locking**: (std-only) OS-level protection against being swapped to disk.
-- **Memory Encryption**: (Windows-only) `CryptProtectMemory` for in-memory encryption.
-- **Scoped Access**: Data is protected by default and only accessible within safe blocks.
+- **Memory Locking**: (std-only) On Linux/Windows the memory is locked to prevent memory swapping or unauthorized access, 
+On Linux it uses `mlock` and on Windows `VirtualLock` & `VirtualProtect` along with in-memory encryption using `CryptProtectMemory`.
+- **Safe Scoped Access**: Direct access on these types is not possible, data is protected by default and only accessible within safe blocks.
 - **`no_std` Support**: For embedded and Web environments (with zeroization only).
 - **Serde Support**: Optional serialization/deserialization.
 
 ## Usage
 
+### SecureString
+
 ```rust
 use secure_types::SecureString;
 
-// Create a string from a sensitive literal.
-let mut secret = SecureString::from("my_super_secret_password");
+ // Create a SecureString
+let mut secret = SecureString::from("my_super_secret");
+
+// The memory is locked here
+
+// Safely append more data.
+secret.push_str("_password");
+
+// The memory is locked here.
 
 // Use a scope to safely access the content as a &str.
-secret.str_scope(|unlocked_str| {
-    assert_eq!(unlocked_str, "my_super_secret_password");
-});
+secret.unlock_str(|exposed_str| {
+     assert_eq!(exposed_str, "my_super_secret_password");
+ });
+
+ // When `secret` is dropped, its data zeroized.
 ```
 
-For a `SecureVec`:
+### SecureVec
 
 ```rust
 use secure_types::SecureVec;
 
-let secret_vec = SecureVec::from_vec(vec![1, 2, 3]).unwrap();
+// Create a new, empty secure vector.
+let mut secret_key: SecureVec<u8> = SecureVec::new().unwrap();
 
-secret_vec.slice_scope(|slice| {
-   assert_eq!(slice, &[1, 2, 3]);
+// Push some sensitive data into it.
+secret_key.push(0);
+secret_key.push(1);
+secret_key.push(2);
+
+// The memory is locked here.
+
+// Use a scope to safely access the contents as a slice.
+secret_key.unlock_slice(|unlocked_slice| {
+     assert_eq!(unlocked_slice, &[0, 1, 2]);
+ });
+```
+
+### SecureArray
+
+```rust
+use secure_types::SecureArray;
+
+let exposed_array: &mut [u8; 3] = &mut [1, 2, 3];
+let mut secure_array = SecureArray::from_slice_mut(exposed_array).unwrap();
+
+
+secure_array.unlock_mut(|unlocked_slice| {
+    assert_eq!(unlocked_slice, &[1, 2, 3]);
 });
 ```
 
-## Security Model
 
-This crate is designed to mitigate certain risks but is not a perfect solution. It primarily protects secrets in program memory against:
-
-- **Disk Swapping**: The OS writing secrets to a page file.
-- **Malicious Memory Reads**: Malware that can steal data by reading a process's memory.
-- **Process Memory Dumps**: Data being exposed in a core dump.
+## See also the [examples](/examples/).
 
 
 ## Feature Flags
 
 - `std` (default): Enables all OS-level security features.
-- `no_std`: For `no_std` environments. Only provides the Zeroize on Drop guarantee.
-- `serde`: Enables serialization/deserialization for `SecureString` and `SecureBytes`.
+- `no_std`: For `no_std` environments. Only provides the Zeroize on Drop.
+- `serde`: Enables serialization/deserialization.
 
 
 ## Credits

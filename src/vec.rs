@@ -20,17 +20,14 @@ use memsec::Prot;
 
 pub type SecureBytes = SecureVec<u8>;
 
-/// A securely allocated, growable vector, analogous to `std::vec::Vec`.
-///
-/// `SecureVec<T>` is designed to hold a sequence of sensitive data elements. It serves as the
-/// foundational secure collection in this crate.
+/// A securely allocated, growable vector, just like `std::vec::Vec`.
 ///
 /// ## Security Model
 ///
 /// When compiled with the `std` feature (the default), it provides several layers of protection:
-/// - **Zeroization on Drop**: The memory region is securely zeroized when the vector is dropped.
-/// - **Memory Locking**: The underlying memory pages are locked using `mlock` (Unix) or
-///   `VirtualLock` (Windows) to prevent the OS from swapping them to disk.
+/// - **Zeroization on Drop**: The memory is zeroized when the vector is dropped.
+/// - **Memory Locking**: The underlying memory pages are locked using `mlock` & `madvise` for (Unix) or
+///   `VirtualLock` & `VirtualProtect` for (Windows) to prevent the OS from memory-dump/swap to disk or other processes accessing the memory.
 /// - **Memory Encryption**: On Windows, the memory is also encrypted using `CryptProtectMemory`.
 ///
 /// In a `no_std` environment, it falls back to providing only the **zeroization-on-drop** guarantee.
@@ -40,14 +37,18 @@ pub type SecureBytes = SecureVec<u8>;
 /// Direct indexing (e.g., `vec[0]`) on a locked vector will cause the operating system
 /// to terminate the process with an access violation error.
 ///
-/// Always use the provided scope methods (`slice_scope`, `slice_mut_scope`) for safe access.
+/// Always use the provided scope methods (`unlock_slice`, `unlock_slice_mut`) for safe access.
+/// 
+/// # Notes
+/// 
+/// If you return a new allocated `Vec` from one of the unlock methods you are responsible for zeroizing the memory.
 ///
-/// # Examples
+/// # Example
 ///
 /// Using `SecureBytes` (a type alias for `SecureVec<u8>`) to handle a secret key.
 ///
 /// ```
-/// use secure_types::SecureBytes;
+/// use secure_types::{SecureBytes, Zeroize};
 ///
 /// // Create a new, empty secure vector.
 /// let mut secret_key = SecureBytes::new().unwrap();
@@ -62,8 +63,16 @@ pub type SecureBytes = SecureVec<u8>;
 /// // Use a scope to safely access the contents as a slice.
 /// secret_key.unlock_slice(|unlocked_slice| {
 ///     assert_eq!(unlocked_slice, &[0xAB, 0xCD, 0xEF]);
-///     println!("Secret Key: {:?}", unlocked_slice);
 /// });
+/// 
+/// // Not recommended but if you allocate a new Vec make sure to zeroize it
+/// let mut exposed = secret_key.unlock_slice(|unlocked_slice| {
+///     Vec::from(unlocked_slice)
+/// });
+/// 
+/// // Do what you need to to do with the new vector
+/// // When you are done with it, zeroize it
+/// exposed.zeroize();
 ///
 /// // The memory is automatically locked again when the scope ends.
 ///
@@ -83,6 +92,8 @@ unsafe impl<T: Zeroize + Send> Send for SecureVec<T> {}
 unsafe impl<T: Zeroize + Send + Sync> Sync for SecureVec<T> {}
 
 impl<T: Zeroize> SecureVec<T> {
+
+   /// Create a new `SecureVec` with a capacity of 1
    pub fn new() -> Result<Self, Error> {
       // Give at least a capacity of 1 so encryption/decryption can be done.
       let capacity = 1;
@@ -130,6 +141,7 @@ impl<T: Zeroize> SecureVec<T> {
       Ok(secure)
    }
 
+   /// Create a new `SecureVec` with the given capacity
    pub fn new_with_capacity(mut capacity: usize) -> Result<Self, Error> {
       if capacity == 0 {
          capacity = 1;
@@ -181,6 +193,9 @@ impl<T: Zeroize> SecureVec<T> {
    }
 
    #[cfg(feature = "std")]
+   /// Create a new `SecureVec` from a `Vec`
+   /// 
+   /// The `Vec` is zeroized afterwards
    pub fn from_vec(mut vec: Vec<T>) -> Result<Self, Error> {
       if vec.capacity() == 0 {
          vec.reserve(1);
@@ -208,7 +223,6 @@ impl<T: Zeroize> SecureVec<T> {
          core::ptr::copy_nonoverlapping(vec.as_ptr(), ptr, len);
       }
 
-      // Zeroize and drop the original Vec
       vec.zeroize();
       drop(vec);
 
@@ -235,6 +249,7 @@ impl<T: Zeroize> SecureVec<T> {
    }
 
    /// Create a new `SecureVec` from a mutable slice.
+   /// 
    /// The slice is zeroized afterwards
    pub fn from_slice_mut(slice: &mut [T]) -> Result<Self, Error>
    where
@@ -250,6 +265,7 @@ impl<T: Zeroize> SecureVec<T> {
    }
 
    /// Create a new `SecureVec` from a slice.
+   /// 
    /// The slice is not zeroized, you are responsible for zeroizing it
    pub fn from_slice(slice: &[T]) -> Result<Self, Error>
    where
@@ -304,11 +320,6 @@ impl<T: Zeroize> SecureVec<T> {
       super::crypt_unprotect_memory(ptr, self.aligned_size())
    }
 
-   /// Lock the memory region
-   ///
-   /// On Windows also calls `CryptProtectMemory` to encrypt the memory
-   ///
-   /// On Unix it just calls `mprotect` to lock the memory
    pub(crate) fn lock_memory(&self) -> (bool, bool) {
       #[cfg(feature = "std")]
       {
@@ -330,11 +341,6 @@ impl<T: Zeroize> SecureVec<T> {
       }
    }
 
-   /// Unlock the memory region
-   ///
-   /// On Windows also calls `CryptUnprotectMemory` to decrypt the memory
-   ///
-   /// On Unix it just calls `mprotect` to unlock the memory
    pub(crate) fn unlock_memory(&self) -> (bool, bool) {
       #[cfg(feature = "std")]
       {
@@ -400,12 +406,6 @@ impl<T: Zeroize> SecureVec<T> {
    }
 
    /// Immutable access to the `SecureVec` as `Iter<T>`
-   ///
-   /// ## Use with caution
-   ///
-   /// You can actually return a new allocated `Vec` from this function
-   ///
-   /// If you do that you are responsible for zeroizing its contents
    pub fn unlock_iter<F, R>(&self, f: F) -> R
    where
       F: FnOnce(core::slice::Iter<T>) -> R,
@@ -421,12 +421,6 @@ impl<T: Zeroize> SecureVec<T> {
    }
 
    /// Mutable access to the `SecureVec` as `IterMut<T>`
-   ///
-   /// ## Use with caution
-   ///
-   /// You can actually return a new allocated `Vec` from this function
-   ///
-   /// If you do that you are responsible for zeroizing its contents
    pub fn unlock_iter_mut<F, R>(&mut self, f: F) -> R
    where
       F: FnOnce(core::slice::IterMut<T>) -> R,
