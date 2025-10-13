@@ -67,6 +67,11 @@ use windows_sys::Win32::System::SystemInformation::GetSystemInfo;
 static PAGE_SIZE_INIT: Once = Once::new();
 static mut PAGE_SIZE: usize = 0;
 
+#[cfg(all(feature = "use_os", unix))]
+static mut SUPPORTS_MEMFD_SECRET: bool = false;
+#[cfg(all(feature = "use_os", unix))]
+static SUPPORTS_MEMFD_SECRET_INIT: Once = Once::new();
+
 #[cfg(feature = "use_os")]
 /// Returns the page size depending on the OS
 unsafe fn page_size_init() {
@@ -92,17 +97,73 @@ pub(crate) unsafe fn page_aligned_size(size: usize) -> usize {
    unsafe { (size + PAGE_SIZE - 1) & !(PAGE_SIZE - 1) }
 }
 
+#[cfg(all(feature = "use_os", unix))]
+unsafe fn supports_memfd_secret_init() {
+   use libc::{SYS_memfd_secret, close, syscall};
+
+   let res = unsafe { syscall(SYS_memfd_secret as _, 0isize) };
+
+   if res >= 0 {
+      // memfd_secret is supported
+      unsafe { close(res as libc::c_int) };
+      unsafe { SUPPORTS_MEMFD_SECRET = true };
+   } else {
+      /*
+      let errno = unsafe { *libc::__errno_location() };
+      if errno == ENOSYS {
+         // not supported
+      } else {
+         // Other error treat as unsupported
+      }
+       */
+   }
+}
+
 /// Allocate memory
 ///
 /// Size is page aligned if the target is an OS
-pub(crate) fn alloc_aligned<T>(size: usize) -> Result<NonNull<T>, Error> {
+///
+/// For `Windows` it always uses [memsec::malloc_sized]
+///
+/// For `Unix` it uses [memsec::memfd_secret_sized] if `memfd_secret` is supported
+///
+/// If the allocation fails it fallbacks to [memsec::malloc_sized]
+pub(crate) unsafe fn alloc_aligned<T>(size: usize) -> Result<NonNull<T>, Error> {
    #[cfg(feature = "use_os")]
-   unsafe {
-      let aligned_size = page_aligned_size(size);
-      let allocated_ptr = memsec::malloc_sized(aligned_size);
-      let non_null = allocated_ptr.ok_or(Error::AllocationFailed)?;
-      let ptr = non_null.as_ptr() as *mut T;
-      NonNull::new(ptr).ok_or(Error::NullAllocation)
+   {
+      #[cfg(windows)]
+      unsafe {
+         let aligned_size = page_aligned_size(size);
+         let allocated_ptr = memsec::malloc_sized(aligned_size);
+         let non_null = allocated_ptr.ok_or(Error::AllocationFailed)?;
+         let ptr = non_null.as_ptr() as *mut T;
+         NonNull::new(ptr).ok_or(Error::NullAllocation)
+      }
+
+      #[cfg(unix)]
+      {
+         SUPPORTS_MEMFD_SECRET_INIT.call_once(|| unsafe { supports_memfd_secret_init() });
+
+         let aligned_size = unsafe { page_aligned_size(size) };
+         let supports_memfd_secret = unsafe { SUPPORTS_MEMFD_SECRET };
+
+         let ptr_opt = if supports_memfd_secret {
+            unsafe { memsec::memfd_secret_sized(aligned_size) }
+         } else {
+            None
+         };
+
+         if let Some(ptr) = ptr_opt {
+            NonNull::new(ptr.as_ptr() as *mut T).ok_or(Error::NullAllocation)
+         } else {
+            unsafe {
+               let allocated_ptr = memsec::malloc_sized(aligned_size);
+               let non_null = allocated_ptr.ok_or(Error::AllocationFailed)?;
+               let ptr = non_null.as_ptr() as *mut T;
+               NonNull::new(ptr).ok_or(Error::NullAllocation)
+            }
+         }
+      }
    }
 
    #[cfg(not(feature = "use_os"))]
@@ -114,6 +175,24 @@ pub(crate) fn alloc_aligned<T>(size: usize) -> Result<NonNull<T>, Error> {
          return Err(Error::NullAllocation);
       }
       ptr
+   }
+}
+
+#[cfg(feature = "use_os")]
+pub(crate) fn free<T>(ptr: NonNull<T>) {
+   #[cfg(windows)]
+   unsafe {
+      memsec::free(ptr);
+   }
+
+   #[cfg(unix)]
+   {
+      let supports_memfd_secret = unsafe { SUPPORTS_MEMFD_SECRET };
+      if supports_memfd_secret {
+         unsafe { memsec::free_memfd_secret(ptr) };
+      } else {
+         unsafe { memsec::free(ptr) };
+      }
    }
 }
 
@@ -206,6 +285,27 @@ pub(crate) fn crypt_unprotect_memory(ptr: *mut u8, size_in_bytes: usize) -> bool
 
 #[cfg(test)]
 mod tests {
+
+   #[cfg(unix)]
+   #[test]
+   fn test_supports_memfd_secret() {
+      use super::*;
+
+      SUPPORTS_MEMFD_SECRET_INIT.call_once(|| unsafe { supports_memfd_secret_init() });
+
+      let supports = unsafe { SUPPORTS_MEMFD_SECRET };
+
+      if supports {
+         print!("memfd_secret is supported");
+         let size = 1 * size_of::<u8>();
+         let aligned = unsafe { page_aligned_size(size) };
+         let ptr = unsafe { memsec::memfd_secret_sized(aligned) };
+         assert!(ptr.is_some());
+      } else {
+         print!("memfd_secret is not supported");
+      }
+   }
+
    #[cfg(feature = "serde")]
    #[test]
    fn test_array_and_secure_vec_serde_compatibility() {

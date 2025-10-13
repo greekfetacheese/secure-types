@@ -6,7 +6,7 @@ use core::{marker::PhantomData, mem, ptr::NonNull};
 use zeroize::Zeroize;
 
 #[cfg(feature = "use_os")]
-use super::{alloc_aligned, page_aligned_size};
+use super::{alloc_aligned, free, page_aligned_size};
 #[cfg(feature = "use_os")]
 use memsec::Prot;
 
@@ -79,7 +79,7 @@ where
          return Err(Error::LengthCannotBeZero);
       }
 
-      let ptr = alloc_aligned::<T>(size)?;
+      let ptr = unsafe { alloc_aligned::<T>(size)? };
 
       let secure_array = SecureArray {
          ptr,
@@ -319,16 +319,13 @@ impl<T: Zeroize, const LENGTH: usize> Drop for SecureArray<T, LENGTH> {
          return;
       }
 
-      unsafe {
-         #[cfg(feature = "use_os")]
-         {
-            memsec::free(self.ptr);
-         }
-         #[cfg(not(feature = "use_os"))]
-         {
-            let layout = Layout::from_size_align_unchecked(size, mem::align_of::<T>());
-            dealloc(self.ptr.as_ptr() as *mut u8, layout);
-         }
+      #[cfg(feature = "use_os")]
+      free(self.ptr);
+
+      #[cfg(not(feature = "use_os"))]
+      {
+         let layout = Layout::from_size_align_unchecked(size, mem::align_of::<T>());
+         dealloc(self.ptr.as_ptr() as *mut u8, layout);
       }
    }
 }

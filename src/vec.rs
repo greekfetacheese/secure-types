@@ -14,7 +14,7 @@ use core::{
 use zeroize::{DefaultIsZeroes, Zeroize};
 
 #[cfg(feature = "use_os")]
-use super::{alloc_aligned, page_aligned_size};
+use super::{alloc_aligned, free, page_aligned_size};
 #[cfg(feature = "use_os")]
 use memsec::Prot;
 
@@ -97,7 +97,7 @@ impl<T: Zeroize> SecureVec<T> {
       // Give at least a capacity of 1 so encryption/decryption can be done.
       let capacity = 1;
       let size = capacity * mem::size_of::<T>();
-      let ptr = alloc_aligned::<T>(size)?;
+      let ptr = unsafe { alloc_aligned::<T>(size)? };
 
       let secure = SecureVec {
          ptr,
@@ -128,7 +128,7 @@ impl<T: Zeroize> SecureVec<T> {
       }
 
       let size = capacity * mem::size_of::<T>();
-      let ptr = alloc_aligned::<T>(size)?;
+      let ptr = unsafe { alloc_aligned::<T>(size)? };
 
       let secure = SecureVec {
          ptr,
@@ -166,7 +166,7 @@ impl<T: Zeroize> SecureVec<T> {
 
       let size = capacity * mem::size_of::<T>();
 
-      let ptr = match alloc_aligned::<T>(size) {
+      let ptr = match unsafe { alloc_aligned::<T>(size) } {
          Ok(ptr) => ptr,
          Err(_) => {
             vec.zeroize();
@@ -442,7 +442,7 @@ impl<T: Zeroize> SecureVec<T> {
       let new_capacity = (self.capacity.max(1) * 2).max(required_capacity);
 
       let new_size = new_capacity * mem::size_of::<T>();
-      let new_ptr = alloc_aligned::<T>(new_size).expect("Allocation failed");
+      let new_ptr = unsafe { alloc_aligned::<T>(new_size).expect("Allocation failed") };
 
       // Copy data to new pointer
       unsafe {
@@ -462,7 +462,7 @@ impl<T: Zeroize> SecureVec<T> {
          }
 
          #[cfg(feature = "use_os")]
-         memsec::free(self.ptr);
+         free(self.ptr);
 
          #[cfg(not(feature = "use_os"))]
          {
@@ -548,16 +548,15 @@ impl<T: Zeroize> Drop for SecureVec<T> {
    fn drop(&mut self) {
       self.erase();
       self.unlock_memory();
-      unsafe {
-         #[cfg(feature = "use_os")]
-         memsec::free(self.ptr);
 
-         #[cfg(not(feature = "use_os"))]
-         {
-            let layout =
-               Layout::from_size_align_unchecked(self.allocated_byte_size(), mem::align_of::<T>());
-            dealloc(self.ptr.as_ptr() as *mut u8, layout);
-         }
+      #[cfg(feature = "use_os")]
+      free(self.ptr);
+
+      #[cfg(not(feature = "use_os"))]
+      {
+         let layout =
+            Layout::from_size_align_unchecked(self.allocated_byte_size(), mem::align_of::<T>());
+         dealloc(self.ptr.as_ptr() as *mut u8, layout);
       }
    }
 }
