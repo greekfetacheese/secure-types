@@ -14,7 +14,7 @@ use core::{
 use zeroize::{DefaultIsZeroes, Zeroize};
 
 #[cfg(feature = "use_os")]
-use super::page_aligned_size;
+use super::{alloc_aligned, page_aligned_size};
 #[cfg(feature = "use_os")]
 use memsec::Prot;
 
@@ -38,9 +38,9 @@ pub type SecureBytes = SecureVec<u8>;
 /// to terminate the process with an access violation error.
 ///
 /// Always use the provided scope methods (`unlock_slice`, `unlock_slice_mut`) for safe access.
-/// 
+///
 /// # Notes
-/// 
+///
 /// If you return a new allocated `Vec` from one of the unlock methods you are responsible for zeroizing the memory.
 ///
 /// # Example
@@ -64,12 +64,12 @@ pub type SecureBytes = SecureVec<u8>;
 /// secret_key.unlock_slice(|unlocked_slice| {
 ///     assert_eq!(unlocked_slice, &[0xAB, 0xCD, 0xEF]);
 /// });
-/// 
+///
 /// // Not recommended but if you allocate a new Vec make sure to zeroize it
 /// let mut exposed = secret_key.unlock_slice(|unlocked_slice| {
 ///     Vec::from(unlocked_slice)
 /// });
-/// 
+///
 /// // Do what you need to to do with the new vector
 /// // When you are done with it, zeroize it
 /// exposed.zeroize();
@@ -92,35 +92,15 @@ unsafe impl<T: Zeroize + Send> Send for SecureVec<T> {}
 unsafe impl<T: Zeroize + Send + Sync> Sync for SecureVec<T> {}
 
 impl<T: Zeroize> SecureVec<T> {
-
    /// Create a new `SecureVec` with a capacity of 1
    pub fn new() -> Result<Self, Error> {
       // Give at least a capacity of 1 so encryption/decryption can be done.
       let capacity = 1;
       let size = capacity * mem::size_of::<T>();
+      let ptr = alloc_aligned::<T>(size)?;
 
-      #[cfg(feature = "use_os")]
-      let ptr = unsafe {
-         let aligned_size = page_aligned_size(size);
-         let allocated_ptr = memsec::malloc_sized(aligned_size);
-         let ptr = allocated_ptr.ok_or(Error::AllocationFailed)?;
-         ptr.as_ptr() as *mut T
-      };
-
-      #[cfg(not(feature = "use_os"))]
-      let ptr = {
-         let layout = Layout::from_size_align(size, mem::align_of::<T>())
-            .map_err(|_| Error::AllocationFailed)?;
-         let ptr = unsafe { alloc::alloc(layout) as *mut T };
-         if ptr.is_null() {
-            return Err(Error::AllocationFailed);
-         }
-         ptr
-      };
-
-      let non_null = NonNull::new(ptr).ok_or(Error::NullAllocation)?;
       let secure = SecureVec {
-         ptr: non_null,
+         ptr,
          len: 0,
          capacity,
          _marker: PhantomData,
@@ -148,30 +128,10 @@ impl<T: Zeroize> SecureVec<T> {
       }
 
       let size = capacity * mem::size_of::<T>();
-
-      #[cfg(feature = "use_os")]
-      let ptr = unsafe {
-         let aligned_size = page_aligned_size(size);
-         let allocated_ptr = memsec::malloc_sized(aligned_size);
-         let ptr = allocated_ptr.ok_or(Error::AllocationFailed)?;
-         ptr.as_ptr() as *mut T
-      };
-
-      #[cfg(not(feature = "use_os"))]
-      let ptr = {
-         let layout = Layout::from_size_align(size, mem::align_of::<T>())
-            .map_err(|_| Error::AllocationFailed)?;
-         let ptr = unsafe { alloc::alloc(layout) as *mut T };
-         if ptr.is_null() {
-            return Err(Error::AllocationFailed);
-         }
-         ptr
-      };
-
-      let non_null = NonNull::new(ptr).ok_or(Error::NullAllocation)?;
+      let ptr = alloc_aligned::<T>(size)?;
 
       let secure = SecureVec {
-         ptr: non_null,
+         ptr,
          len: 0,
          capacity,
          _marker: PhantomData,
@@ -194,7 +154,7 @@ impl<T: Zeroize> SecureVec<T> {
 
    #[cfg(feature = "use_os")]
    /// Create a new `SecureVec` from a `Vec`
-   /// 
+   ///
    /// The `Vec` is zeroized afterwards
    pub fn from_vec(mut vec: Vec<T>) -> Result<Self, Error> {
       if vec.capacity() == 0 {
@@ -204,15 +164,11 @@ impl<T: Zeroize> SecureVec<T> {
       let capacity = vec.capacity();
       let len = vec.len();
 
-      // Allocate memory
       let size = capacity * mem::size_of::<T>();
 
-      let ptr = unsafe {
-         let aligned_size = page_aligned_size(size);
-         let allocated_ptr_opt = memsec::malloc_sized(aligned_size);
-         if let Some(allocated_ptr) = allocated_ptr_opt {
-            allocated_ptr.as_ptr() as *mut T
-         } else {
+      let ptr = match alloc_aligned::<T>(size) {
+         Ok(ptr) => ptr,
+         Err(_) => {
             vec.zeroize();
             return Err(Error::AllocationFailed);
          }
@@ -220,16 +176,13 @@ impl<T: Zeroize> SecureVec<T> {
 
       // Copy data from the old pointer to the new one
       unsafe {
-         core::ptr::copy_nonoverlapping(vec.as_ptr(), ptr, len);
+         core::ptr::copy_nonoverlapping(vec.as_ptr(), ptr.as_ptr() as *mut T, len);
       }
 
       vec.zeroize();
-      drop(vec);
-
-      let non_null = NonNull::new(ptr).ok_or(Error::NullAllocation)?;
 
       let secure = SecureVec {
-         ptr: non_null,
+         ptr,
          len,
          capacity,
          _marker: PhantomData,
@@ -249,7 +202,7 @@ impl<T: Zeroize> SecureVec<T> {
    }
 
    /// Create a new `SecureVec` from a mutable slice.
-   /// 
+   ///
    /// The slice is zeroized afterwards
    pub fn from_slice_mut(slice: &mut [T]) -> Result<Self, Error>
    where
@@ -265,7 +218,7 @@ impl<T: Zeroize> SecureVec<T> {
    }
 
    /// Create a new `SecureVec` from a slice.
-   /// 
+   ///
    /// The slice is not zeroized, you are responsible for zeroizing it
    pub fn from_slice(slice: &[T]) -> Result<Self, Error>
    where
@@ -300,7 +253,7 @@ impl<T: Zeroize> SecureVec<T> {
       let size = self.capacity * mem::size_of::<T>();
       #[cfg(feature = "use_os")]
       {
-         page_aligned_size(size)
+         unsafe { page_aligned_size(size) }
       }
       #[cfg(not(feature = "use_os"))]
       {
@@ -488,32 +441,17 @@ impl<T: Zeroize> SecureVec<T> {
       let required_capacity = self.len() + additional;
       let new_capacity = (self.capacity.max(1) * 2).max(required_capacity);
 
-      let new_items_byte_size = new_capacity * mem::size_of::<T>();
+      let new_size = new_capacity * mem::size_of::<T>();
+      let new_ptr = alloc_aligned::<T>(new_size).expect("Allocation failed");
 
-      // Allocate new memory
-      #[cfg(feature = "use_os")]
-      let new_ptr = unsafe {
-         let aligned_allocation_size = page_aligned_size(new_items_byte_size);
-         memsec::malloc_sized(aligned_allocation_size)
-            .expect("Failed to allocate memory for SecureVec reserve")
-            .as_ptr() as *mut T
-      };
-
-      #[cfg(not(feature = "use_os"))]
-      let new_ptr = {
-         let layout = Layout::from_size_align(new_items_byte_size, mem::align_of::<T>())
-            .expect("Failed to create layout for SecureVec reserve");
-         let ptr = unsafe { alloc::alloc(layout) as *mut T };
-         if ptr.is_null() {
-            panic!("Memory allocation failed for SecureVec reserve");
-         }
-         ptr
-      };
-
-      // Copy data to new pointer, then erase and free old memory
+      // Copy data to new pointer
       unsafe {
          self.unlock_memory();
-         core::ptr::copy_nonoverlapping(self.ptr.as_ptr(), new_ptr, self.len());
+         core::ptr::copy_nonoverlapping(
+            self.ptr.as_ptr(),
+            new_ptr.as_ptr() as *mut T,
+            self.len(),
+         );
 
          // Erase and free the old memory
          if self.capacity > 0 {
@@ -522,6 +460,7 @@ impl<T: Zeroize> SecureVec<T> {
                elem.zeroize();
             }
          }
+
          #[cfg(feature = "use_os")]
          memsec::free(self.ptr);
 
@@ -534,7 +473,7 @@ impl<T: Zeroize> SecureVec<T> {
       }
 
       // Update pointer and capacity, then re-lock the new memory region
-      self.ptr = NonNull::new(new_ptr).expect("New pointer was null");
+      self.ptr = new_ptr;
       self.capacity = new_capacity;
       self.lock_memory();
    }
@@ -615,7 +554,6 @@ impl<T: Zeroize> Drop for SecureVec<T> {
 
          #[cfg(not(feature = "use_os"))]
          {
-            // Recreate the layout to deallocate correctly
             let layout =
                Layout::from_size_align_unchecked(self.allocated_byte_size(), mem::align_of::<T>());
             dealloc(self.ptr.as_ptr() as *mut u8, layout);

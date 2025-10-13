@@ -6,7 +6,7 @@ use core::{marker::PhantomData, mem, ptr::NonNull};
 use zeroize::Zeroize;
 
 #[cfg(feature = "use_os")]
-use super::page_aligned_size;
+use super::{alloc_aligned, page_aligned_size};
 #[cfg(feature = "use_os")]
 use memsec::Prot;
 
@@ -27,9 +27,9 @@ use memsec::Prot;
 /// Direct indexing (e.g., `array[0]`) on a locked array will cause the operating system
 /// to terminate the process with an access violation error. Always use the provided
 /// scope methods (`unlock`, `unlock_mut`) for safe access.
-/// 
+///
 /// # Notes
-/// 
+///
 /// If you return a new allocated `[T; LENGTH]` from one of the unlock methods you are responsible for zeroizing the memory.
 ///
 /// # Example
@@ -44,12 +44,12 @@ use memsec::Prot;
 ///     assert_eq!(unlocked_slice.len(), 32);
 ///     assert_eq!(unlocked_slice[0], 1);
 /// });
-/// 
+///
 /// // Not recommended but if you allocate a new [u8; LENGTH] make sure to zeroize it
 /// let mut exposed = secure_key.unlock(|unlocked_slice| {
 ///     [unlocked_slice[0], unlocked_slice[1], unlocked_slice[2]]
 /// });
-/// 
+///
 /// // Do what you need to to do with the new array
 /// // When you are done with it, zeroize it
 /// exposed.zeroize();
@@ -79,28 +79,10 @@ where
          return Err(Error::LengthCannotBeZero);
       }
 
-      #[cfg(feature = "use_os")]
-      let new_ptr = {
-         let aligned_size = page_aligned_size(size);
-         let allocated_ptr = unsafe { memsec::malloc_sized(aligned_size) };
-         allocated_ptr.ok_or(Error::AllocationFailed)?.as_ptr() as *mut T
-      };
-
-      #[cfg(not(feature = "use_os"))]
-      let new_ptr = {
-         let layout = Layout::from_size_align(size, mem::align_of::<T>())
-            .map_err(|_| Error::AllocationFailed)?;
-         let ptr = unsafe { alloc::alloc(layout) as *mut T };
-         if ptr.is_null() {
-            return Err(Error::AllocationFailed);
-         }
-         ptr
-      };
-
-      let non_null = NonNull::new(new_ptr).ok_or(Error::NullAllocation)?;
+      let ptr = alloc_aligned::<T>(size)?;
 
       let secure_array = SecureArray {
-         ptr: non_null,
+         ptr,
          _marker: PhantomData,
       };
 
@@ -206,7 +188,7 @@ where
       let size = self.len() * mem::size_of::<T>();
       #[cfg(feature = "use_os")]
       {
-         page_aligned_size(size)
+         unsafe { page_aligned_size(size) }
       }
       #[cfg(not(feature = "use_os"))]
       {
@@ -344,7 +326,6 @@ impl<T: Zeroize, const LENGTH: usize> Drop for SecureArray<T, LENGTH> {
          }
          #[cfg(not(feature = "use_os"))]
          {
-            // Recreate the layout to deallocate correctly
             let layout = Layout::from_size_align_unchecked(size, mem::align_of::<T>());
             dealloc(self.ptr.as_ptr() as *mut u8, layout);
          }
@@ -370,7 +351,7 @@ impl<const LENGTH: usize> TryFrom<SecureVec<u8>> for SecureArray<u8, LENGTH> {
    /// Tries to convert a `SecureVec<u8>` into a `SecureArray<u8, LENGTH>`.
    ///
    /// This operation will only succeed if `vec.len() == LENGTH`.
-   /// 
+   ///
    /// The `SecureVec` is consumed.
    fn try_from(vec: SecureVec<u8>) -> Result<Self, Self::Error> {
       if vec.len() != LENGTH {

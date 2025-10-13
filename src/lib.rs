@@ -1,5 +1,4 @@
 #![doc = include_str!("../readme.md")]
-
 #![cfg_attr(feature = "no_os", no_os)]
 
 #[cfg(feature = "no_os")]
@@ -20,6 +19,8 @@ pub use zeroize::Zeroize;
 pub use memsec;
 #[cfg(feature = "use_os")]
 use memsec::Prot;
+#[cfg(feature = "use_os")]
+use std::sync::Once;
 
 use thiserror::Error as ThisError;
 
@@ -48,6 +49,7 @@ pub enum Error {
 #[cfg(not(feature = "use_os"))]
 #[derive(Debug)]
 pub enum Error {
+   AlignmentFailed,
    AllocationFailed,
    NullAllocation,
 }
@@ -62,12 +64,15 @@ use windows_sys::Win32::Security::Cryptography::{
 #[cfg(all(feature = "use_os", windows))]
 use windows_sys::Win32::System::SystemInformation::GetSystemInfo;
 
+static PAGE_SIZE_INIT: Once = Once::new();
+static mut PAGE_SIZE: usize = 0;
+
 #[cfg(feature = "use_os")]
 /// Returns the page size depending on the OS
-pub fn page_size() -> usize {
+unsafe fn page_size_init() {
    #[cfg(unix)]
-   {
-      unsafe { libc::sysconf(libc::_SC_PAGESIZE) as usize }
+   unsafe {
+      PAGE_SIZE = libc::sysconf(libc::_SC_PAGESIZE) as usize;
    }
 
    #[cfg(windows)]
@@ -75,29 +80,57 @@ pub fn page_size() -> usize {
       let mut si = core::mem::MaybeUninit::uninit();
       unsafe {
          GetSystemInfo(si.as_mut_ptr());
-         (*si.as_ptr()).dwPageSize as usize
+         PAGE_SIZE = (*si.as_ptr()).dwPageSize as usize;
       }
    }
 }
 
 #[cfg(feature = "use_os")]
 /// Returns the page aligned size of a given size
-pub fn page_aligned_size(size: usize) -> usize {
-   (size + page_size() - 1) & !(page_size() - 1)
+pub(crate) unsafe fn page_aligned_size(size: usize) -> usize {
+   PAGE_SIZE_INIT.call_once(|| unsafe { page_size_init() });
+   unsafe { (size + PAGE_SIZE - 1) & !(PAGE_SIZE - 1) }
+}
+
+/// Allocate memory
+///
+/// Size is page aligned if the target is an OS
+pub(crate) fn alloc_aligned<T>(size: usize) -> Result<NonNull<T>, Error> {
+   #[cfg(feature = "use_os")]
+   unsafe {
+      let aligned_size = page_aligned_size(size);
+      let allocated_ptr = memsec::malloc_sized(aligned_size);
+      let non_null = allocated_ptr.ok_or(Error::AllocationFailed)?;
+      let ptr = non_null.as_ptr() as *mut T;
+      NonNull::new(ptr).ok_or(Error::NullAllocation)
+   }
+
+   #[cfg(not(feature = "use_os"))]
+   {
+      let layout =
+         Layout::from_size_align(size, mem::align_of::<T>()).map_err(|_| Error::AlignmentFailed)?;
+      let ptr = unsafe { alloc::alloc(layout) as *mut T };
+      if ptr.is_null() {
+         return Err(Error::NullAllocation);
+      }
+      ptr
+   }
 }
 
 #[cfg(feature = "use_os")]
-pub fn mprotect<T>(ptr: NonNull<T>, prot: Prot::Ty) -> bool {
+pub(crate) fn mprotect<T>(ptr: NonNull<T>, prot: Prot::Ty) -> bool {
    let success = unsafe { memsec::mprotect(ptr, prot) };
-   if !success {
-      #[cfg(test)]
-      eprintln!("mprotect failed");
+   #[cfg(test)]
+   {
+      if !success {
+         eprintln!("mprotect failed");
+      }
    }
    success
 }
 
 #[cfg(all(feature = "use_os", windows))]
-pub fn crypt_protect_memory(ptr: *mut u8, aligned_size: usize) -> bool {
+pub(crate) fn crypt_protect_memory(ptr: *mut u8, aligned_size: usize) -> bool {
    if aligned_size == 0 {
       return true; // Nothing to encrypt
    }
@@ -135,7 +168,7 @@ pub fn crypt_protect_memory(ptr: *mut u8, aligned_size: usize) -> bool {
 }
 
 #[cfg(all(feature = "use_os", windows))]
-pub fn crypt_unprotect_memory(ptr: *mut u8, size_in_bytes: usize) -> bool {
+pub(crate) fn crypt_unprotect_memory(ptr: *mut u8, size_in_bytes: usize) -> bool {
    if size_in_bytes == 0 {
       return true;
    }
