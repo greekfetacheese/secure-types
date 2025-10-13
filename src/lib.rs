@@ -1,8 +1,8 @@
 #![doc = include_str!("../readme.md")]
 
-#![cfg_attr(feature = "no_std", no_std)]
+#![cfg_attr(feature = "no_os", no_os)]
 
-#[cfg(feature = "no_std")]
+#[cfg(feature = "no_os")]
 extern crate alloc;
 
 pub mod array;
@@ -16,14 +16,14 @@ pub use vec::{SecureBytes, SecureVec};
 use core::ptr::NonNull;
 pub use zeroize::Zeroize;
 
-#[cfg(feature = "std")]
+#[cfg(feature = "use_os")]
 pub use memsec;
-#[cfg(feature = "std")]
+#[cfg(feature = "use_os")]
 use memsec::Prot;
 
 use thiserror::Error as ThisError;
 
-#[cfg(feature = "std")]
+#[cfg(feature = "use_os")]
 #[derive(ThisError, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 pub enum Error {
@@ -45,24 +45,24 @@ pub enum Error {
    LengthMismatch,
 }
 
-#[cfg(not(feature = "std"))]
+#[cfg(not(feature = "use_os"))]
 #[derive(Debug)]
 pub enum Error {
    AllocationFailed,
    NullAllocation,
 }
 
-#[cfg(all(feature = "std", test, windows))]
+#[cfg(all(feature = "use_os", test, windows))]
 use windows_sys::Win32::Foundation::GetLastError;
-#[cfg(all(feature = "std", windows))]
+#[cfg(all(feature = "use_os", windows))]
 use windows_sys::Win32::Security::Cryptography::{
    CRYPTPROTECTMEMORY_BLOCK_SIZE, CRYPTPROTECTMEMORY_SAME_PROCESS, CryptProtectMemory,
    CryptUnprotectMemory,
 };
-#[cfg(all(feature = "std", windows))]
+#[cfg(all(feature = "use_os", windows))]
 use windows_sys::Win32::System::SystemInformation::GetSystemInfo;
 
-#[cfg(feature = "std")]
+#[cfg(feature = "use_os")]
 /// Returns the page size depending on the OS
 pub fn page_size() -> usize {
    #[cfg(unix)]
@@ -80,13 +80,13 @@ pub fn page_size() -> usize {
    }
 }
 
-#[cfg(feature = "std")]
+#[cfg(feature = "use_os")]
 /// Returns the page aligned size of a given size
 pub fn page_aligned_size(size: usize) -> usize {
    (size + page_size() - 1) & !(page_size() - 1)
 }
 
-#[cfg(feature = "std")]
+#[cfg(feature = "use_os")]
 pub fn mprotect<T>(ptr: NonNull<T>, prot: Prot::Ty) -> bool {
    let success = unsafe { memsec::mprotect(ptr, prot) };
    if !success {
@@ -96,7 +96,7 @@ pub fn mprotect<T>(ptr: NonNull<T>, prot: Prot::Ty) -> bool {
    success
 }
 
-#[cfg(all(feature = "std", windows))]
+#[cfg(all(feature = "use_os", windows))]
 pub fn crypt_protect_memory(ptr: *mut u8, aligned_size: usize) -> bool {
    if aligned_size == 0 {
       return true; // Nothing to encrypt
@@ -134,7 +134,7 @@ pub fn crypt_protect_memory(ptr: *mut u8, aligned_size: usize) -> bool {
    }
 }
 
-#[cfg(all(feature = "std", windows))]
+#[cfg(all(feature = "use_os", windows))]
 pub fn crypt_unprotect_memory(ptr: *mut u8, size_in_bytes: usize) -> bool {
    if size_in_bytes == 0 {
       return true;

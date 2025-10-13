@@ -42,7 +42,7 @@ version = "1"
 features = ["derive"]
 
 [features]
-default = ["std"]
-std = ["memsec"]
+default = ["use_os"]
+use_os = ["memsec"]
 serde = ["dep:serde"]
-no_std = []
+no_os = []

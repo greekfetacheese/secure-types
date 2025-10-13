@@ -221,7 +221,7 @@ impl SecureString {
    }
 }
 
-#[cfg(feature = "std")]
+#[cfg(feature = "use_os")]
 impl From<String> for SecureString {
    /// Creates a new `SecureString` from a `String`.
    ///
@@ -300,7 +300,7 @@ fn char_to_byte_idx(s_bytes: &[u8], char_idx: usize) -> usize {
       .unwrap_or(s_bytes.len()) // Fallback to end if char_idx is out of bounds
 }
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(all(test, feature = "use_os"))]
 mod tests {
    use super::*;
 

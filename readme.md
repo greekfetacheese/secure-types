@@ -11,7 +11,7 @@ Currently there are 3 types:
 ## Features
 
 - **Zeroization on Drop**: Memory is wiped when dropped.
-- **Memory Locking**: (std-only) On Linux/Windows the memory is locked to prevent memory swapping or unauthorized access, 
+- **Memory Locking**: (OS-only) On Linux/Windows the memory is locked to prevent memory swapping or unauthorized access, 
 On Linux it uses `mlock` and on Windows `VirtualLock` & `VirtualProtect` along with in-memory encryption using `CryptProtectMemory`.
 - **Safe Scoped Access**: Direct access on these types is not possible, data is protected by default and only accessible within safe blocks.
 - **`no_std` Support**: For embedded and Web environments (with zeroization only).
@@ -83,8 +83,8 @@ secure_array.unlock_mut(|unlocked_slice| {
 
 ## Feature Flags
 
-- `std` (default): Enables all OS-level security features.
-- `no_std`: For `no_std` environments. Only provides the Zeroize on Drop.
+- `use_os` (default): Enables all OS-level security features.
+- `no_os`: For `no_std` environments. Only provides the Zeroize on Drop.
 - `serde`: Enables serialization/deserialization.
 
 

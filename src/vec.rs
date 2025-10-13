@@ -1,7 +1,7 @@
-#[cfg(not(feature = "std"))]
+#[cfg(not(feature = "use_os"))]
 use alloc::{Layout, alloc, dealloc};
 
-#[cfg(feature = "std")]
+#[cfg(feature = "use_os")]
 use std::vec::Vec;
 
 use super::{Error, SecureArray};
@@ -13,9 +13,9 @@ use core::{
 };
 use zeroize::{DefaultIsZeroes, Zeroize};
 
-#[cfg(feature = "std")]
+#[cfg(feature = "use_os")]
 use super::page_aligned_size;
-#[cfg(feature = "std")]
+#[cfg(feature = "use_os")]
 use memsec::Prot;
 
 pub type SecureBytes = SecureVec<u8>;
@@ -24,7 +24,7 @@ pub type SecureBytes = SecureVec<u8>;
 ///
 /// ## Security Model
 ///
-/// When compiled with the `std` feature (the default), it provides several layers of protection:
+/// When compiled with the `use_os` feature (the default), it provides several layers of protection:
 /// - **Zeroization on Drop**: The memory is zeroized when the vector is dropped.
 /// - **Memory Locking**: The underlying memory pages are locked using `mlock` & `madvise` for (Unix) or
 ///   `VirtualLock` & `VirtualProtect` for (Windows) to prevent the OS from memory-dump/swap to disk or other processes accessing the memory.
@@ -99,7 +99,7 @@ impl<T: Zeroize> SecureVec<T> {
       let capacity = 1;
       let size = capacity * mem::size_of::<T>();
 
-      #[cfg(feature = "std")]
+      #[cfg(feature = "use_os")]
       let ptr = unsafe {
          let aligned_size = page_aligned_size(size);
          let allocated_ptr = memsec::malloc_sized(aligned_size);
@@ -107,7 +107,7 @@ impl<T: Zeroize> SecureVec<T> {
          ptr.as_ptr() as *mut T
       };
 
-      #[cfg(not(feature = "std"))]
+      #[cfg(not(feature = "use_os"))]
       let ptr = {
          let layout = Layout::from_size_align(size, mem::align_of::<T>())
             .map_err(|_| Error::AllocationFailed)?;
@@ -128,12 +128,12 @@ impl<T: Zeroize> SecureVec<T> {
 
       let (encrypted, locked) = secure.lock_memory();
 
-      #[cfg(feature = "std")]
+      #[cfg(feature = "use_os")]
       if !locked {
          return Err(Error::LockFailed);
       }
 
-      #[cfg(feature = "std")]
+      #[cfg(feature = "use_os")]
       if !encrypted {
          return Err(Error::CryptProtectMemoryFailed);
       }
@@ -149,7 +149,7 @@ impl<T: Zeroize> SecureVec<T> {
 
       let size = capacity * mem::size_of::<T>();
 
-      #[cfg(feature = "std")]
+      #[cfg(feature = "use_os")]
       let ptr = unsafe {
          let aligned_size = page_aligned_size(size);
          let allocated_ptr = memsec::malloc_sized(aligned_size);
@@ -157,7 +157,7 @@ impl<T: Zeroize> SecureVec<T> {
          ptr.as_ptr() as *mut T
       };
 
-      #[cfg(not(feature = "std"))]
+      #[cfg(not(feature = "use_os"))]
       let ptr = {
          let layout = Layout::from_size_align(size, mem::align_of::<T>())
             .map_err(|_| Error::AllocationFailed)?;
@@ -179,12 +179,12 @@ impl<T: Zeroize> SecureVec<T> {
 
       let (encrypted, locked) = secure.lock_memory();
 
-      #[cfg(feature = "std")]
+      #[cfg(feature = "use_os")]
       if !locked {
          return Err(Error::LockFailed);
       }
 
-      #[cfg(feature = "std")]
+      #[cfg(feature = "use_os")]
       if !encrypted {
          return Err(Error::CryptProtectMemoryFailed);
       }
@@ -192,7 +192,7 @@ impl<T: Zeroize> SecureVec<T> {
       Ok(secure)
    }
 
-   #[cfg(feature = "std")]
+   #[cfg(feature = "use_os")]
    /// Create a new `SecureVec` from a `Vec`
    /// 
    /// The `Vec` is zeroized afterwards
@@ -298,30 +298,30 @@ impl<T: Zeroize> SecureVec<T> {
    #[allow(dead_code)]
    fn aligned_size(&self) -> usize {
       let size = self.capacity * mem::size_of::<T>();
-      #[cfg(feature = "std")]
+      #[cfg(feature = "use_os")]
       {
          page_aligned_size(size)
       }
-      #[cfg(not(feature = "std"))]
+      #[cfg(not(feature = "use_os"))]
       {
          size // No page alignment in no_std
       }
    }
 
-   #[cfg(all(feature = "std", windows))]
+   #[cfg(all(feature = "use_os", windows))]
    fn encypt_memory(&self) -> bool {
       let ptr = self.as_ptr() as *mut u8;
       super::crypt_protect_memory(ptr, self.aligned_size())
    }
 
-   #[cfg(all(feature = "std", windows))]
+   #[cfg(all(feature = "use_os", windows))]
    fn decrypt_memory(&self) -> bool {
       let ptr = self.as_ptr() as *mut u8;
       super::crypt_unprotect_memory(ptr, self.aligned_size())
    }
 
    pub(crate) fn lock_memory(&self) -> (bool, bool) {
-      #[cfg(feature = "std")]
+      #[cfg(feature = "use_os")]
       {
          #[cfg(windows)]
          {
@@ -335,14 +335,14 @@ impl<T: Zeroize> SecureVec<T> {
             (true, mprotect_ok)
          }
       }
-      #[cfg(not(feature = "std"))]
+      #[cfg(not(feature = "use_os"))]
       {
          (true, true) // No-op: always "succeeds"
       }
    }
 
    pub(crate) fn unlock_memory(&self) -> (bool, bool) {
-      #[cfg(feature = "std")]
+      #[cfg(feature = "use_os")]
       {
          #[cfg(windows)]
          {
@@ -360,7 +360,7 @@ impl<T: Zeroize> SecureVec<T> {
          }
       }
 
-      #[cfg(not(feature = "std"))]
+      #[cfg(not(feature = "use_os"))]
       {
          (true, true) // No-op: always "succeeds"
       }
@@ -491,7 +491,7 @@ impl<T: Zeroize> SecureVec<T> {
       let new_items_byte_size = new_capacity * mem::size_of::<T>();
 
       // Allocate new memory
-      #[cfg(feature = "std")]
+      #[cfg(feature = "use_os")]
       let new_ptr = unsafe {
          let aligned_allocation_size = page_aligned_size(new_items_byte_size);
          memsec::malloc_sized(aligned_allocation_size)
@@ -499,7 +499,7 @@ impl<T: Zeroize> SecureVec<T> {
             .as_ptr() as *mut T
       };
 
-      #[cfg(not(feature = "std"))]
+      #[cfg(not(feature = "use_os"))]
       let new_ptr = {
          let layout = Layout::from_size_align(new_items_byte_size, mem::align_of::<T>())
             .expect("Failed to create layout for SecureVec reserve");
@@ -522,10 +522,10 @@ impl<T: Zeroize> SecureVec<T> {
                elem.zeroize();
             }
          }
-         #[cfg(feature = "std")]
+         #[cfg(feature = "use_os")]
          memsec::free(self.ptr);
 
-         #[cfg(not(feature = "std"))]
+         #[cfg(not(feature = "use_os"))]
          {
             let old_size = self.capacity * mem::size_of::<T>();
             let old_layout = Layout::from_size_align_unchecked(old_size, mem::align_of::<T>());
@@ -610,10 +610,10 @@ impl<T: Zeroize> Drop for SecureVec<T> {
       self.erase();
       self.unlock_memory();
       unsafe {
-         #[cfg(feature = "std")]
+         #[cfg(feature = "use_os")]
          memsec::free(self.ptr);
 
-         #[cfg(not(feature = "std"))]
+         #[cfg(not(feature = "use_os"))]
          {
             // Recreate the layout to deallocate correctly
             let layout =
@@ -826,7 +826,7 @@ fn resolve_range_indices<R: RangeBounds<usize>>(range: R, len: usize) -> (usize,
    (start, end)
 }
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(all(test, feature = "use_os"))]
 mod tests {
    use super::*;
    use std::process::{Command, Stdio};

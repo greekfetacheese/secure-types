@@ -1,20 +1,20 @@
-#[cfg(not(feature = "std"))]
+#[cfg(not(feature = "use_os"))]
 use alloc::{Layout, alloc, dealloc};
 
 use super::{Error, SecureVec};
 use core::{marker::PhantomData, mem, ptr::NonNull};
 use zeroize::Zeroize;
 
-#[cfg(feature = "std")]
+#[cfg(feature = "use_os")]
 use super::page_aligned_size;
-#[cfg(feature = "std")]
+#[cfg(feature = "use_os")]
 use memsec::Prot;
 
 /// A fixed-size array allocated in a secure memory region.
 ///
 /// ## Security Model
 ///
-/// When compiled with the `std` feature (the default), it provides several layers of protection:
+/// When compiled with the `use_os` feature (the default), it provides several layers of protection:
 /// - **Zeroization on Drop**: The memory is zeroized when the array is dropped.
 /// - **Memory Locking**: The underlying memory pages are locked using `mlock` & `madvise` for (Unix) or
 ///   `VirtualLock` & `VirtualProtect` for (Windows) to prevent the OS from memory-dump/swap to disk or other processes accessing the memory.
@@ -79,14 +79,14 @@ where
          return Err(Error::LengthCannotBeZero);
       }
 
-      #[cfg(feature = "std")]
+      #[cfg(feature = "use_os")]
       let new_ptr = {
          let aligned_size = page_aligned_size(size);
          let allocated_ptr = unsafe { memsec::malloc_sized(aligned_size) };
          allocated_ptr.ok_or(Error::AllocationFailed)?.as_ptr() as *mut T
       };
 
-      #[cfg(not(feature = "std"))]
+      #[cfg(not(feature = "use_os"))]
       let new_ptr = {
          let layout = Layout::from_size_align(size, mem::align_of::<T>())
             .map_err(|_| Error::AllocationFailed)?;
@@ -106,12 +106,12 @@ where
 
       let (encrypted, locked) = secure_array.lock_memory();
 
-      #[cfg(feature = "std")]
+      #[cfg(feature = "use_os")]
       if !locked {
          return Err(Error::LockFailed);
       }
 
-      #[cfg(feature = "std")]
+      #[cfg(feature = "use_os")]
       if !encrypted {
          return Err(Error::CryptProtectMemoryFailed);
       }
@@ -140,12 +140,12 @@ where
 
       let (encrypted, locked) = secure_array.lock_memory();
 
-      #[cfg(feature = "std")]
+      #[cfg(feature = "use_os")]
       if !locked {
          return Err(Error::LockFailed);
       }
 
-      #[cfg(feature = "std")]
+      #[cfg(feature = "use_os")]
       if !encrypted {
          return Err(Error::CryptProtectMemoryFailed);
       }
@@ -172,12 +172,12 @@ where
 
       let (encrypted, locked) = secure_array.lock_memory();
 
-      #[cfg(feature = "std")]
+      #[cfg(feature = "use_os")]
       if !locked {
          return Err(Error::LockFailed);
       }
 
-      #[cfg(feature = "std")]
+      #[cfg(feature = "use_os")]
       if !encrypted {
          return Err(Error::CryptProtectMemoryFailed);
       }
@@ -204,30 +204,30 @@ where
    #[allow(dead_code)]
    fn aligned_size(&self) -> usize {
       let size = self.len() * mem::size_of::<T>();
-      #[cfg(feature = "std")]
+      #[cfg(feature = "use_os")]
       {
          page_aligned_size(size)
       }
-      #[cfg(not(feature = "std"))]
+      #[cfg(not(feature = "use_os"))]
       {
          size // No page alignment in no_std
       }
    }
 
-   #[cfg(all(feature = "std", windows))]
+   #[cfg(all(feature = "use_os", windows))]
    fn encypt_memory(&self) -> bool {
       let ptr = self.as_ptr() as *mut u8;
       super::crypt_protect_memory(ptr, self.aligned_size())
    }
 
-   #[cfg(all(feature = "std", windows))]
+   #[cfg(all(feature = "use_os", windows))]
    fn decrypt_memory(&self) -> bool {
       let ptr = self.as_ptr() as *mut u8;
       super::crypt_unprotect_memory(ptr, self.aligned_size())
    }
 
    pub(crate) fn lock_memory(&self) -> (bool, bool) {
-      #[cfg(feature = "std")]
+      #[cfg(feature = "use_os")]
       {
          #[cfg(windows)]
          {
@@ -241,14 +241,14 @@ where
             (true, mprotect_ok)
          }
       }
-      #[cfg(not(feature = "std"))]
+      #[cfg(not(feature = "use_os"))]
       {
          (true, true) // No-op: always "succeeds"
       }
    }
 
    pub(crate) fn unlock_memory(&self) -> (bool, bool) {
-      #[cfg(feature = "std")]
+      #[cfg(feature = "use_os")]
       {
          #[cfg(windows)]
          {
@@ -266,7 +266,7 @@ where
          }
       }
 
-      #[cfg(not(feature = "std"))]
+      #[cfg(not(feature = "use_os"))]
       {
          (true, true) // No-op: always "succeeds"
       }
@@ -338,11 +338,11 @@ impl<T: Zeroize, const LENGTH: usize> Drop for SecureArray<T, LENGTH> {
       }
 
       unsafe {
-         #[cfg(feature = "std")]
+         #[cfg(feature = "use_os")]
          {
             memsec::free(self.ptr);
          }
-         #[cfg(not(feature = "std"))]
+         #[cfg(not(feature = "use_os"))]
          {
             // Recreate the layout to deallocate correctly
             let layout = Layout::from_size_align_unchecked(size, mem::align_of::<T>());
@@ -440,7 +440,7 @@ impl<'de, const LENGTH: usize> serde::Deserialize<'de> for SecureArray<u8, LENGT
    }
 }
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(all(test, feature = "use_os"))]
 mod tests {
    use super::*;
    use std::process::{Command, Stdio};
