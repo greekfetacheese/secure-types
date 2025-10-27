@@ -19,7 +19,7 @@ pub use zeroize::Zeroize;
 pub use memsec;
 #[cfg(feature = "use_os")]
 use memsec::Prot;
-#[cfg(feature = "use_os")]
+#[cfg(all(feature = "use_os", unix))]
 use std::sync::Once;
 
 use thiserror::Error as ThisError;
@@ -34,10 +34,6 @@ pub enum Error {
    LengthCannotBeZero,
    #[error("Allocated Ptr is null")]
    NullAllocation,
-   #[error("CryptProtectMemory failed")]
-   CryptProtectMemoryFailed,
-   #[error("CryptUnprotectMemory failed")]
-   CryptUnprotectMemoryFailed,
    #[error("Failed to lock memory")]
    LockFailed,
    #[error("Failed to unlock memory")]
@@ -54,48 +50,12 @@ pub enum Error {
    NullAllocation,
 }
 
-#[cfg(all(feature = "use_os", test, windows))]
-use windows_sys::Win32::Foundation::GetLastError;
-#[cfg(all(feature = "use_os", windows))]
-use windows_sys::Win32::Security::Cryptography::{
-   CRYPTPROTECTMEMORY_BLOCK_SIZE, CRYPTPROTECTMEMORY_SAME_PROCESS, CryptProtectMemory,
-   CryptUnprotectMemory,
-};
-#[cfg(all(feature = "use_os", windows))]
-use windows_sys::Win32::System::SystemInformation::GetSystemInfo;
-
-static PAGE_SIZE_INIT: Once = Once::new();
-static mut PAGE_SIZE: usize = 0;
 
 #[cfg(all(feature = "use_os", unix))]
 static mut SUPPORTS_MEMFD_SECRET: bool = false;
 #[cfg(all(feature = "use_os", unix))]
 static SUPPORTS_MEMFD_SECRET_INIT: Once = Once::new();
 
-#[cfg(feature = "use_os")]
-/// Returns the page size depending on the OS
-unsafe fn page_size_init() {
-   #[cfg(unix)]
-   unsafe {
-      PAGE_SIZE = libc::sysconf(libc::_SC_PAGESIZE) as usize;
-   }
-
-   #[cfg(windows)]
-   {
-      let mut si = core::mem::MaybeUninit::uninit();
-      unsafe {
-         GetSystemInfo(si.as_mut_ptr());
-         PAGE_SIZE = (*si.as_ptr()).dwPageSize as usize;
-      }
-   }
-}
-
-#[cfg(feature = "use_os")]
-/// Returns the page aligned size of a given size
-pub(crate) unsafe fn page_aligned_size(size: usize) -> usize {
-   PAGE_SIZE_INIT.call_once(|| unsafe { page_size_init() });
-   unsafe { (size + PAGE_SIZE - 1) & !(PAGE_SIZE - 1) }
-}
 
 #[cfg(all(feature = "use_os", unix))]
 unsafe fn supports_memfd_secret_init() {
@@ -121,20 +81,17 @@ unsafe fn supports_memfd_secret_init() {
 
 /// Allocate memory
 ///
-/// Size is page aligned if the target is an OS
-///
 /// For `Windows` it always uses [memsec::malloc_sized]
 ///
 /// For `Unix` it uses [memsec::memfd_secret_sized] if `memfd_secret` is supported
 ///
 /// If the allocation fails it fallbacks to [memsec::malloc_sized]
-pub(crate) unsafe fn alloc_aligned<T>(size: usize) -> Result<NonNull<T>, Error> {
+pub(crate) unsafe fn alloc<T>(size: usize) -> Result<NonNull<T>, Error> {
    #[cfg(feature = "use_os")]
    {
       #[cfg(windows)]
       unsafe {
-         let aligned_size = page_aligned_size(size);
-         let allocated_ptr = memsec::malloc_sized(aligned_size);
+         let allocated_ptr = memsec::malloc_sized(size);
          let non_null = allocated_ptr.ok_or(Error::AllocationFailed)?;
          let ptr = non_null.as_ptr() as *mut T;
          NonNull::new(ptr).ok_or(Error::NullAllocation)
@@ -144,11 +101,10 @@ pub(crate) unsafe fn alloc_aligned<T>(size: usize) -> Result<NonNull<T>, Error> 
       {
          SUPPORTS_MEMFD_SECRET_INIT.call_once(|| unsafe { supports_memfd_secret_init() });
 
-         let aligned_size = unsafe { page_aligned_size(size) };
          let supports_memfd_secret = unsafe { SUPPORTS_MEMFD_SECRET };
 
          let ptr_opt = if supports_memfd_secret {
-            unsafe { memsec::memfd_secret_sized(aligned_size) }
+            unsafe { memsec::memfd_secret_sized(size) }
          } else {
             None
          };
@@ -157,7 +113,7 @@ pub(crate) unsafe fn alloc_aligned<T>(size: usize) -> Result<NonNull<T>, Error> 
             NonNull::new(ptr.as_ptr() as *mut T).ok_or(Error::NullAllocation)
          } else {
             unsafe {
-               let allocated_ptr = memsec::malloc_sized(aligned_size);
+               let allocated_ptr = memsec::malloc_sized(size);
                let non_null = allocated_ptr.ok_or(Error::AllocationFailed)?;
                let ptr = non_null.as_ptr() as *mut T;
                NonNull::new(ptr).ok_or(Error::NullAllocation)
@@ -208,80 +164,6 @@ pub(crate) fn mprotect<T>(ptr: NonNull<T>, prot: Prot::Ty) -> bool {
    success
 }
 
-#[cfg(all(feature = "use_os", windows))]
-pub(crate) fn crypt_protect_memory(ptr: *mut u8, aligned_size: usize) -> bool {
-   if aligned_size == 0 {
-      return true; // Nothing to encrypt
-   }
-
-   if aligned_size % (CRYPTPROTECTMEMORY_BLOCK_SIZE as usize) != 0 {
-      // not a multiple of CRYPTPROTECTMEMORY_BLOCK_SIZE
-      return false;
-   }
-
-   if aligned_size > u32::MAX as usize {
-      return false;
-   }
-
-   let result = unsafe {
-      CryptProtectMemory(
-         ptr as *mut core::ffi::c_void,
-         aligned_size as u32,
-         CRYPTPROTECTMEMORY_SAME_PROCESS,
-      )
-   };
-
-   if result == 0 {
-      #[cfg(test)]
-      {
-         let error_code = unsafe { GetLastError() };
-         eprintln!(
-            "CryptProtectMemory failed with error code: {}",
-            error_code
-         );
-      }
-      false
-   } else {
-      true
-   }
-}
-
-#[cfg(all(feature = "use_os", windows))]
-pub(crate) fn crypt_unprotect_memory(ptr: *mut u8, size_in_bytes: usize) -> bool {
-   if size_in_bytes == 0 {
-      return true;
-   }
-
-   if size_in_bytes % (CRYPTPROTECTMEMORY_BLOCK_SIZE as usize) != 0 {
-      return false;
-   }
-
-   if size_in_bytes > u32::MAX as usize {
-      return false;
-   }
-
-   let result = unsafe {
-      CryptUnprotectMemory(
-         ptr as *mut core::ffi::c_void,
-         size_in_bytes as u32,
-         CRYPTPROTECTMEMORY_SAME_PROCESS,
-      )
-   };
-
-   if result == 0 {
-      #[cfg(test)]
-      {
-         let error_code = unsafe { GetLastError() };
-         eprintln!(
-            "CryptUnprotectMemory failed with error code: {}",
-            error_code
-         );
-      }
-      false
-   } else {
-      true
-   }
-}
 
 #[cfg(test)]
 mod tests {
@@ -298,8 +180,7 @@ mod tests {
       if supports {
          print!("memfd_secret is supported");
          let size = 1 * size_of::<u8>();
-         let aligned = unsafe { page_aligned_size(size) };
-         let ptr = unsafe { memsec::memfd_secret_sized(aligned) };
+         let ptr = unsafe { memsec::memfd_secret_sized(size) };
          assert!(ptr.is_some());
       } else {
          print!("memfd_secret is not supported");

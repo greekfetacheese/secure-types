@@ -18,7 +18,7 @@ Currently there are 3 types:
 
 ## How memory is locked
 
-- **Windows**: Using [VirtualProtect](https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualprotect) & [VirtualLock](https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtuallock) and on top of that memory is also encrypted using [CryptProtectMemory](https://learn.microsoft.com/en-us/windows/win32/api/dpapi/nf-dpapi-cryptprotectmemory)
+- **Windows**: Using [VirtualProtect](https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualprotect) & [VirtualLock](https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtuallock).
 
 - **Linux**: Using [mlock](https://man.archlinux.org/man/mlock.2) & [madvise](https://man.archlinux.org/man/madvise.2)
 If the kernel supports it, it will allocate with [memfd_secret](https://man.archlinux.org/man/memfd_secret.2.en)

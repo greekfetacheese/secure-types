@@ -6,7 +6,7 @@ use core::{marker::PhantomData, mem, ptr::NonNull};
 use zeroize::Zeroize;
 
 #[cfg(feature = "use_os")]
-use super::{alloc_aligned, free, page_aligned_size};
+use super::{alloc, free};
 #[cfg(feature = "use_os")]
 use memsec::Prot;
 
@@ -18,7 +18,6 @@ use memsec::Prot;
 /// - **Zeroization on Drop**: The memory is zeroized when the array is dropped.
 /// - **Memory Locking**: The underlying memory pages are locked using `mlock` & `madvise` for (Unix) or
 ///   `VirtualLock` & `VirtualProtect` for (Windows) to prevent the OS from memory-dump/swap to disk or other processes accessing the memory.
-/// - **Memory Encryption**: On Windows, the memory is also encrypted using `CryptProtectMemory`.
 ///
 /// In a `no_std` environment, it falls back to providing only the **zeroization-on-drop** guarantee.
 ///
@@ -79,23 +78,18 @@ where
          return Err(Error::LengthCannotBeZero);
       }
 
-      let ptr = unsafe { alloc_aligned::<T>(size)? };
+      let ptr = unsafe { alloc::<T>(size)? };
 
       let secure_array = SecureArray {
          ptr,
          _marker: PhantomData,
       };
 
-      let (encrypted, locked) = secure_array.lock_memory();
+      let locked = secure_array.lock_memory();
 
       #[cfg(feature = "use_os")]
       if !locked {
          return Err(Error::LockFailed);
-      }
-
-      #[cfg(feature = "use_os")]
-      if !encrypted {
-         return Err(Error::CryptProtectMemoryFailed);
       }
 
       Ok(secure_array)
@@ -107,7 +101,11 @@ where
    pub fn from_slice_mut(content: &mut [T; LENGTH]) -> Result<Self, Error> {
       let secure_array = Self::empty()?;
 
-      secure_array.unlock_memory();
+      let unlocked = secure_array.unlock_memory();
+
+      if !unlocked {
+         return Err(Error::UnlockFailed);
+      }
 
       unsafe {
          // Copy the data from the source array into the secure memory region
@@ -120,16 +118,11 @@ where
 
       content.zeroize();
 
-      let (encrypted, locked) = secure_array.lock_memory();
+      let locked = secure_array.lock_memory();
 
       #[cfg(feature = "use_os")]
       if !locked {
          return Err(Error::LockFailed);
-      }
-
-      #[cfg(feature = "use_os")]
-      if !encrypted {
-         return Err(Error::CryptProtectMemoryFailed);
       }
 
       Ok(secure_array)
@@ -141,7 +134,11 @@ where
    pub fn from_slice(content: &[T; LENGTH]) -> Result<Self, Error> {
       let secure_array = Self::empty()?;
 
-      secure_array.unlock_memory();
+      let unlocked = secure_array.unlock_memory();
+
+      if !unlocked {
+         return Err(Error::UnlockFailed);
+      }
 
       unsafe {
          // Copy the data from the source array into the secure memory region
@@ -152,16 +149,11 @@ where
          );
       }
 
-      let (encrypted, locked) = secure_array.lock_memory();
+      let locked = secure_array.lock_memory();
 
       #[cfg(feature = "use_os")]
       if !locked {
          return Err(Error::LockFailed);
-      }
-
-      #[cfg(feature = "use_os")]
-      if !encrypted {
-         return Err(Error::CryptProtectMemoryFailed);
       }
 
       Ok(secure_array)
@@ -175,82 +167,40 @@ where
       self.len() == 0
    }
 
-   pub fn as_ptr(&self) -> *const T {
-      self.ptr.as_ptr()
-   }
-
-   pub fn as_mut_ptr(&mut self) -> *mut u8 {
-      self.ptr.as_ptr() as *mut u8
-   }
-
-   #[allow(dead_code)]
-   fn aligned_size(&self) -> usize {
-      let size = self.len() * mem::size_of::<T>();
-      #[cfg(feature = "use_os")]
-      {
-         unsafe { page_aligned_size(size) }
-      }
-      #[cfg(not(feature = "use_os"))]
-      {
-         size // No page alignment in no_std
-      }
-   }
-
-   #[cfg(all(feature = "use_os", windows))]
-   fn encypt_memory(&self) -> bool {
-      let ptr = self.as_ptr() as *mut u8;
-      super::crypt_protect_memory(ptr, self.aligned_size())
-   }
-
-   #[cfg(all(feature = "use_os", windows))]
-   fn decrypt_memory(&self) -> bool {
-      let ptr = self.as_ptr() as *mut u8;
-      super::crypt_unprotect_memory(ptr, self.aligned_size())
-   }
-
-   pub(crate) fn lock_memory(&self) -> (bool, bool) {
+   pub(crate) fn lock_memory(&self) -> bool {
       #[cfg(feature = "use_os")]
       {
          #[cfg(windows)]
          {
-            let encrypt_ok = self.encypt_memory();
-            let mprotect_ok = super::mprotect(self.ptr, Prot::NoAccess);
-            (encrypt_ok, mprotect_ok)
+            super::mprotect(self.ptr, Prot::NoAccess)
          }
          #[cfg(unix)]
          {
-            let mprotect_ok = super::mprotect(self.ptr, Prot::NoAccess);
-            (true, mprotect_ok)
+            super::mprotect(self.ptr, Prot::NoAccess)
          }
       }
       #[cfg(not(feature = "use_os"))]
       {
-         (true, true) // No-op: always "succeeds"
+         true // No-op: always "succeeds"
       }
    }
 
-   pub(crate) fn unlock_memory(&self) -> (bool, bool) {
+   pub(crate) fn unlock_memory(&self) -> bool {
       #[cfg(feature = "use_os")]
       {
          #[cfg(windows)]
          {
-            let mprotect_ok = super::mprotect(self.ptr, Prot::ReadWrite);
-            if !mprotect_ok {
-               return (false, false);
-            }
-            let decrypt_ok = self.decrypt_memory();
-            (decrypt_ok, mprotect_ok)
+            super::mprotect(self.ptr, Prot::ReadWrite)
          }
          #[cfg(unix)]
          {
-            let mprotect_ok = super::mprotect(self.ptr, Prot::ReadWrite);
-            (true, mprotect_ok)
+            super::mprotect(self.ptr, Prot::ReadWrite)
          }
       }
 
       #[cfg(not(feature = "use_os"))]
       {
-         (true, true) // No-op: always "succeeds"
+         true // No-op: always "succeeds"
       }
    }
 
@@ -468,17 +418,6 @@ mod tests {
    }
 
    #[test]
-   fn test_size_cannot_be_zero() {
-      let secure: SecureArray<u8, 3> = SecureArray::from_slice(&[1, 2, 3]).unwrap();
-      let size = secure.aligned_size();
-      assert_eq!(size > 0, true);
-
-      let secure: SecureArray<u8, 3> = SecureArray::empty().unwrap();
-      let size = secure.aligned_size();
-      assert_eq!(size > 0, true);
-   }
-
-   #[test]
    #[should_panic]
    fn test_length_cannot_be_zero() {
       let secure_vec = SecureVec::new().unwrap();
@@ -489,15 +428,11 @@ mod tests {
    fn lock_unlock() {
       let exposed: &mut [u8; 3] = &mut [1, 2, 3];
       let secure: SecureArray<u8, 3> = SecureArray::from_slice_mut(exposed).unwrap();
-      let size = secure.aligned_size();
-      assert_eq!(size > 0, true);
 
-      let (decrypted, unlocked) = secure.unlock_memory();
-      assert!(decrypted);
+      let unlocked = secure.unlock_memory();
       assert!(unlocked);
 
-      let (encrypted, locked) = secure.lock_memory();
-      assert!(encrypted);
+      let locked = secure.lock_memory();
       assert!(locked);
    }
 

@@ -14,7 +14,7 @@ use core::{
 use zeroize::{DefaultIsZeroes, Zeroize};
 
 #[cfg(feature = "use_os")]
-use super::{alloc_aligned, free, page_aligned_size};
+use super::{alloc, free};
 #[cfg(feature = "use_os")]
 use memsec::Prot;
 
@@ -28,7 +28,6 @@ pub type SecureBytes = SecureVec<u8>;
 /// - **Zeroization on Drop**: The memory is zeroized when the vector is dropped.
 /// - **Memory Locking**: The underlying memory pages are locked using `mlock` & `madvise` for (Unix) or
 ///   `VirtualLock` & `VirtualProtect` for (Windows) to prevent the OS from memory-dump/swap to disk or other processes accessing the memory.
-/// - **Memory Encryption**: On Windows, the memory is also encrypted using `CryptProtectMemory`.
 ///
 /// In a `no_std` environment, it falls back to providing only the **zeroization-on-drop** guarantee.
 ///
@@ -94,10 +93,9 @@ unsafe impl<T: Zeroize + Send + Sync> Sync for SecureVec<T> {}
 impl<T: Zeroize> SecureVec<T> {
    /// Create a new `SecureVec` with a capacity of 1
    pub fn new() -> Result<Self, Error> {
-      // Give at least a capacity of 1 so encryption/decryption can be done.
       let capacity = 1;
       let size = capacity * mem::size_of::<T>();
-      let ptr = unsafe { alloc_aligned::<T>(size)? };
+      let ptr = unsafe { alloc::<T>(size)? };
 
       let secure = SecureVec {
          ptr,
@@ -106,16 +104,11 @@ impl<T: Zeroize> SecureVec<T> {
          _marker: PhantomData,
       };
 
-      let (encrypted, locked) = secure.lock_memory();
+      let locked = secure.lock_memory();
 
       #[cfg(feature = "use_os")]
       if !locked {
          return Err(Error::LockFailed);
-      }
-
-      #[cfg(feature = "use_os")]
-      if !encrypted {
-         return Err(Error::CryptProtectMemoryFailed);
       }
 
       Ok(secure)
@@ -128,7 +121,7 @@ impl<T: Zeroize> SecureVec<T> {
       }
 
       let size = capacity * mem::size_of::<T>();
-      let ptr = unsafe { alloc_aligned::<T>(size)? };
+      let ptr = unsafe { alloc::<T>(size)? };
 
       let secure = SecureVec {
          ptr,
@@ -137,16 +130,11 @@ impl<T: Zeroize> SecureVec<T> {
          _marker: PhantomData,
       };
 
-      let (encrypted, locked) = secure.lock_memory();
+      let locked = secure.lock_memory();
 
       #[cfg(feature = "use_os")]
       if !locked {
          return Err(Error::LockFailed);
-      }
-
-      #[cfg(feature = "use_os")]
-      if !encrypted {
-         return Err(Error::CryptProtectMemoryFailed);
       }
 
       Ok(secure)
@@ -166,7 +154,7 @@ impl<T: Zeroize> SecureVec<T> {
 
       let size = capacity * mem::size_of::<T>();
 
-      let ptr = match unsafe { alloc_aligned::<T>(size) } {
+      let ptr = match unsafe { alloc::<T>(size) } {
          Ok(ptr) => ptr,
          Err(_) => {
             vec.zeroize();
@@ -188,14 +176,10 @@ impl<T: Zeroize> SecureVec<T> {
          _marker: PhantomData,
       };
 
-      let (encrypted, locked) = secure.lock_memory();
+      let locked = secure.lock_memory();
 
       if !locked {
          return Err(Error::LockFailed);
-      }
-
-      if !encrypted {
-         return Err(Error::CryptProtectMemoryFailed);
       }
 
       Ok(secure)
@@ -240,82 +224,44 @@ impl<T: Zeroize> SecureVec<T> {
       self.len() == 0
    }
 
-   pub fn as_ptr(&self) -> *const T {
-      self.ptr.as_ptr()
-   }
-
-   pub fn as_mut_ptr(&mut self) -> *mut u8 {
+   pub(crate) fn as_mut_ptr(&mut self) -> *mut u8 {
       self.ptr.as_ptr() as *mut u8
    }
 
-   #[allow(dead_code)]
-   fn aligned_size(&self) -> usize {
-      let size = self.capacity * mem::size_of::<T>();
-      #[cfg(feature = "use_os")]
-      {
-         unsafe { page_aligned_size(size) }
-      }
-      #[cfg(not(feature = "use_os"))]
-      {
-         size // No page alignment in no_std
-      }
-   }
-
-   #[cfg(all(feature = "use_os", windows))]
-   fn encypt_memory(&self) -> bool {
-      let ptr = self.as_ptr() as *mut u8;
-      super::crypt_protect_memory(ptr, self.aligned_size())
-   }
-
-   #[cfg(all(feature = "use_os", windows))]
-   fn decrypt_memory(&self) -> bool {
-      let ptr = self.as_ptr() as *mut u8;
-      super::crypt_unprotect_memory(ptr, self.aligned_size())
-   }
-
-   pub(crate) fn lock_memory(&self) -> (bool, bool) {
+   pub(crate) fn lock_memory(&self) -> bool {
       #[cfg(feature = "use_os")]
       {
          #[cfg(windows)]
          {
-            let encrypt_ok = self.encypt_memory();
-            let mprotect_ok = super::mprotect(self.ptr, Prot::NoAccess);
-            (encrypt_ok, mprotect_ok)
+            super::mprotect(self.ptr, Prot::NoAccess)
          }
          #[cfg(unix)]
          {
-            let mprotect_ok = super::mprotect(self.ptr, Prot::NoAccess);
-            (true, mprotect_ok)
+            super::mprotect(self.ptr, Prot::NoAccess)
          }
       }
       #[cfg(not(feature = "use_os"))]
       {
-         (true, true) // No-op: always "succeeds"
+         true // No-op: always "succeeds"
       }
    }
 
-   pub(crate) fn unlock_memory(&self) -> (bool, bool) {
+   pub(crate) fn unlock_memory(&self) -> bool {
       #[cfg(feature = "use_os")]
       {
          #[cfg(windows)]
          {
-            let mprotect_ok = super::mprotect(self.ptr, Prot::ReadWrite);
-            if !mprotect_ok {
-               return (false, false);
-            }
-            let decrypt_ok = self.decrypt_memory();
-            (decrypt_ok, mprotect_ok)
+            super::mprotect(self.ptr, Prot::ReadWrite)
          }
          #[cfg(unix)]
          {
-            let mprotect_ok = super::mprotect(self.ptr, Prot::ReadWrite);
-            (true, mprotect_ok)
+            super::mprotect(self.ptr, Prot::ReadWrite)
          }
       }
 
       #[cfg(not(feature = "use_os"))]
       {
-         (true, true) // No-op: always "succeeds"
+         true // No-op: always "succeeds"
       }
    }
 
@@ -442,7 +388,7 @@ impl<T: Zeroize> SecureVec<T> {
       let new_capacity = (self.capacity.max(1) * 2).max(required_capacity);
 
       let new_size = new_capacity * mem::size_of::<T>();
-      let new_ptr = unsafe { alloc_aligned::<T>(new_size).expect("Allocation failed") };
+      let new_ptr = unsafe { alloc::<T>(new_size).expect("Allocation failed") };
 
       // Copy data to new pointer
       unsafe {
@@ -806,30 +752,13 @@ mod tests {
    }
 
    #[test]
-   fn test_size_cannot_be_zero() {
-      let secure: SecureVec<u8> = SecureVec::new().unwrap();
-      let size = secure.aligned_size();
-      assert_eq!(size > 0, true);
-
-      let secure: SecureVec<u8> = SecureVec::from_vec(vec![]).unwrap();
-      let size = secure.aligned_size();
-      assert_eq!(size > 0, true);
-
-      let secure: SecureVec<u8> = SecureVec::new_with_capacity(0).unwrap();
-      let size = secure.aligned_size();
-      assert_eq!(size > 0, true);
-   }
-
-   #[test]
    fn lock_unlock_works() {
       let secure: SecureVec<u8> = SecureVec::new().unwrap();
 
-      let (decrypted, unlocked) = secure.unlock_memory();
-      assert!(decrypted);
+      let unlocked = secure.unlock_memory();
       assert!(unlocked);
 
-      let (encrypted, locked) = secure.lock_memory();
-      assert!(encrypted);
+      let locked = secure.lock_memory();
       assert!(locked);
    }
 
