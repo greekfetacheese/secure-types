@@ -340,7 +340,7 @@ impl<T: Zeroize> SecureVec<T> {
    pub fn erase(&mut self) {
       unsafe {
          self.unlock_memory();
-         let slice = core::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len);
+         let slice = core::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.capacity);
          for elem in slice.iter_mut() {
             elem.zeroize();
          }
@@ -401,7 +401,7 @@ impl<T: Zeroize> SecureVec<T> {
 
          // Erase and free the old memory
          if self.capacity > 0 {
-            let slice = core::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len);
+            let slice = core::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.capacity);
             for elem in slice.iter_mut() {
                elem.zeroize();
             }
@@ -846,13 +846,16 @@ mod tests {
 
    #[test]
    fn test_erase() {
-      let vec: Vec<u8> = vec![1, 2, 3];
-      let mut secure = SecureVec::from_vec(vec).unwrap();
+      let mut secure = SecureVec::new_with_capacity(10).unwrap();
+      for i in 0..9 {
+         secure.push(i);
+      }
+
       secure.erase();
 
       secure.unlock(|secure| {
          assert_eq!(secure.len, 0);
-         assert_eq!(secure.capacity, 3);
+         assert_eq!(secure.capacity, 10);
       });
 
       secure.unlock_iter(|iter| {
