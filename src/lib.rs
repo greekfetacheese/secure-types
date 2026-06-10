@@ -30,6 +30,8 @@ pub enum Error {
    AllocationFailed,
    #[error("Length cannot be zero")]
    LengthCannotBeZero,
+   #[error("Size cannot be zero")]
+   SizeCannotBeZero,
    #[error("Allocated Ptr is null")]
    NullAllocation,
    #[error("Failed to lock memory")]
@@ -119,6 +121,10 @@ fn supports_memfd_secret() -> bool {
 pub(crate) unsafe fn alloc<T>(size: usize) -> Result<NonNull<T>, Error> {
    #[cfg(feature = "use_os")]
    {
+      if size == 0 {
+         return Err(Error::SizeCannotBeZero);
+      }
+
       #[cfg(windows)]
       unsafe {
          let allocated_ptr = memsec::malloc_sized(size);
@@ -160,6 +166,11 @@ pub(crate) unsafe fn alloc<T>(size: usize) -> Result<NonNull<T>, Error> {
          if let Some(raw_ptr_nonnull) = ptr_opt {
             let raw_ptr = raw_ptr_nonnull.as_ptr() as *mut u8;
 
+            debug_assert!(
+               (raw_ptr as usize) % core::mem::align_of::<usize>() == 0,
+               "allocator returned a pointer not aligned for the usize header tag"
+            );
+
             // Write the MEMFD tag
             unsafe { *(raw_ptr as *mut usize) = ALLOC_TAG_MEMFD };
 
@@ -172,6 +183,11 @@ pub(crate) unsafe fn alloc<T>(size: usize) -> Result<NonNull<T>, Error> {
             let non_null = allocated_ptr.ok_or(Error::AllocationFailed)?;
 
             let raw_ptr = non_null.as_ptr() as *mut u8;
+
+            debug_assert!(
+               (raw_ptr as usize) % core::mem::align_of::<usize>() == 0,
+               "allocator returned a pointer not aligned for the usize header tag"
+            );
 
             // Write the MALLOC tag
             *(raw_ptr as *mut usize) = ALLOC_TAG_MALLOC;
