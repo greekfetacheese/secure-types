@@ -120,6 +120,10 @@ impl<T: Zeroize> SecureVec<T> {
          capacity = 1;
       }
 
+      capacity
+         .checked_mul(size_of::<T>())
+         .ok_or(Error::AllocationFailed)?;
+
       let size = capacity * mem::size_of::<T>();
       let ptr = unsafe { alloc::<T>(size)? };
 
@@ -151,6 +155,10 @@ impl<T: Zeroize> SecureVec<T> {
 
       let capacity = vec.capacity();
       let len = vec.len();
+
+      capacity
+         .checked_mul(size_of::<T>())
+         .ok_or(Error::AllocationFailed)?;
 
       let size = capacity * mem::size_of::<T>();
 
@@ -193,10 +201,7 @@ impl<T: Zeroize> SecureVec<T> {
       T: Clone + DefaultIsZeroes,
    {
       let mut secure_vec = SecureVec::new_with_capacity(slice.len())?;
-      secure_vec.len = slice.len();
-      secure_vec.unlock_slice_mut(|dest_slice| {
-         dest_slice.clone_from_slice(slice);
-      });
+      secure_vec.init_from_clone(slice);
       slice.zeroize();
       Ok(secure_vec)
    }
@@ -209,10 +214,7 @@ impl<T: Zeroize> SecureVec<T> {
       T: Clone,
    {
       let mut secure_vec = SecureVec::new_with_capacity(slice.len())?;
-      secure_vec.len = slice.len();
-      secure_vec.unlock_slice_mut(|dest_slice| {
-         dest_slice.clone_from_slice(slice);
-      });
+      secure_vec.init_from_clone(slice);
       Ok(secure_vec)
    }
 
@@ -457,19 +459,38 @@ impl<T: Zeroize> SecureVec<T> {
          _marker: PhantomData,
       }
    }
+
+   /// Initializes a freshly-allocated (uninitialized) buffer by cloning `src`
+   /// into it. Uses `ptr::write` so the uninitialized destination slots are
+   /// never read, never dropped, and no `&mut [T]` is ever formed over them.
+   ///
+   /// `len` is set only after every write succeeds, so a panic from
+   /// `T::clone` leaves the vector at its previous length (0 for a fresh one).
+   pub(crate) fn init_from_clone(&mut self, src: &[T])
+   where
+      T: Clone,
+   {
+      debug_assert!(src.len() <= self.capacity);
+
+      self.unlock_memory(); // NOTE: return value handling is V8's scope
+      unsafe {
+         let dst = self.ptr.as_ptr();
+         for (i, item) in src.iter().enumerate() {
+            // ptr::write does NOT drop the (uninitialized) destination.
+            core::ptr::write(dst.add(i), item.clone());
+         }
+      }
+      self.len = src.len();
+      self.lock_memory();
+   }
 }
 
 impl<T: Clone + Zeroize> Clone for SecureVec<T> {
    fn clone(&self) -> Self {
       let mut new_vec = SecureVec::new_with_capacity(self.capacity).unwrap();
-      new_vec.len = self.len;
-
       self.unlock_slice(|src_slice| {
-         new_vec.unlock_slice_mut(|dest_slice| {
-            dest_slice.clone_from_slice(src_slice);
-         });
+         new_vec.init_from_clone(src_slice);
       });
-
       new_vec
    }
 }
@@ -478,14 +499,9 @@ impl<const LENGTH: usize> From<SecureArray<u8, LENGTH>> for SecureVec<u8> {
    fn from(array: SecureArray<u8, LENGTH>) -> Self {
       let mut new_vec = SecureVec::new_with_capacity(LENGTH)
          .expect("Failed to allocate SecureVec during conversion");
-      new_vec.len = array.len();
-
       array.unlock(|array_slice| {
-         new_vec.unlock_slice_mut(|vec_slice| {
-            vec_slice.copy_from_slice(array_slice);
-         });
+         new_vec.init_from_clone(array_slice);
       });
-
       new_vec
    }
 }

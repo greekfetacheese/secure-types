@@ -236,6 +236,24 @@ where
          }
       });
    }
+
+   /// Same as `SecureVec::init_from_clone`, for the fixed-size buffer.
+   /// `src.len()` must equal `LENGTH`.
+   pub(crate) fn init_from_clone(&mut self, src: &[T])
+   where
+      T: Clone,
+   {
+      debug_assert_eq!(src.len(), LENGTH);
+
+      self.unlock_memory();
+      unsafe {
+         let dst = self.ptr.as_ptr();
+         for (i, item) in src.iter().enumerate() {
+            core::ptr::write(dst.add(i), item.clone());
+         }
+      }
+      self.lock_memory();
+   }
 }
 
 impl<T: Zeroize, const LENGTH: usize> core::ops::Index<usize> for SecureArray<T, LENGTH> {
@@ -284,9 +302,7 @@ impl<T: Clone + Zeroize, const LENGTH: usize> Clone for SecureArray<T, LENGTH> {
    fn clone(&self) -> Self {
       let mut new_array = Self::empty().unwrap();
       self.unlock(|src_slice| {
-         new_array.unlock_mut(|dest_slice| {
-            dest_slice.clone_from_slice(src_slice);
-         });
+         new_array.init_from_clone(src_slice);
       });
       new_array
    }
@@ -308,9 +324,7 @@ impl<const LENGTH: usize> TryFrom<SecureVec<u8>> for SecureArray<u8, LENGTH> {
       let mut new_array = Self::empty()?;
 
       vec.unlock_slice(|vec_slice| {
-         new_array.unlock_mut(|array_slice| {
-            array_slice.copy_from_slice(vec_slice);
-         });
+         new_array.init_from_clone(vec_slice);
       });
 
       Ok(new_array)

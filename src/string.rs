@@ -8,9 +8,9 @@ use zeroize::Zeroize;
 ///
 /// Access to the string contents is provided through scoped methods like `unlock_str`,
 /// which ensure the memory is only unlocked for the briefest possible time.
-/// 
+///
 /// # Notes
-/// 
+///
 /// If you return a new allocated `String` from one of the unlock methods you are responsible for zeroizing the memory.
 ///
 /// # Example
@@ -32,12 +32,12 @@ use zeroize::Zeroize;
 /// secret.unlock_str(|exposed_str| {
 ///     assert_eq!(exposed_str, "my_super_secret_password");
 /// });
-/// 
+///
 /// // Not recommended but if you allocate a new String make sure to zeroize it
 /// let mut exposed = secret.unlock_str(|exposed_str| {
 ///     String::from(exposed_str)
 /// });
-/// 
+///
 /// // Do what you need to to do with the new string
 /// // When you are done with it, zeroize it
 /// exposed.zeroize();
@@ -111,9 +111,9 @@ impl SecureString {
    }
 
    /// Inserts text at the given character index
-   /// 
+   ///
    /// # Returns
-   /// 
+   ///
    /// The number of characters inserted
    ///
    /// # Example
@@ -238,15 +238,9 @@ impl From<&str> for SecureString {
    /// The `&str` is not zeroized, you are responsible for zeroizing it.
    fn from(s: &str) -> SecureString {
       let bytes = s.as_bytes();
-      let len = bytes.len();
-
-      let mut new_vec = SecureVec::new_with_capacity(len).unwrap();
-      new_vec.len = len;
-
-      new_vec.unlock_slice_mut(|slice| {
-         slice[..len].copy_from_slice(bytes);
-      });
-
+      // new_with_capacity bumps 0 -> 1 internally, so empty &str is fine.
+      let mut new_vec = SecureVec::new_with_capacity(bytes.len()).unwrap();
+      new_vec.init_from_clone(bytes);
       SecureString { vec: new_vec }
    }
 }
