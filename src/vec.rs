@@ -390,7 +390,15 @@ impl<T: Zeroize> SecureVec<T> {
       let new_capacity = (self.capacity.max(1) * 2).max(required_capacity);
 
       let new_size = new_capacity * mem::size_of::<T>();
-      let new_ptr = unsafe { alloc::<T>(new_size).expect("Allocation failed") };
+      let new_ptr = unsafe {
+         alloc::<T>(new_size).unwrap_or_else(|_| {
+            panic!(
+               "secure-types: failed to allocate {} bytes of locked memory \
+          (possibly RLIMIT_MEMLOCK exhausted); SecureVec left unchanged",
+               new_size
+            )
+         })
+      };
 
       // Copy data to new pointer
       unsafe {
@@ -564,11 +572,11 @@ impl<'de> serde::Deserialize<'de> for SecureVec<u8> {
          where
             A: serde::de::SeqAccess<'de>,
          {
-            let mut vec = Vec::new();
+            let mut vec = SecureVec::new().map_err(serde::de::Error::custom)?;
             while let Some(byte) = seq.next_element::<u8>()? {
                vec.push(byte);
             }
-            SecureVec::from_vec(vec).map_err(serde::de::Error::custom)
+            Ok(vec)
          }
       }
       deserializer.deserialize_seq(SecureVecVisitor)
