@@ -480,11 +480,10 @@ impl<T: Zeroize> SecureVec<T> {
    {
       debug_assert!(src.len() <= self.capacity);
 
-      self.unlock_memory(); // NOTE: return value handling is V8's scope
+      self.unlock_memory();
       unsafe {
          let dst = self.ptr.as_ptr();
          for (i, item) in src.iter().enumerate() {
-            // ptr::write does NOT drop the (uninitialized) destination.
             core::ptr::write(dst.add(i), item.clone());
          }
       }

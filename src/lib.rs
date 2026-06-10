@@ -19,8 +19,6 @@ pub use zeroize::Zeroize;
 pub use memsec;
 #[cfg(feature = "use_os")]
 use memsec::Prot;
-#[cfg(all(feature = "use_os", unix))]
-use std::sync::Once;
 
 use thiserror::Error as ThisError;
 
@@ -54,13 +52,21 @@ pub enum Error {
 }
 
 #[cfg(all(feature = "use_os", unix))]
-static mut SUPPORTS_MEMFD_SECRET: bool = false;
-#[cfg(all(feature = "use_os", unix))]
-static SUPPORTS_MEMFD_SECRET_INIT: Once = Once::new();
-#[cfg(all(feature = "use_os", unix))]
 const ALLOC_TAG_MALLOC: usize = 0xDEAD_BEEF;
 #[cfg(all(feature = "use_os", unix))]
 const ALLOC_TAG_MEMFD: usize = 0x5EC0_0000;
+
+#[cfg(all(feature = "use_os", unix))]
+use core::sync::atomic::{AtomicU8, Ordering};
+
+#[cfg(all(feature = "use_os", unix))]
+static MEMFD_SECRET_SUPPORT: AtomicU8 = AtomicU8::new(MEMFD_UNKNOWN);
+#[cfg(all(feature = "use_os", unix))]
+const MEMFD_UNKNOWN: u8 = 0;
+#[cfg(all(feature = "use_os", unix))]
+const MEMFD_NO: u8 = 1;
+#[cfg(all(feature = "use_os", unix))]
+const MEMFD_YES: u8 = 2;
 
 /// Calculates the offset needed to store a usize header while maintaining
 /// the alignment requirements of T.
@@ -79,24 +85,27 @@ const fn get_header_offset<T>() -> usize {
 }
 
 #[cfg(all(feature = "use_os", unix))]
-unsafe fn supports_memfd_secret_init() {
-   use libc::{SYS_memfd_secret, close, syscall};
-
-   let res = unsafe { syscall(SYS_memfd_secret as _, 0isize) };
-
-   if res >= 0 {
-      // memfd_secret is supported
-      unsafe { close(res as libc::c_int) };
-      unsafe { SUPPORTS_MEMFD_SECRET = true };
-   } else {
-      /*
-      let errno = unsafe { *libc::__errno_location() };
-      if errno == ENOSYS {
-         // not supported
-      } else {
-         // Other error
+fn supports_memfd_secret() -> bool {
+   match MEMFD_SECRET_SUPPORT.load(Ordering::Relaxed) {
+      MEMFD_YES => true,
+      MEMFD_NO => false,
+      _ => {
+         let supported = unsafe {
+            use libc::{SYS_memfd_secret, close, syscall};
+            let res = syscall(SYS_memfd_secret as _, 0isize);
+            if res >= 0 {
+               close(res as libc::c_int);
+               true
+            } else {
+               false
+            }
+         };
+         MEMFD_SECRET_SUPPORT.store(
+            if supported { MEMFD_YES } else { MEMFD_NO },
+            Ordering::Relaxed,
+         );
+         supported
       }
-       */
    }
 }
 
@@ -120,8 +129,7 @@ pub(crate) unsafe fn alloc<T>(size: usize) -> Result<NonNull<T>, Error> {
 
       #[cfg(unix)]
       {
-         SUPPORTS_MEMFD_SECRET_INIT.call_once(|| unsafe { supports_memfd_secret_init() });
-         let supports_memfd_secret = unsafe { SUPPORTS_MEMFD_SECRET };
+         let supports_memfd_secret = supports_memfd_secret();
 
          let header_offset = get_header_offset::<T>();
 
@@ -256,9 +264,7 @@ mod tests {
    fn test_supports_memfd_secret() {
       use super::*;
 
-      SUPPORTS_MEMFD_SECRET_INIT.call_once(|| unsafe { supports_memfd_secret_init() });
-
-      let supports = unsafe { SUPPORTS_MEMFD_SECRET };
+      let supports = supports_memfd_secret();
 
       if supports {
          print!("memfd_secret is supported");
