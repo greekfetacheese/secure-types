@@ -40,6 +40,8 @@ pub enum Error {
    UnlockFailed,
    #[error("Source length does not match the fixed size of the destination array")]
    LengthMismatch,
+   #[error("Bytes are not valid UTF-8")]
+   InvalidUtf8,
 }
 
 #[cfg(not(feature = "use_os"))]
@@ -48,6 +50,7 @@ pub enum Error {
    AlignmentFailed,
    AllocationFailed,
    NullAllocation,
+   InvalidUtf8,
 }
 
 #[cfg(all(feature = "use_os", unix))]

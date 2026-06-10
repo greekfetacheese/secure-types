@@ -60,6 +60,16 @@ impl SecureString {
       Ok(SecureString { vec })
    }
 
+   /// Creates a `SecureString` from a `SecureVec<u8>` without checking UTF-8.
+   ///
+   /// # Safety
+   /// The caller must guarantee `vec` holds valid UTF-8. Violating this breaks
+   /// the `SecureString` invariant and will make `unlock_str`/`char_len`/serde
+   /// panic.
+   pub unsafe fn from_utf8_unchecked(vec: SecureVec<u8>) -> SecureString {
+      SecureString { vec }
+   }
+
    pub fn erase(&mut self) {
       self.vec.erase();
    }
@@ -67,7 +77,7 @@ impl SecureString {
    /// Returns the length of the inner `SecureVec`
    ///
    /// If you want the character length use [`char_len`](Self::char_len)
-   pub fn len(&self) -> usize {
+   pub fn byte_len(&self) -> usize {
       self.vec.len()
    }
 
@@ -75,12 +85,35 @@ impl SecureString {
       self.vec.is_empty()
    }
 
+   /// Removes the specified range from the string
+   ///
+   /// # Panics
+   /// Panics if the range is not on UTF-8 char boundaries.
    pub fn drain(&mut self, range: Range<usize>) {
+      self.unlock_str(|s| {
+         assert!(
+            s.is_char_boundary(range.start) && s.is_char_boundary(range.end),
+            "SecureString::drain: range {:?} does not lie on UTF-8 char boundaries",
+            range
+         );
+      });
       let _d = self.vec.drain(range);
    }
 
+   /// Returns the number of chars in the string
+   ///
+   /// # Panics
+   /// Panics if the string is not valid UTF-8.
    pub fn char_len(&self) -> usize {
       self.unlock_str(|s| s.chars().count())
+   }
+
+   /// Returns the number of chars in the string
+   ///
+   /// # Safety
+   /// The caller must guarantee that the string is valid UTF-8.
+   pub fn char_len_unchecked(&self) -> usize {
+      self.unlock_str_unchecked(|s| s.chars().count())
    }
 
    /// Push a `&str` into the `SecureString`
@@ -92,12 +125,32 @@ impl SecureString {
    }
 
    /// Immutable access as `&str`
+   ///
+   /// It uses the `from_utf8` function to check the validity of the internal
+   /// bytes. If the bytes are not valid UTF-8, the function panics.
    pub fn unlock_str<F, R>(&self, f: F) -> R
    where
       F: FnOnce(&str) -> R,
    {
       self.vec.unlock_slice(|slice| {
-         let str = core::str::from_utf8(slice).unwrap();
+         let str = core::str::from_utf8(slice)
+            .expect("SecureString invariant violated: internal bytes are not valid UTF-8");
+         f(str)
+      })
+   }
+
+   /// Immutable access as `&str`
+   ///
+   /// It uses the `from_utf8_unchecked` function to bypass the validity check.
+   ///
+   /// # Safety
+   /// The caller must guarantee that the internal bytes are valid UTF-8.
+   pub fn unlock_str_unchecked<F, R>(&self, f: F) -> R
+   where
+      F: FnOnce(&str) -> R,
+   {
+      self.vec.unlock_slice(|slice| {
+         let str = unsafe { core::str::from_utf8_unchecked(slice) };
          f(str)
       })
    }
@@ -193,7 +246,7 @@ impl SecureString {
          return;
       }
 
-      let (byte_start, byte_end) = self.unlock_str(|str| {
+      let (byte_start, byte_end) = self.unlock_str_unchecked(|str| {
          let byte_start = char_to_byte_idx(str.as_bytes(), char_range.start);
          let byte_end = char_to_byte_idx(str.as_bytes(), char_range.end);
          (byte_start, byte_end)
@@ -245,11 +298,20 @@ impl From<&str> for SecureString {
    }
 }
 
-impl From<SecureVec<u8>> for SecureString {
-   fn from(vec: SecureVec<u8>) -> Self {
-      let mut new_string = SecureString::new().unwrap();
-      new_string.vec = vec;
-      new_string
+impl TryFrom<SecureVec<u8>> for SecureString {
+   type Error = Error;
+
+   /// Creates a `SecureString` from a `SecureVec<u8>`, validating UTF-8.
+   ///
+   /// The `SecureVec` is consumed. On invalid UTF-8 it is dropped (and thus
+   /// zeroized) and `Error::InvalidUtf8` is returned.
+   fn try_from(vec: SecureVec<u8>) -> Result<Self, Self::Error> {
+      let valid = vec.unlock_slice(|slice| core::str::from_utf8(slice).is_ok());
+      if valid {
+         Ok(SecureString { vec })
+      } else {
+         Err(Error::InvalidUtf8)
+      }
    }
 }
 
@@ -319,15 +381,21 @@ mod tests {
    }
 
    #[test]
-   fn test_from_secure_vec() {
+   fn test_try_from_secure_vec() {
       let hello_world = "Hello, world!".to_string();
       let vec: SecureVec<u8> = SecureVec::from_slice(hello_world.as_bytes()).unwrap();
 
       let string = SecureString::from(hello_world);
-      let string2 = SecureString::from(vec);
+      let string2 = SecureString::try_from(vec).unwrap();
 
       string.unlock_str(|str| {
          string2.unlock_str(|str2| {
+            assert_eq!(str, str2);
+         });
+      });
+
+      string.unlock_str_unchecked(|str| {
+         string2.unlock_str_unchecked(|str2| {
             assert_eq!(str, str2);
          });
       });
@@ -342,6 +410,10 @@ mod tests {
       secure2.unlock_str(|str| {
          assert_eq!(str, hello_world);
       });
+
+      secure2.unlock_str_unchecked(|str| {
+         assert_eq!(str, hello_world);
+      });
    }
 
    #[test]
@@ -350,6 +422,10 @@ mod tests {
       let mut secure = SecureString::from(hello_world);
       secure.insert_text_at_char_idx(12, "Mike");
       secure.unlock_str(|str| {
+         assert_eq!(str, "My name is Mike");
+      });
+
+      secure.unlock_str_unchecked(|str| {
          assert_eq!(str, "My name is Mike");
       });
    }
@@ -362,6 +438,10 @@ mod tests {
       secure.unlock_str(|str| {
          assert_eq!(str, "My name is");
       });
+
+      secure.unlock_str_unchecked(|str| {
+         assert_eq!(str, "My name is");
+      });
    }
 
    #[test]
@@ -370,6 +450,10 @@ mod tests {
       let mut secure = SecureString::from(hello_world);
       secure.drain(0..7);
       secure.unlock_str(|str| {
+         assert_eq!(str, "world!");
+      });
+
+      secure.unlock_str_unchecked(|str| {
          assert_eq!(str, "world!");
       });
    }
@@ -393,7 +477,15 @@ mod tests {
          assert_eq!(str, hello_world);
       });
 
+      deserialized_string.unlock_str_unchecked(|str| {
+         assert_eq!(str, hello_world);
+      });
+
       deserialized_bytes.unlock_str(|str| {
+         assert_eq!(str, hello_world);
+      });
+
+      deserialized_bytes.unlock_str_unchecked(|str| {
          assert_eq!(str, hello_world);
       });
    }
@@ -403,6 +495,11 @@ mod tests {
       let hello_word = "Hello, world!";
       let string = SecureString::from(hello_word);
       let _exposed_string = string.unlock_str(|str| {
+         assert_eq!(str, hello_word);
+         String::from(str)
+      });
+
+      let _exposed_string = string.unlock_str_unchecked(|str| {
          assert_eq!(str, hello_word);
          String::from(str)
       });
@@ -417,6 +514,10 @@ mod tests {
       string.unlock_str(|str| {
          assert_eq!(str, hello_world);
       });
+
+      string.unlock_str_unchecked(|str| {
+         assert_eq!(str, hello_world);
+      });
    }
 
    #[test]
@@ -428,6 +529,10 @@ mod tests {
       });
 
       string.unlock_str(|str| {
+         assert_eq!(str, hello_world);
+      });
+
+      string.unlock_str_unchecked(|str| {
          assert_eq!(str, hello_world);
       });
    }
