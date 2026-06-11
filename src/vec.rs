@@ -20,6 +20,28 @@ use memsec::Prot;
 
 pub type SecureBytes = SecureVec<u8>;
 
+/// Unlocks the vector's memory on construction and re-locks it on drop —
+/// including when the drop happens because the fn closure panicked.
+struct UnlockGuard<'a, T: Zeroize> {
+   vec: &'a SecureVec<T>,
+}
+
+impl<'a, T: Zeroize> UnlockGuard<'a, T> {
+   fn new(vec: &'a SecureVec<T>) -> Self {
+      let ok = vec.unlock_memory();
+      debug_assert!(ok, "UnlockGuard::new: unlock_memory failed");
+
+      UnlockGuard { vec }
+   }
+}
+
+impl<'a, T: Zeroize> Drop for UnlockGuard<'a, T> {
+   fn drop(&mut self) {
+      let ok = self.vec.lock_memory();
+      debug_assert!(ok, "UnlockGuard::drop: lock_memory failed");
+   }
+}
+
 /// A securely allocated, growable vector, just like `std::vec::Vec`.
 ///
 /// ## Security Model
@@ -272,9 +294,8 @@ impl<T: Zeroize> SecureVec<T> {
    where
       F: FnOnce(&SecureVec<T>) -> R,
    {
-      self.unlock_memory();
+      let _guard = UnlockGuard::new(self);
       let result = f(self);
-      self.lock_memory();
       result
    }
 
@@ -283,13 +304,9 @@ impl<T: Zeroize> SecureVec<T> {
    where
       F: FnOnce(&[T]) -> R,
    {
-      unsafe {
-         self.unlock_memory();
-         let slice = core::slice::from_raw_parts(self.ptr.as_ptr(), self.len);
-         let result = f(slice);
-         self.lock_memory();
-         result
-      }
+      let _guard = UnlockGuard::new(self);
+      let slice = unsafe { core::slice::from_raw_parts(self.ptr.as_ptr(), self.len) };
+      f(slice)
    }
 
    /// Mutable access to the `SecureVec` as `&mut [T]`
@@ -298,10 +315,9 @@ impl<T: Zeroize> SecureVec<T> {
       F: FnOnce(&mut [T]) -> R,
    {
       unsafe {
-         self.unlock_memory();
+         let _guard = UnlockGuard::new(self);
          let slice = core::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len);
          let result = f(slice);
-         self.lock_memory();
          result
       }
    }
@@ -312,11 +328,10 @@ impl<T: Zeroize> SecureVec<T> {
       F: FnOnce(core::slice::Iter<T>) -> R,
    {
       unsafe {
-         self.unlock_memory();
+         let _guard = UnlockGuard::new(self);
          let slice = core::slice::from_raw_parts(self.ptr.as_ptr(), self.len);
          let iter = slice.iter();
          let result = f(iter);
-         self.lock_memory();
          result
       }
    }
@@ -327,11 +342,10 @@ impl<T: Zeroize> SecureVec<T> {
       F: FnOnce(core::slice::IterMut<T>) -> R,
    {
       unsafe {
-         self.unlock_memory();
+         let _guard = UnlockGuard::new(self);
          let slice = core::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len);
          let iter = slice.iter_mut();
          let result = f(iter);
-         self.lock_memory();
          result
       }
    }
@@ -341,13 +355,18 @@ impl<T: Zeroize> SecureVec<T> {
    /// The memory is locked again and the capacity is preserved for reuse
    pub fn erase(&mut self) {
       unsafe {
-         self.unlock_memory();
+         let ok = self.unlock_memory();
+         debug_assert!(ok, "SecureVec::erase: unlock_memory failed");
+
          let slice = core::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.capacity);
          for elem in slice.iter_mut() {
             elem.zeroize();
          }
+
          self.clear();
-         self.lock_memory();
+
+         let ok = self.lock_memory();
+         debug_assert!(ok, "SecureVec::erase: lock_memory failed");
       }
    }
 
@@ -361,7 +380,8 @@ impl<T: Zeroize> SecureVec<T> {
    pub fn push(&mut self, value: T) {
       self.reserve(1);
 
-      self.unlock_memory();
+      let ok = self.unlock_memory();
+      debug_assert!(ok, "SecureVec::push: unlock_memory failed");
 
       unsafe {
          // Write the new value at the end of the vector.
@@ -370,7 +390,8 @@ impl<T: Zeroize> SecureVec<T> {
          self.len += 1;
       }
 
-      self.lock_memory();
+      let ok = self.lock_memory();
+      debug_assert!(ok, "SecureVec::push: lock_memory failed");
    }
 
    /// Ensures that the vector has enough capacity for at least `additional` more elements.
@@ -390,6 +411,8 @@ impl<T: Zeroize> SecureVec<T> {
       let new_capacity = (self.capacity.max(1) * 2).max(required_capacity);
 
       let new_size = new_capacity * mem::size_of::<T>();
+
+      // Safe to panic here because the memory is locked
       let new_ptr = unsafe {
          alloc::<T>(new_size).unwrap_or_else(|_| {
             panic!(
@@ -402,7 +425,9 @@ impl<T: Zeroize> SecureVec<T> {
 
       // Copy data to new pointer
       unsafe {
-         self.unlock_memory();
+         let ok = self.unlock_memory();
+         debug_assert!(ok, "SecureVec::reserve: unlock_memory failed");
+
          core::ptr::copy_nonoverlapping(
             self.ptr.as_ptr(),
             new_ptr.as_ptr() as *mut T,
@@ -431,7 +456,8 @@ impl<T: Zeroize> SecureVec<T> {
       // Update pointer and capacity, then re-lock the new memory region
       self.ptr = new_ptr;
       self.capacity = new_capacity;
-      self.lock_memory();
+      let ok = self.lock_memory();
+      debug_assert!(ok, "SecureVec::reserve: lock_memory failed");
    }
 
    /// Creates a draining iterator that removes the specified range from the vector
@@ -447,8 +473,6 @@ impl<T: Zeroize> SecureVec<T> {
    where
       R: RangeBounds<usize>,
    {
-      self.unlock_memory();
-
       let original_len = self.len;
 
       let (drain_start_idx, drain_end_idx) = resolve_range_indices(range, original_len);
@@ -456,6 +480,9 @@ impl<T: Zeroize> SecureVec<T> {
       let tail_len = original_len - drain_end_idx;
 
       self.len = drain_start_idx;
+
+      let ok = self.unlock_memory();
+      debug_assert!(ok, "SecureVec::drain: unlock_memory failed");
 
       Drain {
          vec_ref: self,
@@ -480,15 +507,25 @@ impl<T: Zeroize> SecureVec<T> {
    {
       debug_assert!(src.len() <= self.capacity);
 
-      self.unlock_memory();
+      let ok = self.unlock_memory();
+      debug_assert!(
+         ok,
+         "SecureVec::init_from_clone: unlock_memory failed"
+      );
+
       unsafe {
          let dst = self.ptr.as_ptr();
          for (i, item) in src.iter().enumerate() {
             core::ptr::write(dst.add(i), item.clone());
          }
       }
+
       self.len = src.len();
-      self.lock_memory();
+      let ok = self.lock_memory();
+      debug_assert!(
+         ok,
+         "SecureVec::init_from_clone: lock_memory failed"
+      );
    }
 }
 
@@ -516,7 +553,8 @@ impl<const LENGTH: usize> From<SecureArray<u8, LENGTH>> for SecureVec<u8> {
 impl<T: Zeroize> Drop for SecureVec<T> {
    fn drop(&mut self) {
       self.erase();
-      self.unlock_memory();
+      let ok = self.unlock_memory();
+      debug_assert!(ok, "SecureVec::drop: unlock_memory failed");
 
       #[cfg(feature = "use_os")]
       free(self.ptr);
@@ -690,7 +728,8 @@ impl<'a, T: Zeroize> Drop for Drain<'a, T> {
          self.vec_ref.len = new_len;
 
          // Relock the SecureVec's memory.
-         self.vec_ref.lock_memory();
+         let ok = self.vec_ref.lock_memory();
+         debug_assert!(ok, "Drain::drop: lock_memory failed");
       }
    }
 }

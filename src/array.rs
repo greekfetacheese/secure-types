@@ -10,6 +10,27 @@ use super::{alloc, free};
 #[cfg(feature = "use_os")]
 use memsec::Prot;
 
+/// Unlocks the array's memory on construction and re-locks it on drop —
+/// including when the drop happens because the fn closure panicked.
+struct UnlockGuard<'a, T: Zeroize, const LENGTH: usize> {
+   array: &'a SecureArray<T, LENGTH>,
+}
+
+impl<'a, T: Zeroize, const LENGTH: usize> UnlockGuard<'a, T, LENGTH> {
+   fn new(array: &'a SecureArray<T, LENGTH>) -> Self {
+      let ok = array.unlock_memory();
+      debug_assert!(ok, "UnlockGuard::new: unlock_memory failed");
+      UnlockGuard { array }
+   }
+}
+
+impl<'a, T: Zeroize, const LENGTH: usize> Drop for UnlockGuard<'a, T, LENGTH> {
+   fn drop(&mut self) {
+      let ok = self.array.lock_memory();
+      debug_assert!(ok, "UnlockGuard::drop: lock_memory failed");
+   }
+}
+
 /// A fixed-size array allocated in a secure memory region.
 ///
 /// ## Security Model
@@ -209,10 +230,9 @@ where
    where
       F: FnOnce(&[T]) -> R,
    {
-      self.unlock_memory();
+      let _guard = UnlockGuard::new(self);
       let slice = unsafe { core::slice::from_raw_parts(self.ptr.as_ptr(), LENGTH) };
       let result = f(slice);
-      self.lock_memory();
       result
    }
 
@@ -221,10 +241,9 @@ where
    where
       F: FnOnce(&mut [T]) -> R,
    {
-      self.unlock_memory();
+      let _guard = UnlockGuard::new(self);
       let slice = unsafe { core::slice::from_raw_parts_mut(self.ptr.as_ptr(), LENGTH) };
       let result = f(slice);
-      self.lock_memory();
       result
    }
 
@@ -245,14 +264,23 @@ where
    {
       debug_assert_eq!(src.len(), LENGTH);
 
-      self.unlock_memory();
+      let ok = self.unlock_memory();
+      debug_assert!(
+         ok,
+         "SecureArray::init_from_clone: unlock_memory failed"
+      );
+
       unsafe {
          let dst = self.ptr.as_ptr();
          for (i, item) in src.iter().enumerate() {
             core::ptr::write(dst.add(i), item.clone());
          }
       }
-      self.lock_memory();
+      let ok = self.lock_memory();
+      debug_assert!(
+         ok,
+         "SecureArray::init_from_clone: lock_memory failed"
+      );
    }
 }
 
@@ -280,7 +308,8 @@ impl<T: Zeroize, const LENGTH: usize> core::ops::IndexMut<usize> for SecureArray
 impl<T: Zeroize, const LENGTH: usize> Drop for SecureArray<T, LENGTH> {
    fn drop(&mut self) {
       self.erase();
-      self.unlock_memory();
+      let ok = self.unlock_memory();
+      debug_assert!(ok, "SecureArray::drop: unlock_memory failed");
 
       let size = LENGTH * mem::size_of::<T>();
       if size == 0 {
