@@ -120,11 +120,18 @@ where
    ///
    /// The passed slice is zeroized afterwards
    pub fn from_slice_mut(content: &mut [T; LENGTH]) -> Result<Self, Error> {
-      let secure_array = Self::empty()?;
+      let secure_array = match Self::empty() {
+         Ok(secure_array) => secure_array,
+         Err(e) => {
+            content.zeroize();
+            return Err(e);
+         }
+      };
 
       let unlocked = secure_array.unlock_memory();
 
       if !unlocked {
+         content.zeroize();
          return Err(Error::UnlockFailed);
       }
 

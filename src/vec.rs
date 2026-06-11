@@ -178,9 +178,13 @@ impl<T: Zeroize> SecureVec<T> {
       let capacity = vec.capacity();
       let len = vec.len();
 
-      capacity
-         .checked_mul(size_of::<T>())
-         .ok_or(Error::AllocationFailed)?;
+      let capacity = match capacity.checked_mul(size_of::<T>()) {
+         Some(c) => c,
+         None => {
+            vec.zeroize();
+            return Err(Error::AllocationFailed);
+         }
+      };
 
       let size = capacity * mem::size_of::<T>();
 
@@ -222,9 +226,17 @@ impl<T: Zeroize> SecureVec<T> {
    where
       T: Clone + DefaultIsZeroes,
    {
-      let mut secure_vec = SecureVec::new_with_capacity(slice.len())?;
+      let mut secure_vec = match SecureVec::new_with_capacity(slice.len()) {
+         Ok(secure_vec) => secure_vec,
+         Err(e) => {
+            slice.zeroize();
+            return Err(e);
+         }
+      };
+
       secure_vec.init_from_clone(slice);
       slice.zeroize();
+      
       Ok(secure_vec)
    }
 
