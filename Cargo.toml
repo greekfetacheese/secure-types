@@ -19,7 +19,7 @@ optional = true
 libc = { version = "0.2" }
 
 [dependencies.zeroize]
-version = "1.8.1"
+version = "1.8.2"
 
 [dependencies.thiserror]
 version = "2"
