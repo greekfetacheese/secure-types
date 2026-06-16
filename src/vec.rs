@@ -178,15 +178,13 @@ impl<T: Zeroize> SecureVec<T> {
       let capacity = vec.capacity();
       let len = vec.len();
 
-      let capacity = match capacity.checked_mul(size_of::<T>()) {
-         Some(c) => c,
+      let size = match capacity.checked_mul(size_of::<T>()) {
+         Some(s) => s,
          None => {
             vec.zeroize();
             return Err(Error::AllocationFailed);
          }
       };
-
-      let size = capacity * mem::size_of::<T>();
 
       let ptr = match unsafe { alloc::<T>(size) } {
          Ok(ptr) => ptr,
@@ -236,7 +234,7 @@ impl<T: Zeroize> SecureVec<T> {
 
       secure_vec.init_from_clone(slice);
       slice.zeroize();
-      
+
       Ok(secure_vec)
    }
 
