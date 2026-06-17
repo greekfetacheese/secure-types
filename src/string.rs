@@ -248,13 +248,11 @@ impl SecureString {
          return;
       }
 
-      let (byte_start, byte_end) = self.unlock_str_unchecked(|str| {
-         let byte_start = char_to_byte_idx(str.as_bytes(), char_range.start);
-         let byte_end = char_to_byte_idx(str.as_bytes(), char_range.end);
-         (byte_start, byte_end)
-      });
-
       let new_len = self.vec.unlock_slice_mut(|current_bytes| {
+         let current_text = unsafe { core::str::from_utf8_unchecked(current_bytes) };
+         let byte_start = char_to_byte_idx(current_text.as_bytes(), char_range.start);
+         let byte_end = char_to_byte_idx(current_text.as_bytes(), char_range.end);
+
          if byte_start >= byte_end || byte_end > current_bytes.len() {
             return 0;
          }
