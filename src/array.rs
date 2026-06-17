@@ -122,7 +122,10 @@ where
    /// Creates a new SecureArray from a `&mut [T; LENGTH]`.
    ///
    /// The passed slice is zeroized afterwards
-   pub fn from_slice_mut(content: &mut [T; LENGTH]) -> Result<Self, Error> {
+   pub fn from_slice_mut(content: &mut [T; LENGTH]) -> Result<Self, Error>
+   where
+      T: Clone,
+   {
       let secure_array = match Self::empty() {
          Ok(secure_array) => secure_array,
          Err(e) => {
@@ -139,12 +142,10 @@ where
       }
 
       unsafe {
-         // Copy the data from the source array into the secure memory region
-         core::ptr::copy_nonoverlapping(
-            content.as_ptr(),
-            secure_array.ptr.as_ptr(),
-            LENGTH,
-         );
+         let dst = secure_array.ptr.as_ptr();
+         for (i, item) in content.iter().enumerate() {
+            core::ptr::write(dst.add(i), item.clone());
+         }
       }
 
       content.zeroize();
@@ -162,7 +163,10 @@ where
    /// Creates a new SecureArray from a `&[T; LENGTH]`.
    ///
    /// The array is not zeroized, you are responsible for zeroizing it
-   pub fn from_slice(content: &[T; LENGTH]) -> Result<Self, Error> {
+   pub fn from_slice(content: &[T; LENGTH]) -> Result<Self, Error>
+   where
+      T: Clone,
+   {
       let secure_array = Self::empty()?;
 
       let unlocked = secure_array.unlock_memory();
@@ -172,12 +176,10 @@ where
       }
 
       unsafe {
-         // Copy the data from the source array into the secure memory region
-         core::ptr::copy_nonoverlapping(
-            content.as_ptr(),
-            secure_array.ptr.as_ptr(),
-            LENGTH,
-         );
+         let dst = secure_array.ptr.as_ptr();
+         for (i, item) in content.iter().enumerate() {
+            core::ptr::write(dst.add(i), item.clone());
+         }
       }
 
       let _locked = secure_array.lock_memory();
@@ -634,5 +636,147 @@ mod tests {
       deserialized_bytes.unlock(|slice| {
          assert_eq!(slice, &[1, 2, 3]);
       });
+   }
+
+   use std::fmt::Debug;
+   use zeroize::Zeroize;
+
+   // === Test helpers for variety of types (bigger than u8, complex) ===
+   #[derive(Clone, Debug, PartialEq)]
+   struct SmallStruct {
+      a: u8,
+      b: u16,
+   }
+   impl Zeroize for SmallStruct {
+      fn zeroize(&mut self) {
+         self.a.zeroize();
+         self.b.zeroize();
+      }
+   }
+
+   #[derive(Clone, Debug, PartialEq)]
+   struct LargeStruct {
+      data: [u64; 4],
+      flag: bool,
+   }
+   impl Zeroize for LargeStruct {
+      fn zeroize(&mut self) {
+         self.data.zeroize();
+         self.flag.zeroize();
+      }
+   }
+
+   #[derive(Clone, Debug, PartialEq)]
+   #[repr(align(64))]
+   struct AlignedStruct {
+      value: u64,
+   }
+   impl Zeroize for AlignedStruct {
+      fn zeroize(&mut self) {
+         self.value.zeroize();
+      }
+   }
+
+   #[derive(Clone, Debug, PartialEq)]
+   struct Person {
+      name: String,
+      age: u32,
+      notes: String,
+   }
+   impl Person {
+      fn new(name: impl Into<String>, age: u32, notes: impl Into<String>) -> Self {
+         Self {
+            name: name.into(),
+            age,
+            notes: notes.into(),
+         }
+      }
+   }
+   impl Zeroize for Person {
+      fn zeroize(&mut self) {
+         self.name.zeroize();
+         self.age.zeroize();
+         self.notes.zeroize();
+      }
+   }
+   fn create_test_person(id: usize) -> Person {
+      Person::new(
+         format!("Person{}", id),
+         (id % 100) as u32,
+         format!("Notes #{}", id),
+      )
+   }
+
+   fn test_array_generic_basics<T: Zeroize + Clone + PartialEq + Debug, const N: usize>(
+      initial: &[T; N],
+   ) {
+      let secure: SecureArray<T, N> = SecureArray::from_slice(initial).unwrap();
+      assert_eq!(secure.len(), N);
+      secure.unlock(|slice| {
+         assert_eq!(slice, initial);
+      });
+      let cloned = secure.clone();
+      cloned.unlock(|slice| {
+         assert_eq!(slice, initial);
+      });
+      let mut er = SecureArray::from_slice(initial).unwrap();
+      er.erase();
+      er.unlock(|slice| {
+         assert_eq!(slice.len(), N);
+      });
+   }
+
+   #[test]
+   fn test_array_u8_variety() {
+      let data: [u8; 3] = [1, 2, 3];
+      test_array_generic_basics(&data);
+   }
+
+   #[test]
+   fn test_array_u64() {
+      let data: [u64; 2] = [100u64, 200];
+      test_array_generic_basics(&data);
+   }
+
+   #[test]
+   fn test_array_byte_array() {
+      let data: [[u8; 16]; 2] = [[1u8; 16], [2u8; 16]];
+      test_array_generic_basics(&data);
+   }
+
+   #[test]
+   fn test_array_small_struct() {
+      let data: [SmallStruct; 2] = [SmallStruct { a: 1, b: 2 }, SmallStruct { a: 3, b: 4 }];
+      test_array_generic_basics(&data);
+   }
+
+   #[test]
+   fn test_array_large_struct() {
+      let data = [
+         LargeStruct {
+            data: [1, 2, 3, 4],
+            flag: true,
+         },
+         LargeStruct {
+            data: [5, 6, 7, 8],
+            flag: false,
+         },
+      ];
+      test_array_generic_basics(&data);
+   }
+
+   #[test]
+   fn test_array_person() {
+      let data = [create_test_person(42), create_test_person(43)];
+      test_array_generic_basics(&data);
+   }
+
+   #[test]
+   fn test_array_aligned() {
+      let data = [
+         AlignedStruct { value: 0xDEAD_BEEF },
+         AlignedStruct { value: 0xCAFE_BABE },
+      ];
+      test_array_generic_basics(&data);
    }
 }

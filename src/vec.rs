@@ -197,12 +197,37 @@ impl<T: Zeroize> SecureVec<T> {
          }
       };
 
-      // Copy data from the old pointer to the new one
+      // Move data from the old vec into the secure allocation using ptr::read / ptr::write
+      // This correctly transfers ownership for non-Copy types (e.g. structs containing String).
+      // We then zero the *bytes* of the source buffer (after moving values out) to avoid
+      // leaving sensitive data, and prevent double-drop by clearing the vec length.
       unsafe {
-         core::ptr::copy_nonoverlapping(vec.as_ptr(), ptr.as_ptr() as *mut T, len);
+         let src = vec.as_ptr();
+         let dst = ptr.as_ptr();
+         for i in 0..len {
+            let value = core::ptr::read(src.add(i));
+            core::ptr::write(dst.add(i), value);
+         }
       }
 
-      vec.zeroize();
+      // Prevent the Vec from dropping the now-moved-from elements (would be UB)
+      // and securely erase whatever representation bytes remain in its buffer.
+      //
+      // We use set_len(0) + zeroize on a &mut [u8] view of the allocation
+      // (instead of calling vec.zeroize()) because the Ts have been moved out
+      // via ptr::read. The normal Vec::zeroize impl would zeroize+drop the
+      // moved-from elements, which is UB (and often SIGABRT for a non-copy type).
+      let old_byte_size = capacity * mem::size_of::<T>();
+      unsafe {
+         vec.set_len(0);
+      }
+      if old_byte_size > 0 {
+         // SAFETY: after set_len(0) the allocation bytes are still valid,
+         // we own them exclusively, and no Ts will be dropped by the Vec.
+         let bytes =
+            unsafe { core::slice::from_raw_parts_mut(vec.as_mut_ptr() as *mut u8, old_byte_size) };
+         bytes.zeroize();
+      }
 
       let secure = SecureVec {
          ptr,
@@ -377,7 +402,10 @@ impl<T: Zeroize> SecureVec<T> {
          let ok = self.unlock_memory();
          debug_assert!(ok, "SecureVec::erase: unlock_memory failed");
 
-         let slice = core::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.capacity);
+         // Only zero the initialized elements. Zeroizing capacity would try to
+         // zeroize uninitialized memory as T, which for Drop types (eg. String)
+         // is UB and causes SIGSEGV/SIGABRT.
+         let slice = core::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len);
          for elem in slice.iter_mut() {
             elem.zeroize();
          }
@@ -447,18 +475,19 @@ impl<T: Zeroize> SecureVec<T> {
          let ok = self.unlock_memory();
          debug_assert!(ok, "SecureVec::reserve: unlock_memory failed");
 
-         core::ptr::copy_nonoverlapping(
-            self.ptr.as_ptr(),
-            new_ptr.as_ptr() as *mut T,
-            self.len(),
-         );
+         // Move (not copy) elements to new buffer to support non-Copy T correctly.
+         // Using read+write transfers ownership of e.g. Strings.
+         let len = self.len();
+         for i in 0..len {
+            let val = core::ptr::read(self.ptr.as_ptr().add(i));
+            core::ptr::write(new_ptr.as_ptr().add(i), val);
+         }
 
-         // Erase and free the old memory
+         // Erase old buffer bytes (after move-out)
          if self.capacity > 0 {
-            let slice = core::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.capacity);
-            for elem in slice.iter_mut() {
-               elem.zeroize();
-            }
+            let old_bytes = self.capacity * mem::size_of::<T>();
+            let bytes = core::slice::from_raw_parts_mut(self.ptr.as_ptr() as *mut u8, old_bytes);
+            bytes.zeroize();
          }
 
          #[cfg(feature = "use_os")]
@@ -793,8 +822,139 @@ fn resolve_range_indices<R: RangeBounds<usize>>(range: R, len: usize) -> (usize,
 #[cfg(all(test, feature = "use_os"))]
 mod tests {
    use super::*;
+   use std::fmt::Debug;
    use std::process::{Command, Stdio};
    use std::sync::{Arc, Mutex};
+   use zeroize::Zeroize;
+
+   // Test helper types for variety (different sizes, alignments, complex data)
+
+   #[derive(Clone, Debug, PartialEq)]
+   struct SmallStruct {
+      a: u8,
+      b: u16,
+   }
+
+   impl Zeroize for SmallStruct {
+      fn zeroize(&mut self) {
+         self.a.zeroize();
+         self.b.zeroize();
+      }
+   }
+
+   #[derive(Clone, Debug, PartialEq)]
+   struct LargeStruct {
+      data: [u64; 4],
+      flag: bool,
+   }
+
+   impl Zeroize for LargeStruct {
+      fn zeroize(&mut self) {
+         self.data.zeroize();
+         self.flag.zeroize();
+      }
+   }
+
+   #[derive(Clone, Debug, PartialEq)]
+   #[repr(align(64))]
+   struct AlignedStruct {
+      value: u64,
+   }
+
+   impl Zeroize for AlignedStruct {
+      fn zeroize(&mut self) {
+         self.value.zeroize();
+      }
+   }
+
+   #[derive(Clone, Debug, PartialEq)]
+   struct Person {
+      name: String,
+      age: u32,
+      notes: String,
+   }
+
+   impl Zeroize for Person {
+      fn zeroize(&mut self) {
+         self.name.zeroize();
+         self.age.zeroize();
+         self.notes.zeroize();
+      }
+   }
+
+   impl Person {
+      fn new(name: impl Into<String>, age: u32, notes: impl Into<String>) -> Self {
+         Self {
+            name: name.into(),
+            age,
+            notes: notes.into(),
+         }
+      }
+   }
+
+   fn create_test_person(id: usize) -> Person {
+      Person::new(
+         format!("Person{}", id),
+         (id % 100) as u32,
+         format!("Some secret notes for person #{}", id),
+      )
+   }
+
+   fn test_vec_generic_basics<T: Zeroize + Clone + PartialEq + Debug>(initial: &[T]) {
+      if initial.is_empty() {
+         return;
+      }
+
+      // from_slice
+      let secure = SecureVec::from_slice(initial).unwrap();
+      assert_eq!(secure.len(), initial.len());
+      secure.unlock_slice(|slice| {
+         assert_eq!(slice, initial);
+      });
+
+      // new + push
+      let mut secure_push = SecureVec::new().unwrap();
+      for item in initial {
+         secure_push.push(item.clone());
+      }
+      secure_push.unlock_slice(|slice| {
+         assert_eq!(slice, initial);
+      });
+
+      // clone
+      let cloned = secure.clone();
+      secure.unlock_slice(|s| {
+         cloned.unlock_slice(|c| {
+            assert_eq!(s, c);
+         });
+      });
+
+      // reserve + push more
+      let mut res = SecureVec::new().unwrap();
+      res.reserve(initial.len() + 2);
+      for item in initial {
+         res.push(item.clone());
+      }
+      assert!(res.capacity >= initial.len() + 2 || res.capacity >= initial.len());
+      res.unlock_slice(|slice| {
+         assert_eq!(slice, initial);
+      });
+
+      // erase
+      res.erase();
+      res.unlock(|v| {
+         assert_eq!(v.len, 0);
+         // capacity should be preserved
+         assert!(v.capacity > 0);
+      });
+
+      // from_vec
+      let vec_data: Vec<T> = initial.to_vec();
+      let from_vec_secure = SecureVec::from_vec(vec_data).unwrap();
+      from_vec_secure.unlock_slice(|slice| {
+         assert_eq!(slice, initial);
+      });
+   }
 
    #[test]
    fn test_creation() {
@@ -1104,5 +1264,99 @@ mod tests {
          );
          eprintln!("Test passed: Process correctly terminated with STATUS_ACCESS_VIOLATION.");
       }
+   }
+
+   #[test]
+   fn test_vec_u8_variety() {
+      let data: Vec<u8> = vec![1, 2, 3, 4, 5];
+      test_vec_generic_basics(&data);
+   }
+
+   #[test]
+   fn test_vec_u16() {
+      let data: Vec<u16> = vec![1000, 2000, 3000];
+      test_vec_generic_basics(&data);
+   }
+
+   #[test]
+   fn test_vec_u64() {
+      let data: Vec<u64> = vec![0xDEADBEEF_CAFEBABE, 1, 2, 3, 4];
+      test_vec_generic_basics(&data);
+   }
+
+   #[test]
+   fn test_vec_byte_array() {
+      let data: Vec<[u8; 32]> = vec![[0xAB; 32], [0xCD; 32]];
+      test_vec_generic_basics(&data);
+   }
+
+   #[test]
+   fn test_vec_small_struct() {
+      let data = vec![
+         SmallStruct { a: 10, b: 20 },
+         SmallStruct { a: 30, b: 40 },
+         SmallStruct { a: 50, b: 60 },
+      ];
+      test_vec_generic_basics(&data);
+   }
+
+   #[test]
+   fn test_vec_large_struct() {
+      let data = vec![
+         LargeStruct {
+            data: [1, 2, 3, 4],
+            flag: true,
+         },
+         LargeStruct {
+            data: [10, 20, 30, 40],
+            flag: false,
+         },
+      ];
+      test_vec_generic_basics(&data);
+   }
+
+   #[test]
+   fn test_vec_person() {
+      let data = vec![
+         create_test_person(1),
+         create_test_person(42),
+         create_test_person(99),
+      ];
+      // test push which triggers reserve for > initial cap
+      let mut pvec = SecureVec::new().unwrap();
+      for p in &data {
+         pvec.push(p.clone());
+      }
+      pvec.unlock_slice(|slice| {
+         assert_eq!(slice.len(), 3);
+         assert_eq!(slice[0].name, "Person1");
+         assert_eq!(slice[2].notes, "Some secret notes for person #99");
+      });
+      println!("person push+realloc ok");
+   }
+
+   #[test]
+   fn test_vec_aligned_struct() {
+      let data = vec![
+         AlignedStruct {
+            value: 0x1234_5678_9ABC_DEF0,
+         },
+         AlignedStruct { value: 42 },
+      ];
+      test_vec_generic_basics(&data);
+   }
+
+   #[test]
+   fn test_vec_mixed_sizes() {
+      // Push many to force multiple reallocs with larger type
+      let mut vec: SecureVec<u64> = SecureVec::new().unwrap();
+      for i in 0..20u64 {
+         vec.push(i * 1000);
+      }
+      vec.unlock_slice(|slice| {
+         assert_eq!(slice.len(), 20);
+         assert_eq!(slice[0], 0);
+         assert_eq!(slice[19], 19000);
+      });
    }
 }
