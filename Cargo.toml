@@ -23,6 +23,7 @@ version = "1.8.2"
 
 [dependencies.thiserror]
 version = "2"
+optional = true
 
 [dependencies.serde]
 version = "1"
@@ -39,6 +40,9 @@ features = ["derive"]
 
 [features]
 default = ["use_os"]
-use_os = ["memsec"]
+use_os = ["memsec", "dep:thiserror"]
 serde = ["dep:serde"]
+
+# no_std + alloc mode: zeroization only, no OS memory locking.
+# When `use_os` is absent, the crate automatically builds in no_std mode.
 no_os = []

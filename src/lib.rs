@@ -1,7 +1,9 @@
 #![doc = include_str!("../readme.md")]
-#![cfg_attr(feature = "no_os", no_os)]
+// no_std is implied whenever `use_os` is not active.
+// `use_os` is the default feature — see Cargo.toml.
+#![cfg_attr(not(feature = "use_os"), no_std)]
 
-#[cfg(feature = "no_os")]
+#[cfg(not(feature = "use_os"))]
 extern crate alloc;
 
 pub mod array;
@@ -20,6 +22,7 @@ pub use memsec;
 #[cfg(feature = "use_os")]
 use memsec::Prot;
 
+#[cfg(feature = "use_os")]
 use thiserror::Error as ThisError;
 
 #[cfg(feature = "use_os")]
@@ -49,7 +52,11 @@ pub enum Error {
 pub enum Error {
    AlignmentFailed,
    AllocationFailed,
+   LengthCannotBeZero,
+   SizeCannotBeZero,
    NullAllocation,
+   UnlockFailed,
+   LengthMismatch,
    InvalidUtf8,
 }
 
@@ -200,14 +207,13 @@ pub(crate) unsafe fn alloc<T>(size: usize) -> Result<NonNull<T>, Error> {
 
    #[cfg(not(feature = "use_os"))]
    {
-      use core::alloc::Layout;
-      let layout =
-         Layout::from_size_align(size, mem::align_of::<T>()).map_err(|_| Error::AlignmentFailed)?;
-      let ptr = unsafe { alloc::alloc(layout) as *mut T };
+      let layout = core::alloc::Layout::from_size_align(size, core::mem::align_of::<T>())
+         .map_err(|_| Error::AlignmentFailed)?;
+      let ptr = unsafe { alloc::alloc::alloc(layout) as *mut T };
       if ptr.is_null() {
          return Err(Error::NullAllocation);
       }
-      unsafe { NonNull::new_unchecked(ptr) }
+      unsafe { Ok(NonNull::new_unchecked(ptr)) }
    }
 }
 

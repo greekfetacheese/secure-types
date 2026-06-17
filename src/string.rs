@@ -156,7 +156,7 @@ impl SecureString {
    }
 
    /// Mutable access to the `SecureString`
-   /// 
+   ///
    /// This method does not unlock the memory.
    pub fn secure_mut<F, R>(&mut self, f: F) -> R
    where

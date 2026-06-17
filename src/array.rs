@@ -1,12 +1,15 @@
+// No_std: we only need `Layout` for computing allocation sizes.
+// We call `alloc::alloc::dealloc` via fully-qualified path to avoid
+// shadowing the crate-level `alloc::<T>()` helper.
 #[cfg(not(feature = "use_os"))]
-use alloc::{Layout, alloc, dealloc};
+use alloc::alloc::Layout;
 
-use super::{Error, SecureVec};
+use super::{Error, SecureVec, alloc};
 use core::{marker::PhantomData, mem, ptr::NonNull};
 use zeroize::Zeroize;
 
 #[cfg(feature = "use_os")]
-use super::{alloc, free};
+use super::free;
 #[cfg(feature = "use_os")]
 use memsec::Prot;
 
@@ -106,10 +109,10 @@ where
          _marker: PhantomData,
       };
 
-      let locked = secure_array.lock_memory();
+      let _locked = secure_array.lock_memory();
 
       #[cfg(feature = "use_os")]
-      if !locked {
+      if !_locked {
          return Err(Error::LockFailed);
       }
 
@@ -146,10 +149,10 @@ where
 
       content.zeroize();
 
-      let locked = secure_array.lock_memory();
+      let _locked = secure_array.lock_memory();
 
       #[cfg(feature = "use_os")]
-      if !locked {
+      if !_locked {
          return Err(Error::LockFailed);
       }
 
@@ -177,10 +180,10 @@ where
          );
       }
 
-      let locked = secure_array.lock_memory();
+      let _locked = secure_array.lock_memory();
 
       #[cfg(feature = "use_os")]
-      if !locked {
+      if !_locked {
          return Err(Error::LockFailed);
       }
 
@@ -327,9 +330,9 @@ impl<T: Zeroize, const LENGTH: usize> Drop for SecureArray<T, LENGTH> {
       free(self.ptr);
 
       #[cfg(not(feature = "use_os"))]
-      {
+      unsafe {
          let layout = Layout::from_size_align_unchecked(size, mem::align_of::<T>());
-         dealloc(self.ptr.as_ptr() as *mut u8, layout);
+         alloc::alloc::dealloc(self.ptr.as_ptr() as *mut u8, layout);
       }
    }
 }

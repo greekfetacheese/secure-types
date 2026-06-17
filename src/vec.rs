@@ -1,10 +1,13 @@
+// No_std: we only need `Layout` for computing allocation sizes.
+// We call `alloc::alloc::dealloc` via fully-qualified path to avoid
+// shadowing the crate-level `alloc::<T>()` helper.
 #[cfg(not(feature = "use_os"))]
-use alloc::{Layout, alloc, dealloc};
+use alloc::alloc::Layout;
 
 #[cfg(feature = "use_os")]
 use std::vec::Vec;
 
-use super::{Error, SecureArray};
+use super::{Error, SecureArray, alloc};
 use core::{
    marker::PhantomData,
    mem,
@@ -14,7 +17,7 @@ use core::{
 use zeroize::{DefaultIsZeroes, Zeroize};
 
 #[cfg(feature = "use_os")]
-use super::{alloc, free};
+use super::free;
 #[cfg(feature = "use_os")]
 use memsec::Prot;
 
@@ -126,10 +129,10 @@ impl<T: Zeroize> SecureVec<T> {
          _marker: PhantomData,
       };
 
-      let locked = secure.lock_memory();
+      let _locked = secure.lock_memory();
 
       #[cfg(feature = "use_os")]
-      if !locked {
+      if !_locked {
          return Err(Error::LockFailed);
       }
 
@@ -156,10 +159,10 @@ impl<T: Zeroize> SecureVec<T> {
          _marker: PhantomData,
       };
 
-      let locked = secure.lock_memory();
+      let _locked = secure.lock_memory();
 
       #[cfg(feature = "use_os")]
-      if !locked {
+      if !_locked {
          return Err(Error::LockFailed);
       }
 
@@ -256,6 +259,12 @@ impl<T: Zeroize> SecureVec<T> {
 
    pub fn is_empty(&self) -> bool {
       self.len() == 0
+   }
+
+   /// Returns the total number of bytes currently allocated for this vector.
+   #[cfg(not(feature = "use_os"))]
+   pub(crate) fn allocated_byte_size(&self) -> usize {
+      self.capacity * mem::size_of::<T>()
    }
 
    pub(crate) fn as_mut_ptr(&mut self) -> *mut u8 {
@@ -459,7 +468,7 @@ impl<T: Zeroize> SecureVec<T> {
          {
             let old_size = self.capacity * mem::size_of::<T>();
             let old_layout = Layout::from_size_align_unchecked(old_size, mem::align_of::<T>());
-            dealloc(self.ptr.as_ptr() as *mut u8, old_layout);
+            alloc::alloc::dealloc(self.ptr.as_ptr() as *mut u8, old_layout);
          }
       }
 
@@ -570,10 +579,10 @@ impl<T: Zeroize> Drop for SecureVec<T> {
       free(self.ptr);
 
       #[cfg(not(feature = "use_os"))]
-      {
+      unsafe {
          let layout =
             Layout::from_size_align_unchecked(self.allocated_byte_size(), mem::align_of::<T>());
-         dealloc(self.ptr.as_ptr() as *mut u8, layout);
+         alloc::alloc::dealloc(self.ptr.as_ptr() as *mut u8, layout);
       }
    }
 }
