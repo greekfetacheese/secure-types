@@ -600,9 +600,18 @@ impl<const LENGTH: usize> From<SecureArray<u8, LENGTH>> for SecureVec<u8> {
 
 impl<T: Zeroize> Drop for SecureVec<T> {
    fn drop(&mut self) {
-      self.erase();
-      let ok = self.unlock_memory();
-      debug_assert!(ok, "SecureVec::drop: unlock_memory failed");
+      unsafe {
+         let ok = self.unlock_memory();
+         debug_assert!(ok, "SecureVec::erase: unlock_memory failed");
+
+         // Only zero the initialized elements. Zeroizing capacity would try to
+         // zeroize uninitialized memory as T, which for Drop types (eg. String)
+         // is UB and causes SIGSEGV/SIGABRT.
+         let slice = core::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len);
+         for elem in slice.iter_mut() {
+            elem.zeroize();
+         }
+      }
 
       #[cfg(feature = "use_os")]
       free(self.ptr);

@@ -319,9 +319,13 @@ impl<T: Zeroize, const LENGTH: usize> core::ops::IndexMut<usize> for SecureArray
 
 impl<T: Zeroize, const LENGTH: usize> Drop for SecureArray<T, LENGTH> {
    fn drop(&mut self) {
-      self.erase();
       let ok = self.unlock_memory();
       debug_assert!(ok, "SecureArray::drop: unlock_memory failed");
+
+      let slice = unsafe { core::slice::from_raw_parts_mut(self.ptr.as_ptr(), LENGTH) };
+      for element in slice.iter_mut() {
+         element.zeroize();
+      }
 
       let size = LENGTH * mem::size_of::<T>();
       if size == 0 {
