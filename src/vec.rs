@@ -56,12 +56,14 @@ impl<'a, T: Zeroize> Drop for UnlockGuard<'a, T> {
 ///
 /// In a `no_std` environment, it falls back to providing only the **zeroization-on-drop** guarantee.
 ///
-/// ## Program Termination
+/// ## Security Note on Direct Access
 ///
-/// Direct indexing (e.g., `vec[0]`) on a locked vector will cause the operating system
-/// to terminate the process with an access violation error.
+/// We intentionally do **not** implement `Index` / `IndexMut`.
+/// Using `secure_vec[0]` is a compile error.
 ///
-/// Always use the provided scope methods (`unlock_slice`, `unlock_slice_mut`) for safe access.
+/// This is by design: direct indexing would allow bypassing the explicit
+/// unlock mechanism. Always use `unlock_slice()` / `unlock_slice_mut()` (or
+/// the `unlock*` family of methods) to access the contents.
 ///
 /// # Notes
 ///
@@ -284,6 +286,22 @@ impl<T: Zeroize> SecureVec<T> {
 
    pub fn is_empty(&self) -> bool {
       self.len() == 0
+   }
+
+   /// Returns the pointer to the locked memory region
+   ///
+   /// # DANGER
+   ///
+   /// This is a low-level API, which should be used only for
+   /// testing purposes. If you need to access the locked memory
+   /// region, use one of the unlock methods.
+   #[cfg(feature = "expose-ptr")]
+   #[deprecated(
+      since = "0.3.0",
+      note = "This method is intended only for testing/crash reproduction. Use one of the unlock methods instead."
+   )]
+   pub fn ptr(&self) -> NonNull<T> {
+      self.ptr
    }
 
    /// Returns the total number of bytes currently allocated for this vector.
@@ -625,17 +643,10 @@ impl<T: Zeroize> Drop for SecureVec<T> {
    }
 }
 
-impl<T: Zeroize> core::ops::Index<usize> for SecureVec<T> {
-   type Output = T;
-
-   fn index(&self, index: usize) -> &Self::Output {
-      assert!(index < self.len, "Index out of bounds");
-      unsafe {
-         let ptr = self.ptr.as_ptr().add(index);
-         &*ptr
-      }
-   }
-}
+// Note: We intentionally do **not** implement Index / IndexMut.
+// Direct indexing (`vec[0]`) would bypass the unlock mechanism and
+// access locked memory, causing a segfault. This is by design.
+// Always use unlock_slice() / unlock_slice_mut().
 
 #[cfg(feature = "serde")]
 impl serde::Serialize for SecureVec<u8> {
@@ -1156,13 +1167,13 @@ mod tests {
    }
 
    #[test]
-   fn test_index() {
+   fn test_unlock_gives_access() {
       let vec: Vec<u8> = vec![1, 2, 3];
       let secure = SecureVec::from_vec(vec).unwrap();
-      secure.unlock(|secure| {
-         assert_eq!(secure[0], 1);
-         assert_eq!(secure[1], 2);
-         assert_eq!(secure[2], 3);
+      secure.unlock_slice(|slice| {
+         assert_eq!(slice[0], 1);
+         assert_eq!(slice[1], 2);
+         assert_eq!(slice[2], 3);
       });
    }
 
@@ -1222,7 +1233,9 @@ mod tests {
       if std::env::args().any(|a| a == arg) {
          let vec: Vec<u8> = vec![1, 2, 3];
          let secure = SecureVec::from_vec(vec).unwrap();
-         let _value = core::hint::black_box(secure[0]);
+         // Deliberately dereference the locked pointer to test that
+         // the security model (mlock + no normal access) works as expected.
+         let _value = unsafe { core::hint::black_box(*secure.ptr.as_ptr()) };
 
          std::process::exit(1);
       }

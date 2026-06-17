@@ -19,13 +19,4 @@ fn main() {
       assert_eq!(unlocked_slice, &[1, 2, 3]);
       println!("The secret is: {:?}", unlocked_slice);
    }); // The memory is automatically locked again when the scope ends.
-
-   // Everytime we access the SecureArray we are unlocking the memory and making it accessible.
-   // Any operations you do during that time ideally should be very fast so you don't keep the data exposed for too long.
-
-   // Notice, direct indexing is not possible, the OS will terminate the process with an access violation error on Windows
-   // and a segmentation fault on Linux.
-   // try binding this to a variable and removing the underscore to see what happens
-   // Note: Not all terminals show the segmentation fault
-   let _ = secure_array[0];
 }

@@ -46,3 +46,6 @@ serde = ["dep:serde"]
 # no_std + alloc mode: zeroization only, no OS memory locking.
 # When `use_os` is absent, the crate automatically builds in no_std mode.
 no_os = []
+
+# Only for testing crash behavior
+expose-ptr = []

@@ -45,11 +45,12 @@ impl<'a, T: Zeroize, const LENGTH: usize> Drop for UnlockGuard<'a, T, LENGTH> {
 ///
 /// In a `no_std` environment, it falls back to providing only the **zeroization-on-drop** guarantee.
 ///
-/// # Program Termination
+/// # Security Note
 ///
-/// Direct indexing (e.g., `array[0]`) on a locked array will cause the operating system
-/// to terminate the process with an access violation error. Always use the provided
-/// scope methods (`unlock`, `unlock_mut`) for safe access.
+/// We intentionally do **not** implement `Index` or `IndexMut`.
+/// `array[0]` is a compile error.
+///
+/// Always use `.unlock()` / `.unlock_mut()` (or the slice variants) to access data.
 ///
 /// # Notes
 ///
@@ -200,6 +201,22 @@ where
       self.len() == 0
    }
 
+   /// Returns the pointer to the locked memory region
+   ///
+   /// # DANGER
+   ///
+   /// This is a low-level API, which should be used only for
+   /// testing purposes. If you need to access the locked memory
+   /// region, use [`unlock`](Self::unlock) or [`unlock_mut`](Self::unlock_mut).
+   #[cfg(feature = "expose-ptr")]
+   #[deprecated(
+      since = "0.3.0",
+      note = "This method is intended only for testing/crash reproduction. Use unlock() or unlock_mut() instead."
+   )]
+   pub fn ptr(&self) -> NonNull<T> {
+      self.ptr
+   }
+
    pub(crate) fn lock_memory(&self) -> bool {
       #[cfg(feature = "use_os")]
       {
@@ -293,27 +310,6 @@ where
          ok,
          "SecureArray::init_from_clone: lock_memory failed"
       );
-   }
-}
-
-impl<T: Zeroize, const LENGTH: usize> core::ops::Index<usize> for SecureArray<T, LENGTH> {
-   type Output = T;
-   fn index(&self, index: usize) -> &Self::Output {
-      assert!(index < self.len(), "Index out of bounds");
-      unsafe {
-         let ptr = self.ptr.as_ptr().add(index);
-         &*ptr
-      }
-   }
-}
-
-impl<T: Zeroize, const LENGTH: usize> core::ops::IndexMut<usize> for SecureArray<T, LENGTH> {
-   fn index_mut(&mut self, index: usize) -> &mut Self::Output {
-      assert!(index < self.len(), "Index out of bounds");
-      unsafe {
-         let ptr = self.ptr.as_ptr().add(index);
-         &mut *ptr
-      }
    }
 }
 
@@ -552,7 +548,9 @@ mod tests {
       if std::env::args().any(|a| a == arg) {
          let exposed: &mut [u8; 3] = &mut [1, 2, 3];
          let array: SecureArray<u8, 3> = SecureArray::from_slice_mut(exposed).unwrap();
-         let _value = core::hint::black_box(array[0]);
+         // Deliberately dereference the locked pointer to test that
+         // the security model works as expected.
+         let _value = unsafe { core::hint::black_box(*array.ptr.as_ptr()) };
 
          std::process::exit(1);
       }

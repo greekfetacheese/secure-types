@@ -14,7 +14,7 @@ Currently there are 3 types:
 - **Memory Locking**: (OS-only) On Linux/Windows the memory is locked to prevent memory swapping or unauthorized access.
 - **Safe Scoped Access**: Direct access on these types is not possible, data is protected by default and only accessible within safe blocks.
 - **`no_std` Support**: For embedded and Web environments (with zeroization only).
-- **Serde Support**: Optional serialization/deserialization.
+- **Serde Support**: Optional serialization/deserialization for `SecureString`, `SecureVec<u8> ` and `SecureArray<u8, LENGTH>`.
 
 ## How memory is locked
 
@@ -92,6 +92,18 @@ secure_array.unlock_mut(|unlocked_slice| {
 - `use_os` (default): Enables all OS-level security features.
 - `no_os`: For `no_std` environments. Only provides the Zeroize on Drop.
 - `serde`: Enables serialization/deserialization.
+- `expose-ptr`: For testing purposes. Exposes the locked memory region pointer.
+
+## Running tests
+
+```bash
+cargo test --features serde,expose-ptr
+```
+
+## License
+Licensed under either of
+ * Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
+ * MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
 
 
 ## Credits
