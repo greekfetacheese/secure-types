@@ -156,7 +156,9 @@ impl SecureString {
    }
 
    /// Mutable access to the `SecureString`
-   pub fn unlock_mut<F, R>(&mut self, f: F) -> R
+   /// 
+   /// This method does not unlock the memory.
+   pub fn secure_mut<F, R>(&mut self, f: F) -> R
    where
       F: FnOnce(&mut SecureString) -> R,
    {
@@ -524,7 +526,7 @@ mod tests {
    fn test_unlock_mut() {
       let hello_world = "Hello, world!";
       let mut string = SecureString::from("Hello, ");
-      string.unlock_mut(|string| {
+      string.secure_mut(|string| {
          string.push_str("world!");
       });
 

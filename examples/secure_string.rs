@@ -14,9 +14,7 @@ fn main() {
    }); // The memory is automatically locked again when the scope ends.
 
    // Use mut scope if you need to pass it as a mutable reference
-   secure_string.unlock_mut(|mut_string| {
-      mutate_secure_string(mut_string);
-   });
+   secure_string.push_str("_password");
 
    secure_string.unlock_str(|unlocked_str| {
       assert_eq!(unlocked_str, "my_secret_password");
@@ -25,8 +23,4 @@ fn main() {
 
    // Everytime we access the SecureString we are unlocking the memory and making it accessible.
    // Any operations you do during that time ideally should be very fast so you don't keep the data exposed for too long.
-}
-
-fn mutate_secure_string(string: &mut SecureString) {
-   string.push_str("_password");
 }
