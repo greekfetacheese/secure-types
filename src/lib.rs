@@ -22,43 +22,42 @@ pub use memsec;
 #[cfg(feature = "use_os")]
 use memsec::Prot;
 
-#[cfg(feature = "use_os")]
-use thiserror::Error as ThisError;
-
-#[cfg(feature = "use_os")]
-#[derive(ThisError, Debug)]
+#[derive(Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 pub enum Error {
-   #[error("Failed to allocate secure memory")]
    AllocationFailed,
-   #[error("Length cannot be zero")]
    LengthCannotBeZero,
-   #[error("Size cannot be zero")]
    SizeCannotBeZero,
-   #[error("Allocated Ptr is null")]
    NullAllocation,
-   #[error("Failed to lock memory")]
    LockFailed,
-   #[error("Failed to unlock memory")]
    UnlockFailed,
-   #[error("Source length does not match the fixed size of the destination array")]
    LengthMismatch,
-   #[error("Bytes are not valid UTF-8")]
    InvalidUtf8,
+   AlignmentFailed,
 }
 
-#[cfg(not(feature = "use_os"))]
-#[derive(Debug)]
-pub enum Error {
-   AlignmentFailed,
-   AllocationFailed,
-   LengthCannotBeZero,
-   SizeCannotBeZero,
-   NullAllocation,
-   UnlockFailed,
-   LengthMismatch,
-   InvalidUtf8,
+impl core::fmt::Display for Error {
+   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+      match self {
+         Self::AllocationFailed => write!(f, "Failed to allocate memory"),
+         Self::LengthCannotBeZero => write!(f, "Length cannot be zero"),
+         Self::SizeCannotBeZero => write!(f, "Size cannot be zero"),
+         Self::NullAllocation => write!(f, "Allocated Ptr is null"),
+         Self::LockFailed => write!(f, "Failed to lock memory"),
+         Self::UnlockFailed => write!(f, "Failed to unlock memory"),
+         Self::LengthMismatch => {
+            write!(
+               f,
+               "Source length does not match the fixed size of the destination array"
+            )
+         }
+         Self::InvalidUtf8 => write!(f, "Bytes are not valid UTF-8"),
+         Self::AlignmentFailed => write!(f, "Failed to satisfy allocation alignment"),
+      }
+   }
 }
+
+impl core::error::Error for Error {}
 
 #[cfg(all(feature = "use_os", unix))]
 const ALLOC_TAG_MALLOC: usize = 0xDEAD_BEEF;

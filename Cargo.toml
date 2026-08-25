@@ -19,11 +19,7 @@ optional = true
 libc = { version = "0.2" }
 
 [dependencies.zeroize]
-version = "1.8.2"
-
-[dependencies.thiserror]
-version = "2"
-optional = true
+version = "1.9.0"
 
 [dependencies.serde]
 version = "1"
@@ -40,7 +36,7 @@ features = ["derive"]
 
 [features]
 default = ["use_os"]
-use_os = ["memsec", "dep:thiserror"]
+use_os = ["memsec"]
 serde = ["dep:serde"]
 
 # no_std + alloc mode: zeroization only, no OS memory locking.
