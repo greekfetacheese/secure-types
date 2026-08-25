@@ -52,6 +52,13 @@ impl<'a, T: Zeroize, const LENGTH: usize> Drop for UnlockGuard<'a, T, LENGTH> {
 ///
 /// Always use `.unlock()` / `.unlock_mut()` (or the slice variants) to access data.
 ///
+/// # Thread Safety
+///
+/// `SecureArray` is `Send` (it can be moved to another thread) but not `Sync`.
+/// `unlock` / `unlock_mut` change the allocation's page protection, so two threads
+/// unlocking the same instance would race (one can relock while the other still
+/// holds a live slice). Share it as `Arc<Mutex<SecureArray<...>>>`.
+///
 /// # Notes
 ///
 /// If you return a new allocated `[T; LENGTH]` from one of the unlock methods you are responsible for zeroizing the memory.
@@ -87,7 +94,6 @@ where
 }
 
 unsafe impl<T: Zeroize + Send, const LENGTH: usize> Send for SecureArray<T, LENGTH> {}
-unsafe impl<T: Zeroize + Send + Sync, const LENGTH: usize> Sync for SecureArray<T, LENGTH> {}
 
 impl<T, const LENGTH: usize> SecureArray<T, LENGTH>
 where

@@ -9,6 +9,10 @@ use zeroize::Zeroize;
 /// Access to the string contents is provided through scoped methods like `unlock_str`,
 /// which ensure the memory is only unlocked for the briefest possible time.
 ///
+/// # Thread Safety
+///
+/// Same as [`SecureVec`]: `Send` but not `Sync`. Share as `Arc<Mutex<SecureString>>`.
+///
 /// # Notes
 ///
 /// If you return a new allocated `String` from one of the unlock methods you are responsible for zeroizing the memory.

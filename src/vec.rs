@@ -65,6 +65,13 @@ impl<'a, T: Zeroize> Drop for UnlockGuard<'a, T> {
 /// unlock mechanism. Always use `unlock_slice()` / `unlock_slice_mut()` (or
 /// the `unlock*` family of methods) to access the contents.
 ///
+/// # Thread Safety
+///
+/// `SecureVec` is `Send` (it can be moved to another thread) but not `Sync`.
+/// `unlock*` changes the allocation's page protection, so two threads unlocking
+/// the same instance would race (one can relock while the other still holds a
+/// live slice). Share it as `Arc<Mutex<SecureVec<T>>>`.
+///
 /// # Notes
 ///
 /// If you return a new allocated `Vec` from one of the unlock methods you are responsible for zeroizing the memory.
@@ -115,7 +122,6 @@ where
 }
 
 unsafe impl<T: Zeroize + Send> Send for SecureVec<T> {}
-unsafe impl<T: Zeroize + Send + Sync> Sync for SecureVec<T> {}
 
 impl<T: Zeroize> SecureVec<T> {
    /// Create a new `SecureVec` with a capacity of 1

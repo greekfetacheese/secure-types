@@ -13,6 +13,7 @@ Currently there are 3 types:
 - **Zeroization on Drop**: Memory is wiped when dropped.
 - **Memory Locking**: (OS-only) On Linux/Windows the memory is locked to prevent memory swapping or unauthorized access.
 - **Safe Scoped Access**: Direct access on these types is not possible, data is protected by default and only accessible within safe blocks.
+- **Send, not Sync**: Values can be moved to another thread. Sharing one instance across threads requires an explicit lock (`Arc<Mutex<_>>`). Concurrent `unlock` would race on page protection.
 - **`no_std` Support**: For embedded and Web environments (with zeroization only).
 - **Serde Support**: Optional serialization/deserialization for `SecureString`, `SecureVec<u8> ` and `SecureArray<u8, LENGTH>`.
 
