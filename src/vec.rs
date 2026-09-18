@@ -611,8 +611,8 @@ impl<T: Clone + Zeroize> Clone for SecureVec<T> {
    }
 }
 
-impl<const LENGTH: usize> From<SecureArray<u8, LENGTH>> for SecureVec<u8> {
-   fn from(array: SecureArray<u8, LENGTH>) -> Self {
+impl<T: Clone + Zeroize, const LENGTH: usize> From<SecureArray<T, LENGTH>> for SecureVec<T> {
+   fn from(array: SecureArray<T, LENGTH>) -> Self {
       let mut new_vec = SecureVec::new_with_capacity(LENGTH)
          .expect("Failed to allocate SecureVec during conversion");
       array.unlock(|array_slice| {
@@ -1015,6 +1015,16 @@ mod tests {
       assert_eq!(vec.len(), 3);
       vec.unlock_slice(|slice| {
          assert_eq!(slice, &[1, 2, 3]);
+      });
+   }
+
+   #[test]
+   fn test_from_secure_array_generic() {
+      let array: SecureArray<u64, 2> = SecureArray::from_slice(&[100u64, 200]).unwrap();
+      let vec: SecureVec<u64> = array.into();
+      assert_eq!(vec.len(), 2);
+      vec.unlock_slice(|slice| {
+         assert_eq!(slice, &[100u64, 200]);
       });
    }
 

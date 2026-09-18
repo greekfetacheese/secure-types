@@ -93,7 +93,7 @@ const fn get_header_offset<T>() -> usize {
 }
 
 #[cfg(all(feature = "use_os", unix))]
-fn supports_memfd_secret() -> bool {
+pub fn supports_memfd_secret() -> bool {
    match MEMFD_SECRET_SUPPORT.load(Ordering::Relaxed) {
       MEMFD_YES => true,
       MEMFD_NO => false,

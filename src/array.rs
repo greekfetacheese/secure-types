@@ -3,6 +3,8 @@
 // shadowing the crate-level `alloc::<T>()` helper.
 #[cfg(not(feature = "use_os"))]
 use alloc::alloc::Layout;
+#[cfg(not(feature = "use_os"))]
+use alloc::vec::Vec;
 
 use super::{Error, SecureVec, alloc};
 use core::{marker::PhantomData, mem, ptr::NonNull};
@@ -355,15 +357,17 @@ impl<T: Clone + Zeroize, const LENGTH: usize> Clone for SecureArray<T, LENGTH> {
    }
 }
 
-impl<const LENGTH: usize> TryFrom<SecureVec<u8>> for SecureArray<u8, LENGTH> {
+impl<T: Clone + Zeroize, const LENGTH: usize> TryFrom<SecureVec<T>> for SecureArray<T, LENGTH> {
    type Error = Error;
 
-   /// Tries to convert a `SecureVec<u8>` into a `SecureArray<u8, LENGTH>`.
+   /// Tries to convert a `SecureVec<T>` into a `SecureArray<T, LENGTH>`.
    ///
    /// This operation will only succeed if `vec.len() == LENGTH`.
+   /// `LENGTH` is a compile-time constant on the destination type, it cannot
+   /// be taken from the vector's runtime length.
    ///
    /// The `SecureVec` is consumed.
-   fn try_from(vec: SecureVec<u8>) -> Result<Self, Self::Error> {
+   fn try_from(vec: SecureVec<T>) -> Result<Self, Self::Error> {
       if vec.len() != LENGTH {
          return Err(Error::LengthMismatch);
       }
@@ -373,6 +377,37 @@ impl<const LENGTH: usize> TryFrom<SecureVec<u8>> for SecureArray<u8, LENGTH> {
       vec.unlock_slice(|vec_slice| {
          new_array.init_from_clone(vec_slice);
       });
+
+      Ok(new_array)
+   }
+}
+
+impl<T: Clone + Zeroize, const LENGTH: usize> TryFrom<Vec<T>> for SecureArray<T, LENGTH> {
+   type Error = Error;
+
+   /// Tries to convert a `Vec<T>` into a `SecureArray<T, LENGTH>`.
+   ///
+   /// This operation will only succeed if `vec.len() == LENGTH`.
+   /// `LENGTH` is a compile-time constant on the destination type, it cannot
+   /// be taken from the vector's runtime length.
+   ///
+   /// The `Vec` is consumed and zeroized.
+   fn try_from(mut vec: Vec<T>) -> Result<Self, Self::Error> {
+      if vec.len() != LENGTH {
+         vec.zeroize();
+         return Err(Error::LengthMismatch);
+      }
+
+      let mut new_array = match Self::empty() {
+         Ok(new_array) => new_array,
+         Err(e) => {
+            vec.zeroize();
+            return Err(e);
+         }
+      };
+
+      new_array.init_from_clone(&vec);
+      vec.zeroize();
 
       Ok(new_array)
    }
@@ -466,6 +501,35 @@ mod tests {
       array.unlock(|slice| {
          assert_eq!(slice, &[1, 2, 3]);
       });
+   }
+
+   #[test]
+   fn test_from_vec() {
+      let vec = vec![1u8, 2, 3];
+      let array: SecureArray<u8, 3> = SecureArray::try_from(vec).unwrap();
+      assert_eq!(array.len(), 3);
+      array.unlock(|slice| {
+         assert_eq!(slice, &[1, 2, 3]);
+      });
+   }
+
+   #[test]
+   fn test_from_secure_vec_generic() {
+      let vec: SecureVec<u64> = SecureVec::from_slice(&[100u64, 200]).unwrap();
+      let array: SecureArray<u64, 2> = vec.try_into().unwrap();
+      array.unlock(|slice| {
+         assert_eq!(slice, &[100u64, 200]);
+      });
+   }
+
+   #[test]
+   fn test_try_from_length_mismatch() {
+      let vec: SecureVec<u8> = SecureVec::from_slice(&[1, 2, 3]).unwrap();
+      let result: Result<SecureArray<u8, 4>, _> = SecureArray::try_from(vec);
+      assert!(matches!(result, Err(Error::LengthMismatch)));
+
+      let result: Result<SecureArray<u8, 2>, _> = SecureArray::try_from(vec![1u8, 2, 3]);
+      assert!(matches!(result, Err(Error::LengthMismatch)));
    }
 
    #[test]
