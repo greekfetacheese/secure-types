@@ -41,7 +41,9 @@ impl<'a, T: Zeroize> UnlockGuard<'a, T> {
 impl<'a, T: Zeroize> Drop for UnlockGuard<'a, T> {
    fn drop(&mut self) {
       let ok = self.vec.lock_memory();
-      debug_assert!(ok, "UnlockGuard::drop: lock_memory failed");
+      // Failing to re-lock means the protection is silently gone while the value is
+      // still alive, so this is a hard error in every profile.
+      assert!(ok, "UnlockGuard::drop: lock_memory failed");
    }
 }
 
@@ -433,7 +435,7 @@ impl<T: Zeroize> SecureVec<T> {
          self.clear();
 
          let ok = self.lock_memory();
-         debug_assert!(ok, "SecureVec::erase: lock_memory failed");
+         assert!(ok, "SecureVec::erase: lock_memory failed");
       }
    }
 
@@ -458,7 +460,7 @@ impl<T: Zeroize> SecureVec<T> {
       }
 
       let ok = self.lock_memory();
-      debug_assert!(ok, "SecureVec::push: lock_memory failed");
+      assert!(ok, "SecureVec::push: lock_memory failed");
    }
 
    /// Ensures that the vector has enough capacity for at least `additional` more elements.
@@ -546,14 +548,15 @@ impl<T: Zeroize> SecureVec<T> {
       self.ptr = new_ptr;
       self.capacity = new_capacity;
       let ok = self.lock_memory();
-      debug_assert!(ok, "SecureVec::reserve: lock_memory failed");
+      assert!(ok, "SecureVec::reserve: lock_memory failed");
    }
 
    /// Creates a draining iterator that removes the specified range from the vector
    /// and yields the removed items.
    ///
-   /// Note: The vector is unlocked during the lifetime of the `Drain` iterator.
-   /// The memory is relocked when the `Drain` iterator is dropped.
+   /// Note: the memory is only unlocked while an item is read and while the iterator
+   /// is dropped, so it is left locked once the iterator is gone even if the
+   /// iterator is leaked with `mem::forget`.
    ///
    /// # Panics
    /// Panics if the starting point is greater than the end point or if the end point
@@ -569,9 +572,6 @@ impl<T: Zeroize> SecureVec<T> {
       let tail_len = original_len - drain_end_idx;
 
       self.len = drain_start_idx;
-
-      let ok = self.unlock_memory();
-      debug_assert!(ok, "SecureVec::drain: unlock_memory failed");
 
       Drain {
          vec_ref: self,
@@ -611,7 +611,7 @@ impl<T: Zeroize> SecureVec<T> {
 
       self.len = src.len();
       let ok = self.lock_memory();
-      debug_assert!(
+      assert!(
          ok,
          "SecureVec::init_from_clone: lock_memory failed"
       );
@@ -643,7 +643,7 @@ impl<T: Zeroize> Drop for SecureVec<T> {
    fn drop(&mut self) {
       unsafe {
          let ok = self.unlock_memory();
-         debug_assert!(ok, "SecureVec::erase: unlock_memory failed");
+         debug_assert!(ok, "SecureVec::drop: unlock_memory failed");
 
          // Only zero the initialized elements. Zeroizing capacity would try to
          // zeroize uninitialized memory as T, which for Drop types (eg. String)
@@ -722,9 +722,12 @@ impl<'de> serde::Deserialize<'de> for SecureVec<u8> {
 ///
 /// This struct is created by the `drain` method on `SecureVec`.
 ///
-/// # Safety
-/// The returned `Drain` iterator must not be forgotten (via `mem::forget`).
-/// Forgetting the iterator sets the len of `SecureVec` to 0 and the memory will remain unlocked
+/// # Notes
+///
+/// The memory is unlocked only while an item is read and while `Drop` compacts the
+/// vector, so a leaked iterator (`mem::forget`) leaves the vector locked rather than
+/// exposed. Leaking it still skips the drops of the elements left in the drained
+/// range and leaves the length at the drain start.
 pub struct Drain<'a, T: Zeroize + 'a> {
    vec_ref: &'a mut SecureVec<T>,
    drain_start_index: usize,
@@ -741,17 +744,22 @@ impl<'a, T: Zeroize> Iterator for Drain<'a, T> {
    type Item = T;
 
    fn next(&mut self) -> Option<T> {
-      if self.current_drain_iter_index < self.drain_end_index {
-         // SecureVec is already unlocked by the `drain` method.
-         unsafe {
-            let item_ptr = self.vec_ref.ptr.as_ptr().add(self.current_drain_iter_index);
-            let item = ptr::read(item_ptr);
-            self.current_drain_iter_index += 1;
-            Some(item)
-         }
-      } else {
-         None
+      if self.current_drain_iter_index >= self.drain_end_index {
+         return None;
       }
+
+      // Raw pointer taken before the guard borrows the vector: raw pointers do not
+      // keep the borrow alive, and the guard must stay alive while we read through it.
+      let base = self.vec_ref.ptr.as_ptr();
+
+      // Unlock for this single read only, so the memory is locked again as soon as
+      // this returns — and stays locked if the iterator is forgotten.
+      let _guard = UnlockGuard::new(&*self.vec_ref);
+
+      let item = unsafe { ptr::read(base.add(self.current_drain_iter_index)) };
+      self.current_drain_iter_index += 1;
+
+      Some(item)
    }
 
    fn size_hint(&self) -> (usize, Option<usize>) {
@@ -762,21 +770,31 @@ impl<'a, T: Zeroize> Iterator for Drain<'a, T> {
 
 impl<'a, T: Zeroize> ExactSizeIterator for Drain<'a, T> {}
 
-impl<'a, T: Zeroize> Drop for Drain<'a, T> {
-   fn drop(&mut self) {
+impl<'a, T: Zeroize> Drain<'a, T> {
+   /// Unlocks the vector, compacts it, and re-locks it again.
+   ///
+   /// Returns the vector's new length. The `UnlockGuard` re-locks the memory even
+   /// if the compaction panics, so a leaked or panicking iterator never leaves the
+   /// vector exposed.
+   fn compact(&self) -> usize {
+      // Raw pointer taken before the guard borrows the vector: raw pointers do not
+      // keep the borrow alive, and the guard must stay alive while we compact.
+      let base = self.vec_ref.ptr.as_ptr();
+
+      let _guard = UnlockGuard::new(&*self.vec_ref);
+
       unsafe {
-         // The vec_ref's memory is currently unlocked.
          if mem::needs_drop::<T>() {
-            let mut current_ptr = self.vec_ref.ptr.as_ptr().add(self.current_drain_iter_index);
-            let end_ptr = self.vec_ref.ptr.as_ptr().add(self.drain_end_index);
+            let mut current_ptr = base.add(self.current_drain_iter_index);
+            let end_ptr = base.add(self.drain_end_index);
             while current_ptr < end_ptr {
                ptr::drop_in_place(current_ptr);
                current_ptr = current_ptr.add(1);
             }
          }
 
-         let hole_dst_ptr = self.vec_ref.ptr.as_ptr().add(self.drain_start_index);
-         let tail_src_ptr = self.vec_ref.ptr.as_ptr().add(self.drain_end_index);
+         let hole_dst_ptr = base.add(self.drain_start_index);
+         let tail_src_ptr = base.add(self.drain_end_index);
 
          if self.tail_len > 0 {
             ptr::copy(tail_src_ptr, hole_dst_ptr, self.tail_len);
@@ -794,8 +812,8 @@ impl<'a, T: Zeroize> Drop for Drain<'a, T> {
          //       These need to be dropped if T:Drop, as ptr::copy doesn't drop the source.
          // After any necessary drops, this entire region must be zeroized.
 
-         let mut current_cleanup_ptr = self.vec_ref.ptr.as_ptr().add(new_len);
-         let end_cleanup_ptr = self.vec_ref.ptr.as_ptr().add(self.original_vec_len);
+         let mut current_cleanup_ptr = base.add(new_len);
+         let end_cleanup_ptr = base.add(self.original_vec_len);
 
          // Determine the start of the original tail's memory region
          let original_tail_start_ptr_val = tail_src_ptr as usize;
@@ -822,13 +840,17 @@ impl<'a, T: Zeroize> Drop for Drain<'a, T> {
             current_cleanup_ptr = current_cleanup_ptr.add(1);
          }
 
-         // Update the SecureVec's length.
-         self.vec_ref.len = new_len;
-
-         // Relock the SecureVec's memory.
-         let ok = self.vec_ref.lock_memory();
-         debug_assert!(ok, "Drain::drop: lock_memory failed");
+         new_len
       }
+   }
+}
+
+impl<'a, T: Zeroize> Drop for Drain<'a, T> {
+   fn drop(&mut self) {
+      let new_len = self.compact();
+
+      // `compact` re-locked the memory before returning.
+      self.vec_ref.len = new_len;
    }
 }
 
@@ -1114,6 +1136,70 @@ mod tests {
       secure.unlock_slice(|secure| {
          assert_eq!(secure.len(), 0);
       });
+   }
+
+   #[test]
+   fn test_forgotten_drain_keeps_memory_locked() {
+      let arg = "CRASH_TEST_DRAIN_FORGET_LOCKED";
+
+      if std::env::args().any(|a| a == arg) {
+         let vec: Vec<u8> = vec![1, 2, 3, 4, 5];
+         let mut secure = SecureVec::from_vec(vec).unwrap();
+         let drain = secure.drain(..3);
+         core::mem::forget(drain);
+
+         // A leaked `Drain` must not leave the vector exposed: this read is
+         // expected to fault because the memory is still locked.
+         let _value = unsafe { core::hint::black_box(*secure.ptr.as_ptr()) };
+
+         std::process::exit(1);
+      }
+
+      let child = Command::new(std::env::current_exe().unwrap())
+         .arg("vec::tests::test_forgotten_drain_keeps_memory_locked")
+         .arg(arg)
+         .arg("--nocapture")
+         .stdout(Stdio::piped())
+         .stderr(Stdio::piped())
+         .spawn()
+         .expect("Failed to spawn child process");
+
+      let output = child.wait_with_output().expect("Failed to wait on child");
+      let status = output.status;
+
+      assert!(
+         !status.success(),
+         "Process exited successfully with code {:?}, but it should have crashed.",
+         status.code()
+      );
+
+      #[cfg(unix)]
+      {
+         use std::os::unix::process::ExitStatusExt;
+         let signal = status
+            .signal()
+            .expect("Process was not terminated by a signal on Unix.");
+         assert!(
+            signal == libc::SIGSEGV || signal == libc::SIGBUS,
+            "Process terminated with unexpected signal: {}",
+            signal
+         );
+         println!(
+            "Test passed: Process correctly terminated with signal {}.",
+            signal
+         );
+      }
+
+      #[cfg(windows)]
+      {
+         const STATUS_ACCESS_VIOLATION: i32 = 0xC0000005_u32 as i32;
+         assert_eq!(
+            status.code(),
+            Some(STATUS_ACCESS_VIOLATION),
+            "Process exited with unexpected code: {:x?}.",
+            status.code()
+         );
+      }
    }
 
    #[test]

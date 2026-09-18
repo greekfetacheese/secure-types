@@ -32,7 +32,9 @@ impl<'a, T: Zeroize, const LENGTH: usize> UnlockGuard<'a, T, LENGTH> {
 impl<'a, T: Zeroize, const LENGTH: usize> Drop for UnlockGuard<'a, T, LENGTH> {
    fn drop(&mut self) {
       let ok = self.array.lock_memory();
-      debug_assert!(ok, "UnlockGuard::drop: lock_memory failed");
+      // Failing to re-lock means the protection is silently gone while the value is
+      // still alive, so this is a hard error in every profile.
+      assert!(ok, "UnlockGuard::drop: lock_memory failed");
    }
 }
 
@@ -317,7 +319,7 @@ where
       }
 
       let ok = self.lock_memory();
-      debug_assert!(ok, "SecureArray::erase: lock_memory failed");
+      assert!(ok, "SecureArray::erase: lock_memory failed");
    }
 
    /// Same as `SecureVec::init_from_clone`, for the fixed-size buffer.
@@ -344,7 +346,7 @@ where
       // leaves the array with just the elements that were actually written.
       self.initialized = src.len();
       let ok = self.lock_memory();
-      debug_assert!(
+      assert!(
          ok,
          "SecureArray::init_from_clone: lock_memory failed"
       );

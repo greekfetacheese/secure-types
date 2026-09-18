@@ -26,8 +26,9 @@ Currently there are 3 types:
 
 Locking is best-effort in one respect: `memsec` discards the return value of `mlock`, so
 exhausting `RLIMIT_MEMLOCK` does not fail construction — the allocation is still
-`mprotect`ed. The constructors do return `Error::LockFailed` when that `mprotect` fails,
-but re-lock failures after an `unlock*` scope are only checked in debug builds.
+`mprotect`ed. The constructors return `Error::LockFailed` when that `mprotect` fails, and a
+failed re-lock after an `unlock*` scope panics in every profile rather than silently
+leaving the memory readable.
 
 ## Usage
 
@@ -105,10 +106,11 @@ secure_array.unlock_mut(|unlocked_slice| {
 - **Serialization writes plaintext.** `Serialize` hands the contents straight to the
   serializer, which builds an ordinary, unprotected buffer (`serde_json::to_string`
   returns a plain `String`). Zeroize that buffer as soon as you are done with it.
-- **`Drain` must not be forgotten.** `SecureVec::drain` leaves the vector unlocked while
-  the iterator is alive, so `core::mem::forget` on it leaves the memory unlocked. Always
-  consume or drop the iterator.
-- **`clear()` does not wipe.** `SecureVec::clear` only sets the length to zero — the bytes
+- **Leaking a `Drain` still skips drops.** `SecureVec::drain` unlocks the memory only while
+  an item is read and while the iterator compacts the vector, so a `core::mem::forget`ped
+  iterator leaves the memory locked but the elements left in the drained range are never
+  dropped or zeroized, and the length stays at the drain start. Consume or drop the iterator.
+- **`clear()` does not wipe.** `SecureVec::clear` only sets the length to zero the bytes
   are still there. Use `erase()` to zeroize the contents.
 - **`SecureArray::empty()` has a strict contract.** Only the elements that were actually
   written are tracked as initialized, so dropping a partially-filled array never reads the
@@ -122,9 +124,7 @@ cargo test --features serde,expose-ptr
 ```
 
 ## License
-Licensed under either of
- * Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
- * MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
+Licensed under the [MIT license](LICENSE-MIT).
 
 
 ## Credits
