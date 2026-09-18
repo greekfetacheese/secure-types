@@ -7,6 +7,10 @@ use alloc::alloc::Layout;
 #[cfg(feature = "use_os")]
 use std::vec::Vec;
 
+// In a `no_std` build `Vec` is only needed by the serde visitor below.
+#[cfg(all(feature = "serde", not(feature = "use_os")))]
+use alloc::vec::Vec;
+
 use super::{Error, SecureArray, alloc};
 use core::{
    marker::PhantomData,
@@ -463,6 +467,39 @@ impl<T: Zeroize> SecureVec<T> {
       assert!(ok, "SecureVec::push: lock_memory failed");
    }
 
+   /// Appends every element of `src` using a single unlock/lock cycle.
+   ///
+   /// A loop of [`push`](Self::push) costs an `mprotect` pair per element, so bulk
+   /// copies (like the serde writer feeding this vector) need this instead. The
+   /// length is committed only after every write succeeded, so a panic from
+   /// `T::clone` leaves the vector at its previous length.
+   #[cfg(feature = "use_os")]
+   pub(crate) fn extend_from_slice(&mut self, src: &[T])
+   where
+      T: Clone,
+   {
+      if src.is_empty() {
+         return;
+      }
+
+      self.reserve(src.len());
+
+      let write_at = self.len;
+      let dst = self.ptr.as_ptr();
+
+      {
+         let _guard = UnlockGuard::new(self);
+
+         unsafe {
+            for (i, item) in src.iter().enumerate() {
+               core::ptr::write(dst.add(write_at + i), item.clone());
+            }
+         }
+      }
+
+      self.len = write_at + src.len();
+   }
+
    /// Ensures that the vector has enough capacity for at least `additional` more elements.
    ///
    /// If more capacity is needed, it will reallocate. This may cause the buffer location to change.
@@ -678,13 +715,17 @@ impl<T: Zeroize> Drop for SecureVec<T> {
 // access locked memory, causing a segfault. This is by design.
 // Always use unlock_slice() / unlock_slice_mut().
 
+/// Serializes as a byte buffer, matching the `deserialize_bytes` request of the
+/// `Deserialize` impl below. Formats that support byte buffers get the contents in one
+/// piece rather than element by element; `serde_json` renders either form as an array of
+/// numbers, so its output is unchanged.
 #[cfg(feature = "serde")]
 impl serde::Serialize for SecureVec<u8> {
    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
    where
       S: serde::Serializer,
    {
-      self.unlock_slice(|slice| serializer.collect_seq(slice.iter()))
+      self.unlock_slice(|slice| serializer.serialize_bytes(slice))
    }
 }
 
@@ -697,24 +738,50 @@ impl<'de> serde::Deserialize<'de> for SecureVec<u8> {
       struct SecureVecVisitor;
       impl<'de> serde::de::Visitor<'de> for SecureVecVisitor {
          type Value = SecureVec<u8>;
+
          fn expecting(&self, formatter: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-            write!(formatter, "a sequence of bytes")
+            write!(formatter, "a sequence or a byte buffer")
          }
-         fn visit_seq<A>(
-            self,
-            mut seq: A,
-         ) -> Result<<Self as serde::de::Visitor<'de>>::Value, A::Error>
+
+         fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
          where
             A: serde::de::SeqAccess<'de>,
          {
-            let mut vec = SecureVec::new().map_err(serde::de::Error::custom)?;
+            // Reserve whatever the format advertises, so the locked buffer is not grown
+            // (re-allocated and re-`mprotect`ed) once per element.
+            let capacity = seq.size_hint().unwrap_or(0);
+            let mut vec =
+               SecureVec::new_with_capacity(capacity).map_err(serde::de::Error::custom)?;
+
             while let Some(byte) = seq.next_element::<u8>()? {
                vec.push(byte);
             }
+
+            Ok(vec)
+         }
+
+         /// A format that hands over raw bytes instead of a sequence of `u8`s gets a
+         /// single bulk copy straight into locked memory.
+         fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
+         where
+            E: serde::de::Error,
+         {
+            SecureVec::from_slice(v).map_err(serde::de::Error::custom)
+         }
+
+         /// Mirrors `SecureString`'s `visit_string`: wipe the owned buffer the format
+         /// handed over, instead of letting it drop with the plaintext inside.
+         fn visit_byte_buf<E>(self, mut v: Vec<u8>) -> Result<Self::Value, E>
+         where
+            E: serde::de::Error,
+         {
+            let vec = self.visit_bytes(&v)?;
+            v.zeroize();
             Ok(vec)
          }
       }
-      deserializer.deserialize_seq(SecureVecVisitor)
+
+      deserializer.deserialize_bytes(SecureVecVisitor)
    }
 }
 
@@ -1229,6 +1296,36 @@ mod tests {
       deserialized.unlock_slice(|slice| {
          assert_eq!(slice, &[1, 2, 3]);
       });
+   }
+
+   #[cfg(feature = "serde")]
+   #[test]
+   fn test_deserialize_from_owned_byte_buf() {
+      use crate::test_support::OwnedBytes;
+      use serde::Deserialize;
+
+      // `visit_byte_buf`: copied into locked memory, then the owned buffer is wiped.
+      let secure = SecureVec::<u8>::deserialize(OwnedBytes(vec![1, 2, 3])).unwrap();
+
+      secure.unlock_slice(|slice| assert_eq!(slice, &[1, 2, 3]));
+   }
+
+   #[cfg(feature = "serde")]
+   #[test]
+   fn test_deserialize_from_json_string_as_bytes() {
+      // `deserialize_bytes` accepts a JSON string, which reaches `visit_bytes`.
+      let secure: SecureVec<u8> = serde_json::from_str(r#""abc""#).unwrap();
+
+      secure.unlock_slice(|slice| assert_eq!(slice, b"abc"));
+   }
+
+   #[cfg(feature = "serde")]
+   #[test]
+   fn test_deserialize_from_json_array() {
+      // The array form still works after switching the request to `deserialize_bytes`.
+      let secure: SecureVec<u8> = serde_json::from_str("[1,2,3]").unwrap();
+
+      secure.unlock_slice(|slice| assert_eq!(slice, &[1, 2, 3]));
    }
 
    #[test]

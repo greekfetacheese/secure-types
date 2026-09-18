@@ -99,13 +99,28 @@ secure_array.unlock_mut(|unlocked_slice| {
 - `use_os` (default): Enables all OS-level security features.
 - `no_os`: No-op, kept for backwards compatibility. `no_std` is selected by disabling the default features (`--no-default-features`), which leaves only the zeroize-on-drop guarantee.
 - `serde`: Enables serialization/deserialization.
+- `serde_json`: Adds `serialize_json_into_secure_string`, which serializes straight into a `SecureString` instead of an ordinary `String`. Implies `serde` and requires `use_os`.
 - `expose-ptr`: For testing purposes. Exposes the locked memory region pointer.
 
 ## Security notes
 
-- **Serialization writes plaintext.** `Serialize` hands the contents straight to the
-  serializer, which builds an ordinary, unprotected buffer (`serde_json::to_string`
-  returns a plain `String`). Zeroize that buffer as soon as you are done with it.
+- **Serialization writes plaintext.** `Serialize` cannot wipe the buffer the serializer
+  builds for it: `serde_json::to_string`/`to_vec` leave the plaintext in an ordinary
+  `String`/`Vec` that nothing zeroizes, so zeroize that buffer yourself if you call them.
+  Prefer `serialize_json_into_secure_string` (feature `serde_json`), or wire any serializer
+  around `SecureBytesWriter` — the plaintext then only ever lives in locked memory that is
+  zeroized on drop.
+- **Deserializing reads from a buffer you own.** `serde_json::from_str`/`from_slice` take a
+  plain `&str`/`&[u8]`, and nothing can wipe that input for you. Parse from inside the locked
+  buffer instead — `secure_json.unlock_str(|json| serde_json::from_str::<Vault>(json))` — so
+  the plaintext is unlocked only for the duration of the parse. Note that when a JSON string
+  contains escape sequences, `serde_json` unescapes it into an internal scratch buffer of its
+  own before handing it over; that copy is not ours to erase (strings without escapes are read
+  straight out of your input).
+- **Owned buffers a deserializer hands over are wiped.** When a format gives up ownership of a
+  `String`/`Vec<u8>` (`visit_string`/`visit_byte_buf`), the contents are copied into locked
+  memory and the buffer is zeroized before it is released, instead of being dropped with the
+  plaintext still inside.
 - **Leaking a `Drain` still skips drops.** `SecureVec::drain` unlocks the memory only while
   an item is read and while the iterator compacts the vector, so a `core::mem::forget`ped
   iterator leaves the memory locked but the elements left in the drained range are never

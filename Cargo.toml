@@ -26,6 +26,10 @@ version = "1"
 features = ["derive"]
 optional = true
 
+[dependencies.serde_json]
+version = "1"
+optional = true
+
 
 [dev-dependencies.serde_json]
 version = "1"
@@ -38,6 +42,10 @@ features = ["derive"]
 default = ["use_os"]
 use_os = ["memsec"]
 serde = ["dep:serde"]
+
+# `serialize_json_into_secure_string`: JSON written straight into a `SecureString`
+# instead of an ordinary `String`/`Vec`. Implies `serde` and needs `use_os`.
+serde_json = ["dep:serde_json", "serde"]
 
 # no_std + alloc mode: zeroization only, no OS memory locking.
 # When `use_os` is absent, the crate automatically builds in no_std mode.
@@ -54,3 +62,13 @@ expose-ptr = []
 [[example]]
 name = "access_violation"
 required-features = ["expose-ptr"]
+
+# These use constructors that only exist with OS support: `SecureString: From<String>`
+# and `SecureVec::from_vec` are `use_os`-only.
+[[example]]
+name = "secure_string"
+required-features = ["use_os"]
+
+[[example]]
+name = "secure_vec"
+required-features = ["use_os"]

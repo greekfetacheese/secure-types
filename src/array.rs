@@ -450,13 +450,17 @@ impl<T: Clone + Zeroize, const LENGTH: usize> TryFrom<Vec<T>> for SecureArray<T,
    }
 }
 
+/// Serializes as a byte buffer, matching the `deserialize_bytes` request of the
+/// `Deserialize` impl below. Formats that support byte buffers get the contents in one
+/// piece rather than element by element; `serde_json` renders either form as an array of
+/// numbers, so its output is unchanged.
 #[cfg(feature = "serde")]
 impl<const LENGTH: usize> serde::Serialize for SecureArray<u8, LENGTH> {
    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
    where
       S: serde::Serializer,
    {
-      self.unlock(|slice| serializer.collect_seq(slice.iter()))
+      self.unlock(|slice| serializer.serialize_bytes(slice))
    }
 }
 
@@ -479,9 +483,19 @@ impl<'de, const LENGTH: usize> serde::Deserialize<'de> for SecureArray<u8, LENGT
          where
             A: serde::de::SeqAccess<'de>,
          {
+            // Pre-sized to the exact length, and rejected as soon as it overflows, so a
+            // malformed (over-long) input cannot grow the locked buffer.
             let mut data: SecureVec<u8> =
                SecureVec::new_with_capacity(L).map_err(serde::de::Error::custom)?;
-            while let Some(byte) = seq.next_element()? {
+
+            while let Some(byte) = seq.next_element::<u8>()? {
+               if data.len() == L {
+                  return Err(serde::de::Error::invalid_length(
+                     data.len() + 1,
+                     &self,
+                  ));
+               }
+
                data.push(byte);
             }
 
@@ -494,6 +508,30 @@ impl<'de, const LENGTH: usize> serde::Deserialize<'de> for SecureArray<u8, LENGT
             }
 
             SecureArray::try_from(data).map_err(serde::de::Error::custom)
+         }
+
+         /// `deserialize_bytes` also accepts a raw byte buffer, so a format can hand the
+         /// array over directly instead of as a sequence of `u8`s.
+         fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
+         where
+            E: serde::de::Error,
+         {
+            let bytes: &[u8; L] = v
+               .try_into()
+               .map_err(|_| serde::de::Error::invalid_length(v.len(), &self))?;
+
+            SecureArray::from_slice(bytes).map_err(serde::de::Error::custom)
+         }
+
+         /// Mirrors `SecureString`'s `visit_string`: wipe the owned buffer the format
+         /// handed over, instead of letting it drop with the plaintext inside.
+         fn visit_byte_buf<E>(self, mut v: Vec<u8>) -> Result<Self::Value, E>
+         where
+            E: serde::de::Error,
+         {
+            let array = self.visit_bytes(&v)?;
+            v.zeroize();
+            Ok(array)
          }
       }
 
@@ -833,6 +871,46 @@ mod tests {
       deserialized_bytes.unlock(|slice| {
          assert_eq!(slice, &[1, 2, 3]);
       });
+   }
+
+   #[cfg(feature = "serde")]
+   #[test]
+   fn test_deserialize_from_owned_byte_buf() {
+      use crate::test_support::OwnedBytes;
+      use serde::Deserialize;
+
+      // `visit_byte_buf`: copied into locked memory, then the owned buffer is wiped.
+      let array = SecureArray::<u8, 3>::deserialize(OwnedBytes(vec![1, 2, 3])).unwrap();
+
+      array.unlock(|slice| assert_eq!(slice, &[1, 2, 3]));
+   }
+
+   #[cfg(feature = "serde")]
+   #[test]
+   fn test_deserialize_from_json_string_as_bytes() {
+      // `deserialize_bytes` accepts a JSON string, which reaches `visit_bytes`.
+      let array: SecureArray<u8, 3> = serde_json::from_str(r#""abc""#).unwrap();
+
+      array.unlock(|slice| assert_eq!(slice, b"abc"));
+   }
+
+   #[cfg(feature = "serde")]
+   #[test]
+   fn test_deserialize_rejects_wrong_length() {
+      let from_bytes: Result<SecureArray<u8, 3>, _> = serde_json::from_str(r#""abcd""#);
+      assert!(from_bytes.is_err());
+
+      let from_short_seq: Result<SecureArray<u8, 3>, _> = serde_json::from_str("[1,2]");
+      assert!(from_short_seq.is_err());
+   }
+
+   #[cfg(feature = "serde")]
+   #[test]
+   fn test_deserialize_rejects_overlong_seq_early() {
+      // Rejected as soon as it exceeds `LENGTH`, so the locked buffer never grows.
+      let result: Result<SecureArray<u8, 2>, _> = serde_json::from_str("[1,2,3]");
+
+      assert!(result.is_err());
    }
 
    use std::fmt::Debug;

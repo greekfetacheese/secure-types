@@ -5,6 +5,11 @@ use super::{
 use core::ops::Range;
 use zeroize::Zeroize;
 
+// `String` is only used by the serde visitor below; in a `no_std` build it has to come
+// from `alloc` (with `use_os` the prelude provides it).
+#[cfg(all(feature = "serde", not(feature = "use_os")))]
+use alloc::string::String;
+
 /// A securely allocated, growable UTF-8 string, just like `std::string::String`.
 ///
 /// It is a wrapper around [SecureVec<u8>] and inherits all of its security guarantees.
@@ -356,6 +361,18 @@ impl<'de> serde::Deserialize<'de> for SecureString {
          {
             Ok(SecureString::from(v))
          }
+
+         /// Formats that build an owned `String` (unescaping, normalization) hand it
+         /// over here. serde's default implementation would copy out of it and then
+         /// drop it with the plaintext still inside, so wipe it after the copy.
+         fn visit_string<E>(self, mut v: String) -> Result<Self::Value, E>
+         where
+            E: serde::de::Error,
+         {
+            let secure_string = SecureString::from(v.as_str());
+            v.zeroize();
+            Ok(secure_string)
+         }
       }
       deserializer.deserialize_string(SecureStringVisitor)
    }
@@ -513,6 +530,19 @@ mod tests {
       deserialized_bytes.unlock_str_unchecked(|str| {
          assert_eq!(str, hello_world);
       });
+   }
+
+   #[cfg(feature = "serde")]
+   #[test]
+   fn test_deserialize_from_owned_string() {
+      use crate::test_support::OwnedString;
+      use serde::Deserialize;
+
+      // A format that hands over an owned `String` reaches `visit_string`, which copies
+      // into locked memory and then wipes the buffer it was given.
+      let secure = SecureString::deserialize(OwnedString("hunter2".to_owned())).unwrap();
+
+      secure.unlock_str(|str| assert_eq!(str, "hunter2"));
    }
 
    #[test]

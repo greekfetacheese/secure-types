@@ -9,10 +9,22 @@ extern crate alloc;
 pub mod array;
 pub mod string;
 pub mod vec;
+#[cfg(feature = "use_os")]
+pub mod writer;
+
+#[cfg(all(feature = "use_os", feature = "serde_json"))]
+pub mod json;
 
 pub use array::SecureArray;
 pub use string::SecureString;
 pub use vec::{SecureBytes, SecureVec};
+#[cfg(feature = "use_os")]
+pub use writer::SecureBytesWriter;
+
+#[cfg(all(feature = "use_os", feature = "serde_json"))]
+pub use json::{
+   JsonError, serialize_json_into_secure_string, serialize_json_into_secure_string_with_capacity,
+};
 
 use core::ptr::NonNull;
 pub use zeroize::Zeroize;
@@ -281,7 +293,9 @@ pub(crate) fn mprotect<T>(ptr: NonNull<T>, prot: Prot::Ty) -> bool {
 #[cfg(test)]
 mod tests {
 
-   #[cfg(unix)]
+   // `memsec` and `supports_memfd_secret` only exist with OS support, so this test
+   // is gated like the ones in the other modules.
+   #[cfg(all(unix, feature = "use_os"))]
    #[test]
    fn test_supports_memfd_secret() {
       use super::*;
@@ -337,5 +351,54 @@ mod tests {
             assert_eq!(slice, slice2);
          });
       });
+   }
+}
+
+/// Minimal [`serde::Deserializer`]s that hand the value to the owned-input visitor
+/// methods (`visit_string` / `visit_byte_buf`). `serde_json` never calls those, so
+/// without these the "wipe the buffer the format gave us" paths would be untested.
+#[cfg(all(test, feature = "serde", feature = "use_os"))]
+pub(crate) mod test_support {
+   #[cfg(not(feature = "use_os"))]
+   use alloc::{string::String, vec::Vec};
+
+   /// Owns a `String` and yields it through `visit_string`.
+   pub(crate) struct OwnedString(pub(crate) String);
+
+   /// Owns a `Vec<u8>` and yields it through `visit_byte_buf`.
+   pub(crate) struct OwnedBytes(pub(crate) Vec<u8>);
+
+   impl<'de> serde::Deserializer<'de> for OwnedString {
+      type Error = serde::de::value::Error;
+
+      fn deserialize_any<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+      where
+         V: serde::de::Visitor<'de>,
+      {
+         visitor.visit_string(self.0)
+      }
+
+      serde::forward_to_deserialize_any! {
+         bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
+         bytes byte_buf option unit unit_struct newtype_struct seq tuple
+         tuple_struct map struct enum identifier ignored_any
+      }
+   }
+
+   impl<'de> serde::Deserializer<'de> for OwnedBytes {
+      type Error = serde::de::value::Error;
+
+      fn deserialize_any<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+      where
+         V: serde::de::Visitor<'de>,
+      {
+         visitor.visit_byte_buf(self.0)
+      }
+
+      serde::forward_to_deserialize_any! {
+         bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
+         bytes byte_buf option unit unit_struct newtype_struct seq tuple
+         tuple_struct map struct enum identifier ignored_any
+      }
    }
 }
