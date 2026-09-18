@@ -42,7 +42,70 @@ impl core::error::Error for JsonError {
    }
 }
 
+/// Serializes `value` to JSON directly into locked [`SecureBytes`].
+///
+/// This is the primitive behind [`serialize_json_into_secure_string`]: it writes through a
+/// [`SecureBytesWriter`], so the JSON only ever exists in memory that is locked while unused
+/// and zeroized on drop. Prefer it when the JSON is going to be compressed or encrypted
+/// rather than read as text — it skips the UTF-8 validation the `SecureString` form needs.
+///
+/// The buffer starts at 1 KiB and grows as needed; use
+/// [`serialize_json_into_secure_bytes_with_capacity`] to size it for your payload and avoid
+/// reallocating locked pages.
+///
+/// # Example
+///
+/// ```
+/// use secure_types::serialize_json_into_secure_bytes;
+/// use serde::Serialize;
+///
+/// #[derive(Serialize)]
+/// struct Vault {
+///     password: String,
+/// }
+///
+/// let secure_json = serialize_json_into_secure_bytes(&Vault {
+///     password: "hunter2".to_owned(),
+/// })
+/// .unwrap();
+///
+/// secure_json.unlock_slice(|json| assert_eq!(json, br#"{"password":"hunter2"}"#));
+/// ```
+pub fn serialize_json_into_secure_bytes<T>(value: &T) -> Result<SecureBytes, JsonError>
+where
+   T: ?Sized + Serialize,
+{
+   serialize_json_into_secure_bytes_with_capacity(value, DEFAULT_JSON_CAPACITY)
+}
+
+/// Same as [`serialize_json_into_secure_bytes`], with an explicit initial buffer size.
+///
+/// Sizing the buffer to the expected payload avoids growing (and re-locking) it, which keeps
+/// both the `mprotect` traffic and the `RLIMIT_MEMLOCK` pressure predictable.
+pub fn serialize_json_into_secure_bytes_with_capacity<T>(
+   value: &T,
+   capacity: usize,
+) -> Result<SecureBytes, JsonError>
+where
+   T: ?Sized + Serialize,
+{
+   let mut buffer = SecureBytes::new_with_capacity(capacity).map_err(JsonError::Secure)?;
+
+   {
+      let mut serializer = serde_json::Serializer::new(SecureBytesWriter::new(&mut buffer));
+      value
+         .serialize(&mut serializer)
+         .map_err(JsonError::Serialize)?;
+   }
+
+   Ok(buffer)
+}
+
 /// Serializes `value` to JSON directly into a [`SecureString`].
+///
+/// This is [`serialize_json_into_secure_bytes`] plus the UTF-8 validation that the
+/// [`SecureString`] invariant needs — reach for the byte form instead when the JSON is going
+/// to be compressed or encrypted rather than read as text.
 ///
 /// `serde_json::to_string`/`to_vec` build the plaintext in an ordinary
 /// `String`/`Vec` that nothing zeroizes, and `impl Serialize` cannot wipe that buffer
@@ -90,16 +153,11 @@ pub fn serialize_json_into_secure_string_with_capacity<T>(
 where
    T: ?Sized + Serialize,
 {
-   let mut buffer = SecureBytes::new_with_capacity(capacity).map_err(JsonError::Secure)?;
+   let bytes = serialize_json_into_secure_bytes_with_capacity(value, capacity)?;
 
-   {
-      let mut serializer = serde_json::Serializer::new(SecureBytesWriter::new(&mut buffer));
-      value
-         .serialize(&mut serializer)
-         .map_err(JsonError::Serialize)?;
-   }
-
-   SecureString::try_from(buffer).map_err(|_| JsonError::NotUtf8)
+   // JSON is always valid UTF-8, so this only fails if a `Serialize` impl emitted something
+   // that is not.
+   SecureString::try_from(bytes).map_err(|_| JsonError::NotUtf8)
 }
 
 #[cfg(test)]
@@ -129,6 +187,38 @@ mod tests {
 
       secure_json.unlock_str(|json| {
          assert_eq!(json, serde_json::to_string(&vault).unwrap());
+      });
+   }
+
+   #[test]
+   fn test_bytes_variant_matches_plain_serde_json() {
+      let vault = test_vault();
+      let secure_json = serialize_json_into_secure_bytes(&vault).unwrap();
+
+      secure_json.unlock_slice(|json| {
+         assert_eq!(json, serde_json::to_vec(&vault).unwrap());
+      });
+   }
+
+   #[test]
+   fn test_string_variant_matches_bytes_variant() {
+      let vault = test_vault();
+      let bytes = serialize_json_into_secure_bytes(&vault).unwrap();
+      let string = serialize_json_into_secure_string(&vault).unwrap();
+
+      bytes.unlock_slice(|bytes| {
+         string.unlock_str(|string| assert_eq!(bytes, string.as_bytes()));
+      });
+   }
+
+   #[test]
+   fn test_bytes_variant_grows_without_corrupting() {
+      // capacity 0 forces `SecureVec` growth, which wipes each old allocation.
+      let vault = test_vault();
+      let secure_json = serialize_json_into_secure_bytes_with_capacity(&vault, 0).unwrap();
+
+      secure_json.unlock_slice(|json| {
+         assert_eq!(json, serde_json::to_vec(&vault).unwrap());
       });
    }
 

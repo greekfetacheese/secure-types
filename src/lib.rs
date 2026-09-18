@@ -23,7 +23,8 @@ pub use writer::SecureBytesWriter;
 
 #[cfg(all(feature = "use_os", feature = "serde_json"))]
 pub use json::{
-   JsonError, serialize_json_into_secure_string, serialize_json_into_secure_string_with_capacity,
+   JsonError, serialize_json_into_secure_bytes, serialize_json_into_secure_bytes_with_capacity,
+   serialize_json_into_secure_string, serialize_json_into_secure_string_with_capacity,
 };
 
 use core::ptr::NonNull;
