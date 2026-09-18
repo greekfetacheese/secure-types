@@ -92,6 +92,12 @@ where
    T: Zeroize,
 {
    ptr: NonNull<T>,
+   /// Number of elements that have been initialized (written) so far.
+   ///
+   /// A freshly allocated array starts at `0` and the allocator's poison bytes
+   /// remain in the slots that follow. `drop` and `erase` only zeroize this many
+   /// elements, so they never interpret uninitialized memory as a `T`.
+   initialized: usize,
    _marker: PhantomData<T>,
 }
 
@@ -104,6 +110,12 @@ where
    /// Creates an empty (but allocated) SecureArray.
    ///
    /// The memory is allocated but not initialized, and it's the caller's responsibility to fill it.
+   ///
+   /// Only elements that are actually written are tracked as initialized: `drop`
+   /// and `erase` zeroize just those, so dropping an array that was never filled is
+   /// sound. The remaining slots still hold the allocator's poison bytes and must
+   /// never be read as a `T`. Initialize the whole array (for example through
+   /// [`unlock_mut`](Self::unlock_mut)) before accessing it.
    pub fn empty() -> Result<Self, Error> {
       let size = LENGTH * mem::size_of::<T>();
       if size == 0 {
@@ -115,6 +127,7 @@ where
 
       let secure_array = SecureArray {
          ptr,
+         initialized: 0,
          _marker: PhantomData,
       };
 
@@ -135,7 +148,7 @@ where
    where
       T: Clone,
    {
-      let secure_array = match Self::empty() {
+      let mut secure_array = match Self::empty() {
          Ok(secure_array) => secure_array,
          Err(e) => {
             content.zeroize();
@@ -156,6 +169,7 @@ where
             core::ptr::write(dst.add(i), item.clone());
          }
       }
+      secure_array.initialized = LENGTH;
 
       content.zeroize();
 
@@ -176,7 +190,7 @@ where
    where
       T: Clone,
    {
-      let secure_array = Self::empty()?;
+      let mut secure_array = Self::empty()?;
 
       let unlocked = secure_array.unlock_memory();
 
@@ -190,6 +204,7 @@ where
             core::ptr::write(dst.add(i), item.clone());
          }
       }
+      secure_array.initialized = LENGTH;
 
       let _locked = secure_array.lock_memory();
 
@@ -274,23 +289,37 @@ where
    }
 
    /// Mutable access to the array's data as a `&mut [T]`
+   ///
+   /// Exposing the whole array as a `&mut [T]` treats every slot as initialized
+   /// storage, so a later `drop` / `erase` zeroizes all `LENGTH` elements.
    pub fn unlock_mut<F, R>(&mut self, f: F) -> R
    where
       F: FnOnce(&mut [T]) -> R,
    {
+      self.initialized = LENGTH;
+
       let _guard = UnlockGuard::new(self);
       let slice = unsafe { core::slice::from_raw_parts_mut(self.ptr.as_ptr(), LENGTH) };
       let result = f(slice);
       result
    }
 
-   /// Securely erases the contents of the array by zeroizing the memory.
+   /// Securely erases the contents of the array by zeroizing the initialized elements.
    pub fn erase(&mut self) {
-      self.unlock_mut(|slice| {
+      let ok = self.unlock_memory();
+      debug_assert!(ok, "SecureArray::erase: unlock_memory failed");
+
+      unsafe {
+         // Only the initialized elements are zeroized: the slots after them are
+         // uninitialized and must not be interpreted as a `T`.
+         let slice = core::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.initialized);
          for element in slice.iter_mut() {
             element.zeroize();
          }
-      });
+      }
+
+      let ok = self.lock_memory();
+      debug_assert!(ok, "SecureArray::erase: lock_memory failed");
    }
 
    /// Same as `SecureVec::init_from_clone`, for the fixed-size buffer.
@@ -313,6 +342,9 @@ where
             core::ptr::write(dst.add(i), item.clone());
          }
       }
+      // Commit only after every write succeeded, so a panic from `T::clone`
+      // leaves the array with just the elements that were actually written.
+      self.initialized = src.len();
       let ok = self.lock_memory();
       debug_assert!(
          ok,
@@ -326,7 +358,12 @@ impl<T: Zeroize, const LENGTH: usize> Drop for SecureArray<T, LENGTH> {
       let ok = self.unlock_memory();
       debug_assert!(ok, "SecureArray::drop: unlock_memory failed");
 
-      let slice = unsafe { core::slice::from_raw_parts_mut(self.ptr.as_ptr(), LENGTH) };
+      // Only the initialized elements are zeroized. A partially-initialized
+      // array (a panic during `from_slice*` / `init_from_clone`, or an `empty()`
+      // array that was never filled) still holds the allocator's poison bytes in
+      // the remaining slots, and interpreting those as a `T` would dereference
+      // garbage.
+      let slice = unsafe { core::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.initialized) };
       for element in slice.iter_mut() {
          element.zeroize();
       }
@@ -468,6 +505,7 @@ impl<'de, const LENGTH: usize> serde::Deserialize<'de> for SecureArray<u8, LENGT
 mod tests {
    use super::*;
    use std::process::{Command, Stdio};
+   use std::sync::atomic::{AtomicUsize, Ordering};
    use std::sync::{Arc, Mutex};
 
    #[test]
@@ -530,6 +568,93 @@ mod tests {
 
       let result: Result<SecureArray<u8, 2>, _> = SecureArray::try_from(vec![1u8, 2, 3]);
       assert!(matches!(result, Err(Error::LengthMismatch)));
+   }
+
+   /// Regression test: dropping an array that was never initialized must not
+   /// interpret the allocator's poison bytes as a `T`.
+   #[test]
+   fn test_drop_without_initialization_is_sound() {
+      let arg = "CRASH_TEST_ARRAY_EMPTY_DROP";
+
+      if std::env::args().any(|a| a == arg) {
+         // `String` owns a pointer, so zeroizing an uninitialized slot as a
+         // `String` would dereference the allocator's poison bytes.
+         let array: SecureArray<String, 4> = SecureArray::empty().unwrap();
+         drop(array);
+         std::process::exit(0);
+      }
+
+      let child = Command::new(std::env::current_exe().unwrap())
+         .arg("array::tests::test_drop_without_initialization_is_sound")
+         .arg(arg)
+         .arg("--nocapture")
+         .stdout(Stdio::piped())
+         .stderr(Stdio::piped())
+         .spawn()
+         .expect("Failed to spawn child process");
+
+      let output = child.wait_with_output().expect("Failed to wait on child");
+
+      assert!(
+         output.status.success(),
+         "Dropping a never-initialized SecureArray must be sound, but the child terminated with {:?}",
+         output.status
+      );
+   }
+
+   /// Regression test: a panic while filling the array must only leave the
+   /// already-written elements to be zeroized by `drop`.
+   #[test]
+   fn test_panic_during_partial_init_is_sound() {
+      let arg = "CRASH_TEST_ARRAY_PANIC_INIT";
+
+      if std::env::args().any(|a| a == arg) {
+         let panicked = std::panic::catch_unwind(|| {
+            let content: [PanicOnClone; 3] = [
+               PanicOnClone::new("a"),
+               PanicOnClone::new("b"),
+               PanicOnClone::new("c"),
+            ];
+            let _array = SecureArray::<PanicOnClone, 3>::from_slice(&content).unwrap();
+         })
+         .is_err();
+
+         std::process::exit(if panicked { 0 } else { 1 });
+      }
+
+      let child = Command::new(std::env::current_exe().unwrap())
+         .arg("array::tests::test_panic_during_partial_init_is_sound")
+         .arg(arg)
+         .arg("--nocapture")
+         .stdout(Stdio::piped())
+         .stderr(Stdio::piped())
+         .spawn()
+         .expect("Failed to spawn child process");
+
+      let output = child.wait_with_output().expect("Failed to wait on child");
+
+      assert!(
+         output.status.success(),
+         "A panic during partial initialization must be sound, but the child terminated with {:?}",
+         output.status
+      );
+   }
+
+   /// Pins the invariant that only written elements are considered initialized.
+   #[test]
+   fn test_initialized_count_tracking() {
+      let mut array: SecureArray<u8, 3> = SecureArray::empty().unwrap();
+      assert_eq!(array.initialized, 0);
+
+      array.unlock_mut(|slice| {
+         slice[0] = 1;
+         slice[1] = 2;
+         slice[2] = 3;
+      });
+      assert_eq!(array.initialized, 3);
+
+      let from_slice: SecureArray<u8, 3> = SecureArray::from_slice(&[1, 2, 3]).unwrap();
+      assert_eq!(from_slice.initialized, 3);
    }
 
    #[test]
@@ -777,6 +902,38 @@ mod tests {
          (id % 100) as u32,
          format!("Notes #{}", id),
       )
+   }
+
+   /// Counts every `clone` call, so `PanicOnClone` can blow up mid-way through
+   /// an initialization loop.
+   static CLONE_BOMB: AtomicUsize = AtomicUsize::new(0);
+
+   /// Owns a `String` like `Person` does, but panics on its second clone.
+   #[derive(Debug)]
+   struct PanicOnClone {
+      data: String,
+   }
+
+   impl PanicOnClone {
+      fn new(data: impl Into<String>) -> Self {
+         Self { data: data.into() }
+      }
+   }
+
+   impl Clone for PanicOnClone {
+      fn clone(&self) -> Self {
+         if CLONE_BOMB.fetch_add(1, Ordering::SeqCst) == 1 {
+            panic!("clone bomb");
+         }
+
+         Self::new(self.data.clone())
+      }
+   }
+
+   impl Zeroize for PanicOnClone {
+      fn zeroize(&mut self) {
+         self.data.zeroize();
+      }
    }
 
    fn test_array_generic_basics<T: Zeroize + Clone + PartialEq + Debug, const N: usize>(

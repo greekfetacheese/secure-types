@@ -45,3 +45,9 @@ no_os = []
 
 # Only for testing crash behavior
 expose-ptr = []
+
+# `access_violation` dereferences the raw pointer of a locked array to
+# demonstrate the SIGSEGV, so it needs the `expose-ptr` testing feature.
+[[example]]
+name = "access_violation"
+required-features = ["expose-ptr"]
