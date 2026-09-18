@@ -1,4 +1,7 @@
-use super::{Error, vec::SecureVec};
+use super::{
+   Error,
+   vec::{SecureVec, UnlockGuard},
+};
 use core::ops::Range;
 use zeroize::Zeroize;
 
@@ -204,32 +207,38 @@ impl SecureString {
 
       let old_byte_len = self.vec.len();
 
-      // Perform the insertion in-place
-      self.vec.unlock_memory();
-      unsafe {
-         let ptr = self.vec.as_mut_ptr();
+      // Taken before the guard borrows the vector: raw pointers do not keep the
+      // borrow alive, and the guard must stay alive while writing through it.
+      let ptr = self.vec.as_mut_ptr();
 
-         // Shift the "tail" of the string (from the insertion point to the end)
-         // to the right to make a gap for the new content.
-         if byte_idx < old_byte_len {
-            core::ptr::copy(
+      // Perform the insertion in-place. `UnlockGuard` re-locks the memory on
+      // drop, including when the block unwinds.
+      let new_byte_len = {
+         let _guard = UnlockGuard::new(&self.vec);
+
+         unsafe {
+            // Shift the "tail" of the string (from the insertion point to the end)
+            // to the right to make a gap for the new content.
+            if byte_idx < old_byte_len {
+               core::ptr::copy(
+                  ptr.add(byte_idx),
+                  ptr.add(byte_idx + insert_len),
+                  old_byte_len - byte_idx,
+               );
+            }
+
+            // Copy the new text into the newly created gap.
+            core::ptr::copy_nonoverlapping(
+               bytes_to_insert.as_ptr(),
                ptr.add(byte_idx),
-               ptr.add(byte_idx + insert_len),
-               old_byte_len - byte_idx,
+               insert_len,
             );
          }
 
-         // Copy the new text into the newly created gap.
-         core::ptr::copy_nonoverlapping(
-            bytes_to_insert.as_ptr(),
-            ptr.add(byte_idx),
-            insert_len,
-         );
+         old_byte_len + insert_len
+      };
 
-         self.vec.len += insert_len;
-      }
-
-      self.vec.lock_memory();
+      self.vec.len = new_byte_len;
 
       chars_to_insert_count
    }
@@ -269,8 +278,8 @@ impl SecureString {
 
          let new_len = old_total_len - remove_len;
          // Zeroize the tail end that is now unused
-         for i in new_len..old_total_len {
-            current_bytes[i].zeroize();
+         for byte in current_bytes[new_len..old_total_len].iter_mut() {
+            byte.zeroize();
          }
          new_len
       });
@@ -325,8 +334,7 @@ impl serde::Serialize for SecureString {
    where
       S: serde::Serializer,
    {
-      let res = self.unlock_str(|str| serializer.serialize_str(str));
-      res
+      self.unlock_str(|str| serializer.serialize_str(str))
    }
 }
 
@@ -431,6 +439,19 @@ mod tests {
 
       secure.unlock_str_unchecked(|str| {
          assert_eq!(str, "My name is Mike");
+      });
+   }
+
+   #[test]
+   fn test_insert_text_at_char_idx_multibyte() {
+      // 'é' is 2 bytes and '🎉' is 4, so the char index is not the byte index.
+      let mut secure = SecureString::from("héllo");
+      let inserted = secure.insert_text_at_char_idx(2, "🎉!");
+
+      assert_eq!(inserted, 2);
+      assert_eq!(secure.byte_len(), 11);
+      secure.unlock_str(|str| {
+         assert_eq!(str, "hé🎉!llo");
       });
    }
 

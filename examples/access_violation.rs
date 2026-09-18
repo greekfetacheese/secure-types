@@ -1,7 +1,6 @@
 use secure_types::SecureArray;
 
 #[allow(deprecated)]
-
 fn main() {
    let sec_array = SecureArray::from_slice(&[1, 2, 3]).unwrap();
 

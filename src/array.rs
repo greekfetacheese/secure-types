@@ -284,8 +284,7 @@ where
    {
       let _guard = UnlockGuard::new(self);
       let slice = unsafe { core::slice::from_raw_parts(self.ptr.as_ptr(), LENGTH) };
-      let result = f(slice);
-      result
+      f(slice)
    }
 
    /// Mutable access to the array's data as a `&mut [T]`
@@ -300,8 +299,7 @@ where
 
       let _guard = UnlockGuard::new(self);
       let slice = unsafe { core::slice::from_raw_parts_mut(self.ptr.as_ptr(), LENGTH) };
-      let result = f(slice);
-      result
+      f(slice)
    }
 
    /// Securely erases the contents of the array by zeroizing the initialized elements.

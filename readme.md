@@ -11,18 +11,23 @@ Currently there are 3 types:
 ## Features
 
 - **Zeroization on Drop**: Memory is wiped when dropped.
-- **Memory Locking**: (OS-only) On Linux/Windows the memory is locked to prevent memory swapping or unauthorized access.
+- **Memory Locking**: (OS-only) The allocation is `mlock`ed (Windows: `VirtualLock`) and excluded from core dumps (`MADV_DONTDUMP`), so it cannot be swapped out or captured in a crash dump. While no `unlock*` scope is active the pages are also `mprotect`ed `PROT_NONE`, which is what keeps the contents away from other processes. On Linux the allocation is backed by `memfd_secret` when the kernel supports it.
 - **Safe Scoped Access**: Direct access on these types is not possible, data is protected by default and only accessible within safe blocks.
 - **Send, not Sync**: Values can be moved to another thread. Sharing one instance across threads requires an explicit lock (`Arc<Mutex<_>>`). Concurrent `unlock` would race on page protection.
-- **`no_std` Support**: For embedded and Web environments (with zeroization only).
+- **`no_std` Support**: For embedded and Web environments (with zeroization only). Select it by turning off the default features — see [Feature Flags](#feature-flags).
 - **Serde Support**: Optional serialization/deserialization for `SecureString`, `SecureVec<u8> ` and `SecureArray<u8, LENGTH>`.
 
 ## How memory is locked
 
 - **Windows**: Using [VirtualProtect](https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualprotect) & [VirtualLock](https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtuallock).
 
-- **Linux**: Using [mlock](https://man.archlinux.org/man/mlock.2) & [madvise](https://man.archlinux.org/man/madvise.2)
-If the kernel supports it, it will allocate with [memfd_secret](https://man.archlinux.org/man/memfd_secret.2.en)
+- **Linux**: Using [mlock](https://man.archlinux.org/man/mlock.2) & [madvise](https://man.archlinux.org/man/madvise.2).
+  If the kernel supports it, it will allocate with [memfd_secret](https://man.archlinux.org/man/memfd_secret.2.en).
+
+Locking is best-effort in one respect: `memsec` discards the return value of `mlock`, so
+exhausting `RLIMIT_MEMLOCK` does not fail construction — the allocation is still
+`mprotect`ed. The constructors do return `Error::LockFailed` when that `mprotect` fails,
+but re-lock failures after an `unlock*` scope are only checked in debug builds.
 
 ## Usage
 
@@ -91,9 +96,24 @@ secure_array.unlock_mut(|unlocked_slice| {
 ## Feature Flags
 
 - `use_os` (default): Enables all OS-level security features.
-- `no_os`: For `no_std` environments. Only provides the Zeroize on Drop.
+- `no_os`: No-op, kept for backwards compatibility. `no_std` is selected by disabling the default features (`--no-default-features`), which leaves only the zeroize-on-drop guarantee.
 - `serde`: Enables serialization/deserialization.
 - `expose-ptr`: For testing purposes. Exposes the locked memory region pointer.
+
+## Security notes
+
+- **Serialization writes plaintext.** `Serialize` hands the contents straight to the
+  serializer, which builds an ordinary, unprotected buffer (`serde_json::to_string`
+  returns a plain `String`). Zeroize that buffer as soon as you are done with it.
+- **`Drain` must not be forgotten.** `SecureVec::drain` leaves the vector unlocked while
+  the iterator is alive, so `core::mem::forget` on it leaves the memory unlocked. Always
+  consume or drop the iterator.
+- **`clear()` does not wipe.** `SecureVec::clear` only sets the length to zero — the bytes
+  are still there. Use `erase()` to zeroize the contents.
+- **`SecureArray::empty()` has a strict contract.** Only the elements that were actually
+  written are tracked as initialized, so dropping a partially-filled array never reads the
+  unwritten slots. Those slots are not valid `T`s though: fill the whole array (for example
+  via `unlock_mut`) before reading it.
 
 ## Running tests
 

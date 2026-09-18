@@ -173,7 +173,7 @@ pub(crate) unsafe fn alloc<T>(size: usize) -> Result<NonNull<T>, Error> {
             let raw_ptr = raw_ptr_nonnull.as_ptr() as *mut u8;
 
             debug_assert!(
-               (raw_ptr as usize) % core::mem::align_of::<usize>() == 0,
+               (raw_ptr as usize).is_multiple_of(core::mem::align_of::<usize>()),
                "allocator returned a pointer not aligned for the usize header tag"
             );
 
@@ -191,7 +191,7 @@ pub(crate) unsafe fn alloc<T>(size: usize) -> Result<NonNull<T>, Error> {
             let raw_ptr = non_null.as_ptr() as *mut u8;
 
             debug_assert!(
-               (raw_ptr as usize) % core::mem::align_of::<usize>() == 0,
+               (raw_ptr as usize).is_multiple_of(core::mem::align_of::<usize>()),
                "allocator returned a pointer not aligned for the usize header tag"
             );
 
@@ -245,9 +245,10 @@ pub(crate) fn free<T>(ptr: NonNull<T>) {
                memsec::free(non_null_raw);
             }
             _ => {
-               // SHOULD NOT HAPPEN
-               // Tag mismatch: Double free or corruption.
-               #[cfg(debug_assertions)]
+               // Tag mismatch: double free or a corrupted header. Freeing through
+               // the wrong allocator would be worse, and silently doing nothing
+               // leaks the allocation, so fail loudly in every profile — memsec
+               // itself aborts on a canary mismatch.
                panic!(
                   "SecureAllocator: Corrupt header tag found: {:x}",
                   tag
@@ -289,7 +290,7 @@ mod tests {
 
       if supports {
          print!("memfd_secret is supported");
-         let size = 1 * size_of::<u8>();
+         let size = size_of::<u8>();
          let ptr = unsafe { memsec::memfd_secret_sized(size) };
          assert!(ptr.is_some());
       } else {

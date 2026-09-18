@@ -25,12 +25,12 @@ pub type SecureBytes = SecureVec<u8>;
 
 /// Unlocks the vector's memory on construction and re-locks it on drop —
 /// including when the drop happens because the fn closure panicked.
-struct UnlockGuard<'a, T: Zeroize> {
+pub(crate) struct UnlockGuard<'a, T: Zeroize> {
    vec: &'a SecureVec<T>,
 }
 
 impl<'a, T: Zeroize> UnlockGuard<'a, T> {
-   fn new(vec: &'a SecureVec<T>) -> Self {
+   pub(crate) fn new(vec: &'a SecureVec<T>) -> Self {
       let ok = vec.unlock_memory();
       debug_assert!(ok, "UnlockGuard::new: unlock_memory failed");
 
@@ -363,8 +363,7 @@ impl<T: Zeroize> SecureVec<T> {
       F: FnOnce(&SecureVec<T>) -> R,
    {
       let _guard = UnlockGuard::new(self);
-      let result = f(self);
-      result
+      f(self)
    }
 
    /// Immutable access to the `SecureVec` as `&[T]`
@@ -385,8 +384,7 @@ impl<T: Zeroize> SecureVec<T> {
       unsafe {
          let _guard = UnlockGuard::new(self);
          let slice = core::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len);
-         let result = f(slice);
-         result
+         f(slice)
       }
    }
 
@@ -399,8 +397,7 @@ impl<T: Zeroize> SecureVec<T> {
          let _guard = UnlockGuard::new(self);
          let slice = core::slice::from_raw_parts(self.ptr.as_ptr(), self.len);
          let iter = slice.iter();
-         let result = f(iter);
-         result
+         f(iter)
       }
    }
 
@@ -413,8 +410,7 @@ impl<T: Zeroize> SecureVec<T> {
          let _guard = UnlockGuard::new(self);
          let slice = core::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len);
          let iter = slice.iter_mut();
-         let result = f(iter);
-         result
+         f(iter)
       }
    }
 
@@ -473,15 +469,36 @@ impl<T: Zeroize> SecureVec<T> {
    ///
    /// Panics if the new capacity overflows `usize` or if the allocation fails.
    pub fn reserve(&mut self, additional: usize) {
-      if self.len() + additional <= self.capacity {
+      let required_capacity = match self.len.checked_add(additional) {
+         Some(required_capacity) => required_capacity,
+         None => panic!(
+            "secure-types: SecureVec::reserve overflow: len ({}) + additional ({}) exceeds usize",
+            self.len, additional
+         ),
+      };
+
+      if required_capacity <= self.capacity {
          return;
       }
 
-      // Use an amortized growth strategy to avoid reallocating on every push
-      let required_capacity = self.len() + additional;
-      let new_capacity = (self.capacity.max(1) * 2).max(required_capacity);
+      // Use an amortized growth strategy to avoid reallocating on every push.
+      // If doubling would overflow, fall back to the exact requirement and let
+      // the allocation below report the failure.
+      let new_capacity = self
+         .capacity
+         .max(1)
+         .checked_mul(2)
+         .unwrap_or(required_capacity)
+         .max(required_capacity);
 
-      let new_size = new_capacity * mem::size_of::<T>();
+      let new_size = match new_capacity.checked_mul(mem::size_of::<T>()) {
+         Some(new_size) => new_size,
+         None => panic!(
+            "secure-types: SecureVec::reserve overflow: capacity ({}) * size_of::<T>() ({}) exceeds usize",
+            new_capacity,
+            mem::size_of::<T>()
+         ),
+      };
 
       // Safe to panic here because the memory is locked
       let new_ptr = unsafe {
@@ -642,8 +659,15 @@ impl<T: Zeroize> Drop for SecureVec<T> {
 
       #[cfg(not(feature = "use_os"))]
       unsafe {
-         let layout =
-            Layout::from_size_align_unchecked(self.allocated_byte_size(), mem::align_of::<T>());
+         // `T::zeroize()` above only covers the initialized elements. Wipe the
+         // bytes of the whole allocation as well, so anything a `clear()` left
+         // behind (and the spare capacity) is gone before the allocator gets the
+         // memory back. Without `use_os` there is no `memsec::free` doing it.
+         let byte_size = self.allocated_byte_size();
+         let bytes = core::slice::from_raw_parts_mut(self.ptr.as_ptr() as *mut u8, byte_size);
+         bytes.zeroize();
+
+         let layout = Layout::from_size_align_unchecked(byte_size, mem::align_of::<T>());
          alloc::alloc::dealloc(self.ptr.as_ptr() as *mut u8, layout);
       }
    }
@@ -1183,6 +1207,17 @@ mod tests {
    }
 
    #[test]
+   #[should_panic(expected = "reserve overflow")]
+   fn test_reserve_overflow_panics() {
+      let mut secure: SecureVec<u8> = SecureVec::new().unwrap();
+      secure.push(1);
+
+      // `len + additional` overflows `usize`: the documented panic must happen
+      // in release too, instead of silently returning without growing.
+      secure.reserve(usize::MAX);
+   }
+
+   #[test]
    fn test_unlock_gives_access() {
       let vec: Vec<u8> = vec![1, 2, 3];
       let secure = SecureVec::from_vec(vec).unwrap();
@@ -1217,12 +1252,12 @@ mod tests {
    fn test_unlock_iter() {
       let vec: Vec<u8> = vec![1, 2, 3];
       let secure = SecureVec::from_vec(vec).unwrap();
-      let sum: u8 = secure.unlock_iter(|iter| iter.map(|&x| x).sum());
+      let sum: u8 = secure.unlock_iter(|iter| iter.copied().sum());
 
       assert_eq!(sum, 6);
 
       let secure: SecureVec<u8> = SecureVec::new_with_capacity(3).unwrap();
-      let sum: u8 = secure.unlock_iter(|iter| iter.map(|&x| x).sum());
+      let sum: u8 = secure.unlock_iter(|iter| iter.copied().sum());
 
       assert_eq!(sum, 0);
    }

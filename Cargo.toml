@@ -41,6 +41,9 @@ serde = ["dep:serde"]
 
 # no_std + alloc mode: zeroization only, no OS memory locking.
 # When `use_os` is absent, the crate automatically builds in no_std mode.
+#
+# `no_os` itself is a no-op kept for backwards compatibility: enabling one feature
+# cannot disable a default feature. Build with `--no-default-features` instead.
 no_os = []
 
 # Only for testing crash behavior
