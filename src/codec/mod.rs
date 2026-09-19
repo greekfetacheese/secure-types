@@ -15,8 +15,10 @@
 //!
 //! None of those are serde's trait layer — they belong to `serde_json`. A
 //! format we own has no scratch buffer, no escaping pass, no `Value`, and
-//! builds every error from a length, an index or a `&'static str`. Errors are
-//! then safe to log, and a test pins that.
+//! builds every error from a length, an index or a `&'static str`. The one
+//! message a visitor can influence is discarded rather than rendered, because
+//! serde's own `unknown_variant` / `unknown_field` helpers format the offending
+//! name into it. Errors are then safe to log, and a test pins that.
 //!
 //! # Why serde traits instead of a new trait pair
 //!

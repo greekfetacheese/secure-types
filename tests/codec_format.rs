@@ -26,7 +26,7 @@ fn test_every_error_variant_renders() {
       DecodeError::TrailingBytes { extra: 7 },
       DecodeError::FrameMismatch { unconsumed: 3 },
       DecodeError::Unsupported("deserialize_any"),
-      DecodeError::Custom("a visitor rejected the value".to_owned()),
+      DecodeError::Custom,
    ];
 
    for error in decode_variants {

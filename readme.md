@@ -11,7 +11,7 @@ Currently there are 3 types:
 ## Features
 
 - **Zeroization on Drop**: Memory is wiped when dropped.
-- **Memory Locking**: (OS-only) The allocation is `mlock`ed (Windows: `VirtualLock`) and, where the OS provides it, excluded from core dumps (`MADV_DONTDUMP` on Linux, `MADV_NOCORE` on FreeBSD/DragonFly; macOS has no equivalent), so it cannot be swapped out or captured in a crash dump. While no `unlock*` scope is active the pages are also `mprotect`ed `PROT_NONE`, which is what keeps the contents away from other processes. On Linux the allocation is backed by `memfd_secret` when the kernel supports it.
+- **Memory Locking**: (OS-only) While no `unlock*` scope is active the pages are `mprotect`ed `PROT_NONE`, which is what keeps the contents away from other processes. On the `malloc_sized` path the allocation is also `mlock`ed (Windows: `VirtualLock`) and, where the OS provides it, excluded from core dumps (`MADV_DONTDUMP` on Linux, `MADV_NOCORE` on FreeBSD/DragonFly; macOS has no equivalent), so it cannot be swapped out or captured in a crash dump. On Linux, when the kernel supports it, the allocation is backed by `memfd_secret` instead: `memsec` issues no `mlock` or `madvise` on that path, and the pages come from kernel secret memory. See [How memory is locked](#how-memory-is-locked).
 - **Safe Scoped Access**: Direct access on these types is not possible, data is protected by default and only accessible within safe blocks.
 - **Send, not Sync**: Values can be moved to another thread. Sharing one instance across threads requires an explicit lock (`Arc<Mutex<_>>`). Concurrent `unlock` would race on page protection.
 - **`no_std` Support**: For embedded and Web environments (with zeroization only). Select it by turning off the default features — see [Feature Flags](#feature-flags).
@@ -24,16 +24,21 @@ Currently there are 3 types:
 
 - **Linux**: Using [mlock](https://man.archlinux.org/man/mlock.2) & [madvise](https://man.archlinux.org/man/madvise.2).
   If the kernel supports it, it will allocate with [memfd_secret](https://man.archlinux.org/man/memfd_secret.2.en).
+  Note that the `mlock`/`madvise` pair belongs to the `malloc_sized` path: a `memfd_secret`
+  allocation is **not** `mlock`ed and is **not** marked `MADV_DONTDUMP` by `memsec`, so on that
+  path core-dump exclusion is not requested and swappability is whatever the kernel's secret
+  memory provides. This crate's own contribution on every path is the `mprotect(PROT_NONE)`
+  window discipline.
 
 - **Other Unix (macOS, FreeBSD, …)**: Using [mlock](https://man.archlinux.org/man/mlock.2) & [mprotect](https://man.archlinux.org/man/mprotect.2), with
   `madvise(MADV_NOCORE)` on FreeBSD/DragonFly. `memfd_secret` and `MADV_DONTDUMP` are Linux-only, so `supports_memfd_secret()`
   returns `false` here and the allocation uses `malloc_sized` — the same path Linux takes when the kernel lacks `memfd_secret`.
 
-Locking is best-effort in one respect: `memsec` discards the return value of `mlock`, so
-exhausting `RLIMIT_MEMLOCK` does not fail construction — the allocation is still
-`mprotect`ed. The constructors return `Error::LockFailed` when that `mprotect` fails, and a
-failed re-lock after an `unlock*` scope panics in every profile rather than silently
-leaving the memory readable.
+Locking is best-effort in one respect: on the `malloc_sized` path `memsec` discards the return
+value of `mlock`, so exhausting `RLIMIT_MEMLOCK` does not fail construction — the allocation is
+still `mprotect`ed (and a `memfd_secret` allocation is never `mlock`ed at all, see above). The
+constructors return `Error::LockFailed` when that `mprotect` fails, and a failed re-lock after
+an `unlock*` scope panics in every profile rather than silently leaving the memory readable.
 
 ## Usage
 
@@ -192,9 +197,13 @@ Irrelevant for a one-shot unlock, worth knowing before decoding in a loop.
   slices with `visit_str`/`visit_bytes` and never `visit_borrowed_*`, so nothing it produces
   can outlive the unlock window.
 - **The codec never puts payload bytes in an error.** Every `DecodeError` is built from a
-  length, an index or a `&'static str`, so both `Display` and `Debug` are free of input data.
-  That is deliberately unlike serde's `Unexpected::Str(s)`, which renders `string "…the
-  value…"` — exactly the sort of thing that ends up in a log or a crash report.
+  length, an index or a `&'static str`, and the one variant a `Deserialize` impl can steer —
+  `DecodeError::Custom` — carries no message at all. serde's own `unknown_variant` /
+  `unknown_field` helpers (and any hand-written impl) build their text by formatting data read
+  out of the document, so discarding it is what keeps a name — a secret, if a field's type
+  changed between writes — from reaching a log. That is deliberately unlike serde's
+  `Unexpected::Str(s)`, which renders `string "…the value…"` — exactly the sort of thing that
+  ends up in a log or a crash report.
 - **Deserializing into plain fields re-opens the hole.** The codec removes the format's own
   leaks; it cannot remove yours. A struct holding `String`/`Vec<u8>` fields deserializes those
   fields into unprotected memory that nothing wipes. Make the persisted fields the secure

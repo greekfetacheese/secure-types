@@ -1189,6 +1189,10 @@ fn resolve_range_indices<R: RangeBounds<usize>>(range: R, len: usize) -> (usize,
 
 #[cfg(test)]
 mod tests {
+   // Every test in this module is gated on `use_os` or `codec`, so the glob is only
+   // reachable when one of them is enabled. Importing it unconditionally makes a
+   // `--no-default-features` build warn about an unused import.
+   #[cfg(any(feature = "use_os", feature = "codec"))]
    use super::*;
 
    #[cfg(feature = "use_os")]

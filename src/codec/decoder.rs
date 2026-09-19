@@ -7,11 +7,6 @@
 //! the public entry point additionally requires `DeserializeOwned`, which
 //! forbids such borrowing statically.
 
-// `String` is used for `DecodeError::Custom`; in a `no_std` build it has to come
-// from `alloc` (with `use_os` the prelude provides it).
-#[cfg(not(feature = "use_os"))]
-use alloc::string::String;
-
 use serde::de::{self, DeserializeOwned, DeserializeSeed, Visitor};
 
 use super::format::{DecodeError, FORMAT_VERSION, read_varint};
@@ -568,9 +563,10 @@ impl<'de> de::MapAccess<'de> for StructMapAccess<'de, '_> {
       V: DeserializeSeed<'de>,
    {
       if !self.value_pending {
-         return Err(DecodeError::Custom(String::from(
-            "next_value_seed called without a preceding next_key_seed",
-         )));
+         // A visitor that asked for a value without a key first. `Custom` carries no
+         // message, so this collapses into the payload-free error like every other
+         // rejection — the codec has no way to tell a static hint from input text.
+         return Err(DecodeError::Custom);
       }
       self.value_pending = false;
 

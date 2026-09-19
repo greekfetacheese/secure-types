@@ -442,3 +442,70 @@ impl<'de> Deserialize<'de> for BranchesOnReadability {
 struct OneField {
    a: u8,
 }
+
+/// Planted as an enum variant name and as a struct field name, so an error can be
+/// searched for the text it must not carry. Shaped like a real secret.
+const WIRE_MARKER: &str = "SEED-PHRASE-MARKER-2B7E";
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+enum WireEnum {
+   Main,
+   Other,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct DenyUnknown {
+   a: u8,
+}
+
+/// Decoding `document` must fail with a payload-free error: neither `Display` nor `Debug` of
+/// the returned [`DecodeError`] may contain `WIRE_MARKER`.
+fn assert_error_is_silent<T>(label: &str, document: &[u8])
+where
+   T: DeserializeOwned,
+{
+   let error = secure_types::decode_slice::<T>(document)
+      .err()
+      .unwrap_or_else(|| panic!("{label}: decoding should have failed"));
+
+   assert!(
+      matches!(&error, DecodeError::Custom),
+      "{label}: expected the message-free `Custom` variant, got {error:?}"
+   );
+
+   for form in [error.to_string(), format!("{error:?}")] {
+      assert!(
+         !form.contains(WIRE_MARKER),
+         "{label}: the error echoed a name read from the document: {form}"
+      );
+   }
+}
+
+/// A name read out of the document must never reach the error message.
+///
+/// This is the path the rest of the suite could not see: the corruption sweeps use a fixture
+/// with no enum field and no `deny_unknown_fields` type, so serde's own `unknown_variant` /
+/// `unknown_field` error helpers were never reached. Those helpers format the offending wire
+/// name into a message, which is how a secret could end up in a log.
+#[test]
+fn test_wire_names_never_reach_the_error_message() {
+   // An enum variant name that matches no variant.
+   let mut variant = vec![FORMAT_VERSION];
+   variant.push(WIRE_MARKER.len() as u8);
+   variant.extend_from_slice(WIRE_MARKER.as_bytes());
+   variant.push(0x07);
+
+   assert_error_is_silent::<WireEnum>("enum variant name", &variant);
+
+   // A struct field name that matches no field, on a type that rejects unknown fields.
+   let mut field = vec![FORMAT_VERSION, 0x01];
+   field.push(WIRE_MARKER.len() as u8);
+   field.extend_from_slice(WIRE_MARKER.as_bytes());
+   field.extend_from_slice(&1u32.to_le_bytes());
+   field.push(0x07);
+
+   assert_error_is_silent::<DenyUnknown>("struct field name", &field);
+}

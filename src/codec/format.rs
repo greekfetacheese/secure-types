@@ -158,10 +158,13 @@ impl core::error::Error for EncodeError {
 
 /// Why decoding a value from the binary format failed.
 ///
-/// Every variant is built from a length, an index or a `&'static str`, so an
-/// error never carries bytes from the input. Both `Display` and `Debug` are
-/// therefore safe to log, unlike serde's `Unexpected::Str`, which renders the
-/// plaintext it was handed.
+/// Every variant is built from a length, an index or a `&'static str`, and the one
+/// variant a `Deserialize` impl can steer — [`Custom`](Self::Custom) — deliberately carries
+/// no message at all. serde's own `unknown_variant` / `unknown_field` helpers, and any
+/// hand-written impl, build their text by formatting data read out of the input document,
+/// so keeping it would put payload bytes — a secret included — into whatever logs the error.
+/// Both `Display` and `Debug` are therefore free of input data, unlike serde's
+/// `Unexpected::Str`, which renders the plaintext it was handed.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum DecodeError {
@@ -202,9 +205,13 @@ pub enum DecodeError {
    /// The value's `Deserialize` impl rejected the decoded value, or drove the
    /// codec incorrectly — asking for a map value before a key, for instance.
    ///
-   /// Only reachable from a `Deserialize` impl. The codec's own paths never
-   /// build one, and never format input bytes into one either.
-   Custom(String),
+   /// Only reachable from a `Deserialize` impl, and it carries no message on
+   /// purpose: the text such an impl — and serde's own `unknown_variant` /
+   /// `unknown_field` helpers — pass to `serde::de::Error::custom` is built by
+   /// formatting data read out of the input document, so it can contain payload
+   /// bytes. Discarding it is what keeps a secret out of a log, and there is
+   /// nothing to redact because nothing is stored.
+   Custom,
 }
 
 impl fmt::Display for DecodeError {
@@ -230,7 +237,7 @@ impl fmt::Display for DecodeError {
             )
          }
          Self::Unsupported(what) => write!(f, "The binary codec does not support {what}"),
-         Self::Custom(message) => write!(f, "Failed to decode the value: {message}"),
+         Self::Custom => write!(f, "Failed to decode the value"),
       }
    }
 }
@@ -244,8 +251,13 @@ impl serde::ser::Error for EncodeError {
 }
 
 impl serde::de::Error for DecodeError {
-   fn custom<T: fmt::Display>(msg: T) -> Self {
-      Self::Custom(msg.to_string())
+   /// The message is deliberately dropped rather than stored. It is built by serde's own
+   /// helpers (`unknown_variant`, `unknown_field`, …) and by hand-written impls formatting
+   /// data read out of the input document, so retaining it would let a secret reach a log —
+   /// see [`DecodeError::Custom`]. This is the single point where the crate has to make that
+   /// choice, which is why it is made here instead of at each call site.
+   fn custom<T: fmt::Display>(_msg: T) -> Self {
+      Self::Custom
    }
 }
 

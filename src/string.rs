@@ -405,6 +405,13 @@ impl<'de> serde::Deserialize<'de> for SecureString {
    }
 }
 
+/// Maps a character index to a byte index.
+///
+/// An index at or past the end of the string resolves to the string's *length*, so callers
+/// clamp rather than fail: `insert_text_at_char_idx` appends and `delete_text_char_range`
+/// becomes a no-op. That has been the behaviour since the first release, and it matches what
+/// the callers expect (Zeus's text field behaves the same way over egui's `TextEdit`), so it
+/// is kept deliberately. Revisit if an out-of-range index should be rejected instead.
 fn char_to_byte_idx(s_bytes: &[u8], char_idx: usize) -> usize {
    core::str::from_utf8(s_bytes)
       .ok()
