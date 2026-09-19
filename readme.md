@@ -1,6 +1,6 @@
 # Secure Types
 
-The goal of this crate is to provide a simple way to properly handle sensitive data in memory (eg. passwords, private keys, etc).
+The goal of this crate is to provide a simple way to properly handle sensitive data in memory (e.g. passwords, private keys, etc).
 
 Currently there are 3 types:
 
@@ -11,8 +11,8 @@ Currently there are 3 types:
 ## Features
 
 - **Zeroization on Drop**: Memory is wiped when dropped.
-- **Memory Locking**: (OS-only) While no `unlock*` scope is active the pages are `mprotect`ed `PROT_NONE`, which is what keeps the contents away from other processes. On the `malloc_sized` path the allocation is also `mlock`ed (Windows: `VirtualLock`) and, where the OS provides it, excluded from core dumps (`MADV_DONTDUMP` on Linux, `MADV_NOCORE` on FreeBSD/DragonFly; macOS has no equivalent), so it cannot be swapped out or captured in a crash dump. On Linux, when the kernel supports it, the allocation is backed by `memfd_secret` instead: `memsec` issues no `mlock` or `madvise` on that path, and the pages come from kernel secret memory. See [How memory is locked](#how-memory-is-locked).
-- **Safe Scoped Access**: Direct access on these types is not possible, data is protected by default and only accessible within safe blocks.
+- **Memory Locking**: (OS-only) While no `unlock*` scope is active the pages holding the data are `mprotect`ed `PROT_NONE`, so nothing — this process's own code included — can read them until an `unlock*` scope opens. That guards against accidental access; it is not a defence against `ptrace`/a debugger. On the `malloc_sized` path the allocation is also `mlock`ed (Windows: `VirtualLock`) and, where the OS provides it, excluded from core dumps (`MADV_DONTDUMP` on Linux, `MADV_NOCORE` on FreeBSD/DragonFly; macOS has no equivalent), so it is not swapped out or captured in a crash dump — best-effort, see [How memory is locked](#how-memory-is-locked). On Linux, when the kernel supports it, the allocation is backed by `memfd_secret` instead: `memsec` issues no `mlock` or `madvise` on that path, and the pages come from kernel secret memory.
+- **Safe Scoped Access**: Direct access on these types is not possible — there is no `Index`/`Deref`, so `secret[0]` is a compile error — and the contents are reachable only through the `unlock*` methods (the `expose-ptr` testing feature aside), which are safe functions taking a safe closure. The memory is protected by default and unprotected only for the duration of that closure.
 - **Send, not Sync**: Values can be moved to another thread. Sharing one instance across threads requires an explicit lock (`Arc<Mutex<_>>`). Concurrent `unlock` would race on page protection.
 - **`no_std` Support**: For embedded and Web environments (with zeroization only). Select it by turning off the default features — see [Feature Flags](#feature-flags).
 - **Serde Support**: Optional serialization/deserialization for `SecureString`, plus `SecureVec<T>` and `SecureArray<T, LENGTH>`. A `u8` container is a byte string and serializes as one bulk byte buffer; any other element type is serialized as a sequence of values, and more element types can opt in through the `SeqElement` trait.
@@ -30,8 +30,9 @@ Currently there are 3 types:
   memory provides. This crate's own contribution on every path is the `mprotect(PROT_NONE)`
   window discipline.
 
-- **Other Unix (macOS, FreeBSD, …)**: Using [mlock](https://man.archlinux.org/man/mlock.2) & [mprotect](https://man.archlinux.org/man/mprotect.2), with
-  `madvise(MADV_NOCORE)` on FreeBSD/DragonFly. `memfd_secret` and `MADV_DONTDUMP` are Linux-only, so `supports_memfd_secret()`
+- **Other Unix (macOS, FreeBSD, …)**: Using [mlock](https://man.archlinux.org/man/mlock.2) — which also issues
+  `madvise(MADV_NOCORE)` on FreeBSD/DragonFly — plus the same `mprotect(PROT_NONE)` window discipline described
+  above. `memfd_secret` and `MADV_DONTDUMP` are Linux-only, so `supports_memfd_secret()`
   returns `false` here and the allocation uses `malloc_sized` — the same path Linux takes when the kernel lacks `memfd_secret`.
 
 Locking is best-effort in one respect: on the `malloc_sized` path `memsec` discards the return
@@ -164,9 +165,12 @@ asymmetry for untagged enums — an untagged variant *serializes* fine (writing 
 tag) but cannot be read back, so a successful `encode` is not on its own a promise that the
 value is decodable.
 
-**Cost.** Decoding locks memory per secure allocation, which measured ~0.5 ms for a small
-vault-shaped payload in a release build with `use_os`, against ~0.03 ms with locking disabled.
-Irrelevant for a one-shot unlock, worth knowing before decoding in a loop.
+**Cost.** Decoding locks memory per secure allocation, so a decode is dominated by
+`mprotect`/`mlock` syscalls rather than by parsing: a small vault-shaped payload measures
+~0.7 ms per decode in a release build with `use_os`, against a few microseconds with locking
+disabled (`--no-default-features`) — roughly two orders of magnitude. Irrelevant for a one-shot
+unlock, worth knowing before decoding in a loop. Measured on one machine, so read the figures as
+orders of magnitude rather than as a benchmark.
 
 ## See also the [examples](/examples/).
 
@@ -233,8 +237,10 @@ Because each file is its own crate, those tests see only the **public API**, whi
 that nothing internal leaked into it.
 
 The tests that cannot work that way stay in `tests` modules inside `src/`: the `patch_at` internals, the
-memory-protection checks, the varint helpers, and the crash tests that spawn a child process to
-reproduce a re-lock failure — they read `pub(crate)` state or a private field. Shared fixtures and the
+memory-protection checks, the varint helpers, and the crash tests that spawn a child process — a fault on
+locked memory kills the process, so the child either dies with a `SIGSEGV` (proving the protection holds for
+a leaked `Drain` or a direct dereference) or exits cleanly (proving a never-initialized drop is sound) without
+taking the test runner down with it. They read `pub(crate)` state or a private field. Shared fixtures and the
 owned-input deserializers live in `tests/common/`.
 
 ```bash
