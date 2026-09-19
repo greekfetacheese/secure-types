@@ -470,10 +470,13 @@ impl<T: Zeroize> SecureVec<T> {
    /// Appends every element of `src` using a single unlock/lock cycle.
    ///
    /// A loop of [`push`](Self::push) costs an `mprotect` pair per element, so bulk
-   /// copies (like the serde writer feeding this vector) need this instead. The
-   /// length is committed only after every write succeeded, so a panic from
-   /// `T::clone` leaves the vector at its previous length.
-   #[cfg(feature = "use_os")]
+   /// copies (the serde writer feeding this vector, and the binary codec's encoder)
+   /// need this instead. The length is committed only after every write succeeded,
+   /// so a panic from `T::clone` leaves the vector at its previous length.
+   ///
+   /// Gated on `use_os` or `codec`: those are the two features that call it, and
+   /// compiling it for neither would only produce a `dead_code` warning.
+   #[cfg(any(feature = "use_os", feature = "codec"))]
    pub(crate) fn extend_from_slice(&mut self, src: &[T])
    where
       T: Clone,
@@ -652,6 +655,53 @@ impl<T: Zeroize> SecureVec<T> {
          ok,
          "SecureVec::init_from_clone: lock_memory failed"
       );
+   }
+}
+
+impl SecureVec<u8> {
+   /// Overwrites `src` at `offset` without changing the length or the capacity.
+   ///
+   /// Used by the binary codec to back-fill the `u32` length placeholder that
+   /// precedes a struct field's framed body, once that body has been written.
+   /// The frame is what lets a reader skip a field it does not know about, which
+   /// is what makes adding a field a compatible change.
+   ///
+   /// Unlike the `unlock*` family this returns nothing: it exposes no slice, so
+   /// the borrowed window is not left up to the caller.
+   ///
+   /// # Panics
+   ///
+   /// Panics if `offset + src.len()` exceeds the current length, or if the
+   /// memory cannot be re-locked afterwards. A patch never grows the vector —
+   /// use [`extend_from_slice`](Self::extend_from_slice) for that.
+   #[cfg(feature = "codec")]
+   pub(crate) fn patch_at(&mut self, offset: usize, src: &[u8]) {
+      let end = offset
+         .checked_add(src.len())
+         .expect("SecureVec::patch_at: offset overflow");
+      assert!(
+         end <= self.len,
+         "SecureVec::patch_at: range {offset}..{end} exceeds length {}",
+         self.len
+      );
+
+      let ok = self.unlock_memory();
+      debug_assert!(ok, "SecureVec::patch_at: unlock_memory failed");
+
+      // SAFETY: `end <= self.len`, so `offset..end` lies inside the initialized
+      // region of the allocation. `src` is a distinct live slice that cannot
+      // overlap it, so the copy is non-overlapping. The length is untouched, so
+      // no element is created, duplicated, or dropped here.
+      unsafe {
+         core::ptr::copy_nonoverlapping(
+            src.as_ptr(),
+            self.ptr.as_ptr().add(offset),
+            src.len(),
+         );
+      }
+
+      let ok = self.lock_memory();
+      assert!(ok, "SecureVec::patch_at: lock_memory failed");
    }
 }
 
@@ -1429,6 +1479,92 @@ mod tests {
          slice[0] = 4;
          assert_eq!(slice, &mut [4, 2, 3]);
       });
+   }
+
+   #[cfg(feature = "codec")]
+   #[test]
+   fn test_patch_at_overwrites_in_place() {
+      let mut secure = SecureBytes::from_slice(b"abcdefgh").unwrap();
+
+      secure.patch_at(2, b"XY");
+
+      secure.unlock_slice(|bytes| {
+         assert_eq!(bytes, b"abXYefgh");
+         assert_eq!(bytes.len(), 8);
+      });
+   }
+
+   #[cfg(feature = "codec")]
+   #[test]
+   fn test_patch_at_last_bytes_and_whole_buffer() {
+      let mut secure = SecureBytes::from_slice(b"abcdefgh").unwrap();
+
+      secure.patch_at(6, b"XY");
+      secure.unlock_slice(|bytes| assert_eq!(bytes, b"abcdefXY"));
+
+      secure.patch_at(0, b"12345678");
+      secure.unlock_slice(|bytes| assert_eq!(bytes, b"12345678"));
+   }
+
+   #[cfg(feature = "codec")]
+   #[test]
+   fn test_patch_at_empty_source_is_a_noop() {
+      let mut secure = SecureBytes::from_slice(b"abc").unwrap();
+
+      // A zero-length patch is valid inside the buffer and at its very end.
+      secure.patch_at(0, b"");
+      secure.patch_at(3, b"");
+
+      secure.unlock_slice(|bytes| assert_eq!(bytes, b"abc"));
+   }
+
+   #[cfg(feature = "codec")]
+   #[test]
+   fn test_patch_at_leaves_length_and_capacity_alone() {
+      let mut secure = SecureBytes::new_with_capacity(16).unwrap();
+      secure.extend_from_slice(b"abc");
+      let capacity_before = secure.unlock(|vec| vec.capacity);
+
+      secure.patch_at(0, b"ZY");
+
+      secure.unlock(|vec| {
+         assert_eq!(vec.len, 3);
+         assert_eq!(vec.capacity, capacity_before);
+      });
+      secure.unlock_slice(|bytes| assert_eq!(bytes, b"ZYc"));
+   }
+
+   #[cfg(feature = "codec")]
+   #[test]
+   fn test_patch_at_survives_reallocation() {
+      // Growth moves the buffer to a new locked allocation; the patch must land
+      // in the live one rather than a stale pointer.
+      let mut secure = SecureBytes::new().unwrap();
+      secure.extend_from_slice(b"first");
+      secure.reserve(4096);
+      secure.extend_from_slice(b"second");
+
+      secure.patch_at(0, b"FIRST");
+
+      secure.unlock_slice(|bytes| assert_eq!(bytes, b"FIRSTsecond"));
+   }
+
+   #[cfg(feature = "codec")]
+   #[test]
+   #[should_panic(expected = "exceeds length")]
+   fn test_patch_at_straddling_the_end_panics() {
+      let mut secure = SecureBytes::from_slice(b"abc").unwrap();
+
+      secure.patch_at(2, b"XY");
+   }
+
+   #[cfg(feature = "codec")]
+   #[test]
+   #[should_panic(expected = "exceeds length")]
+   fn test_patch_at_past_the_end_panics() {
+      let mut secure = SecureBytes::from_slice(b"abc").unwrap();
+
+      secure.patch_at(4, b"");
    }
 
    #[test]

@@ -7,6 +7,8 @@
 extern crate alloc;
 
 pub mod array;
+#[cfg(feature = "codec")]
+pub mod codec;
 pub mod string;
 pub mod vec;
 #[cfg(feature = "use_os")]
@@ -25,6 +27,11 @@ pub use writer::SecureBytesWriter;
 pub use json::{
    JsonError, serialize_json_into_secure_bytes, serialize_json_into_secure_bytes_with_capacity,
    serialize_json_into_secure_string, serialize_json_into_secure_string_with_capacity,
+};
+
+#[cfg(feature = "codec")]
+pub use codec::{
+   DecodeError, EncodeError, FORMAT_VERSION, decode, decode_slice, encode, encode_with_capacity,
 };
 
 use core::ptr::NonNull;

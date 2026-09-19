@@ -15,7 +15,8 @@ Currently there are 3 types:
 - **Safe Scoped Access**: Direct access on these types is not possible, data is protected by default and only accessible within safe blocks.
 - **Send, not Sync**: Values can be moved to another thread. Sharing one instance across threads requires an explicit lock (`Arc<Mutex<_>>`). Concurrent `unlock` would race on page protection.
 - **`no_std` Support**: For embedded and Web environments (with zeroization only). Select it by turning off the default features — see [Feature Flags](#feature-flags).
-- **Serde Support**: Optional serialization/deserialization for `SecureString`, `SecureVec<u8> ` and `SecureArray<u8, LENGTH>`.
+- **Serde Support**: Optional serialization/deserialization for `SecureString`, `SecureVec<u8>` and `SecureArray<u8, LENGTH>`.
+- **Binary Codec**: (feature `codec`) A self-owned binary format implemented as a `serde::Serializer`/`serde::Deserializer`, which encodes straight into locked memory and decodes straight out of it, so serialization does not have to leave plaintext in a buffer nothing can wipe. Adds no dependency beyond `serde`.
 
 ## How memory is locked
 
@@ -90,6 +91,74 @@ secure_array.unlock_mut(|unlocked_slice| {
 });
 ```
 
+### Binary codec
+
+`serde_json` cannot be made to leave no traces, and the parts that leak belong to the format
+rather than to serde: its `Deserializer` keeps a private `scratch: Vec<u8>` that it reuses for
+every escaped string and never zeroizes, `from_reader` copies *every* string into that scratch,
+`Value` deserializes a whole document into plain `String`s, and its error formatting renders
+`string "…the plaintext…"` into the message.
+
+The `codec` feature adds a small binary format implemented as a `serde::Serializer` and a
+`serde::Deserializer`. Your `#[derive(Serialize, Deserialize)]` and `#[serde(...)]` attributes
+work unchanged, and no dependency is added beyond `serde` itself:
+
+```rust
+# #[cfg(feature = "codec")] {
+use secure_types::{decode, encode};
+use serde::{Deserialize, Serialize};
+
+#[derive(Serialize, Deserialize)]
+struct VaultData {
+    label: String,
+
+    /// AEAD key for the wallet state
+    #[serde(default)]
+    wallet_state_key: Option<u32>,
+
+    #[serde(default, skip_serializing)]
+    contacts: Vec<String>,
+}
+
+let vault = VaultData {
+    label: "main".to_owned(),
+    wallet_state_key: Some(7),
+    contacts: vec!["not persisted".to_owned()],
+};
+
+// The encoded document is the only copy, and it lives in locked memory that is
+// zeroized on drop.
+let encoded = encode(&vault)?;
+let decoded = decode::<VaultData>(&encoded)?;
+
+assert_eq!(decoded.wallet_state_key, Some(7));
+assert!(decoded.contacts.is_empty()); // `skip_serializing` -> `default`
+# }
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+`encode` returns a `SecureBytes`, so the result is locked while unused and wiped on drop;
+`decode` unlocks it only for the duration of the decode and re-locks it afterwards, even on
+the error path. Types are written as raw binary — a `SecureArray<u8, 32>` is 32 bytes, not
+64 hex characters — and strings carry no escaping pass, so there is no scratch copy of an
+unescaped string to survive anywhere.
+
+**Evolving a stored format.** `FORMAT_VERSION` is the first byte of every document, and a
+reader refuses a version it does not recognise rather than guessing. Adding a field with
+`#[serde(default)]` does *not* need a version bump: struct fields are tagged by name and each
+one carries its own length, so a reader that does not know a field skips it whole and a field
+the writer omitted falls back to its default. Changing a field's *type* does need one.
+
+**Not supported.** The format carries no type tags, so `deserialize_any` cannot be
+implemented and anything built on it fails with `DecodeError::Unsupported` rather than
+guessing: `#[serde(flatten)]`, `#[serde(untagged)]`, and `Value`-shaped fields. Note the
+asymmetry for untagged enums — an untagged variant *serializes* fine (writing one needs no
+tag) but cannot be read back, so a successful `encode` is not on its own a promise that the
+value is decodable.
+
+**Cost.** Decoding locks memory per secure allocation, which measured ~0.5 ms for a small
+vault-shaped payload in a release build with `use_os`, against ~0.03 ms with locking disabled.
+Irrelevant for a one-shot unlock, worth knowing before decoding in a loop.
 
 ## See also the [examples](/examples/).
 
@@ -100,6 +169,7 @@ secure_array.unlock_mut(|unlocked_slice| {
 - `no_os`: No-op, kept for backwards compatibility. `no_std` is selected by disabling the default features (`--no-default-features`), which leaves only the zeroize-on-drop guarantee.
 - `serde`: Enables serialization/deserialization.
 - `serde_json`: Adds `serialize_json_into_secure_bytes` / `serialize_json_into_secure_string`, which serialize straight into a `SecureVec<u8>` / `SecureString` instead of an ordinary `Vec`/`String`. Implies `serde` and requires `use_os`.
+- `codec`: Adds `encode` / `encode_with_capacity` / `decode` / `decode_slice`, a binary format written into locked memory and read out of it. Implies `serde`, works in `no_std` + `alloc`, and adds no dependency.
 - `expose-ptr`: For testing purposes. Exposes the locked memory region pointer.
 
 ## Security notes
@@ -107,17 +177,29 @@ secure_array.unlock_mut(|unlocked_slice| {
 - **Serialization writes plaintext.** `Serialize` cannot wipe the buffer the serializer
   builds for it: `serde_json::to_string`/`to_vec` leave the plaintext in an ordinary
   `String`/`Vec` that nothing zeroizes, so zeroize that buffer yourself if you call them.
-  zeroized on drop. Prefer `serialize_json_into_secure_bytes` (feature `serde_json`) when the
-  JSON is going to be compressed or encrypted, or `serialize_json_into_secure_string` if you
-  want the text form or wire any serializer around `SecureBytesWriter` the plaintext then
-  only ever lives in locked memory that is zeroized on drop.
+  Prefer `serialize_json_into_secure_bytes` (feature `serde_json`) when the JSON is going to
+  be compressed or encrypted, or `serialize_json_into_secure_string` if you want the text
+  form; or wire any serializer around `SecureBytesWriter` — the plaintext then only ever
+  lives in locked memory that is zeroized on drop. For a format with no such gaps at all, use
+  the [binary codec](#binary-codec) (feature `codec`).
 - **Deserializing reads from a buffer you own.** `serde_json::from_str`/`from_slice` take a
   plain `&str`/`&[u8]`, and nothing can wipe that input for you. Parse from inside the locked
   buffer instead — `secure_json.unlock_str(|json| serde_json::from_str::<Vault>(json))` — so
   the plaintext is unlocked only for the duration of the parse. Note that when a JSON string
   contains escape sequences, `serde_json` unescapes it into an internal scratch buffer of its
   own before handing it over; that copy is not ours to erase (strings without escapes are read
-  straight out of your input).
+  straight out of your input). The `codec` decoder has no such scratch: it hands over borrowed
+  slices with `visit_str`/`visit_bytes` and never `visit_borrowed_*`, so nothing it produces
+  can outlive the unlock window.
+- **The codec never puts payload bytes in an error.** Every `DecodeError` is built from a
+  length, an index or a `&'static str`, so both `Display` and `Debug` are free of input data.
+  That is deliberately unlike serde's `Unexpected::Str(s)`, which renders `string "…the
+  value…"` — exactly the sort of thing that ends up in a log or a crash report.
+- **Deserializing into plain fields re-opens the hole.** The codec removes the format's own
+  leaks; it cannot remove yours. A struct holding `String`/`Vec<u8>` fields deserializes those
+  fields into unprotected memory that nothing wipes. Make the persisted fields the secure
+  types (`SecureString`, `SecureVec<u8>`, `SecureArray<u8, LENGTH>`); they implement
+  `Deserialize`, so the derives work unchanged.
 - **Owned buffers a deserializer hands over are wiped.** When a format gives up ownership of a
   `String`/`Vec<u8>` (`visit_string`/`visit_byte_buf`), the contents are copied into locked
   memory and the buffer is zeroized before it is released, instead of being dropped with the
@@ -136,7 +218,10 @@ secure_array.unlock_mut(|unlocked_slice| {
 ## Running tests
 
 ```bash
+cargo test                                          # default features
+cargo test --all-features
 cargo test --features serde,expose-ptr
+cargo test --no-default-features --features codec    # no_std + alloc, codec only
 ```
 
 ## License

@@ -43,6 +43,11 @@ default = ["use_os"]
 use_os = ["memsec"]
 serde = ["dep:serde"]
 
+# `codec`: a binary vault format implemented as `serde::Serializer` /
+# `serde::Deserializer`, so a value encodes straight into locked `SecureBytes`
+# and decodes straight out of it. Implies `serde` and adds no dependency.
+codec = ["serde"]
+
 # `serialize_json_into_secure_string`: JSON written straight into a `SecureString`
 # instead of an ordinary `String`/`Vec`. Implies `serde` and needs `use_os`.
 serde_json = ["dep:serde_json", "serde"]
