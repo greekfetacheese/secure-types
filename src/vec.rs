@@ -765,6 +765,16 @@ impl<T: Zeroize> Drop for SecureVec<T> {
 // access locked memory, causing a segfault. This is by design.
 // Always use unlock_slice() / unlock_slice_mut().
 
+/// Upper bound on how much memory a `Deserialize` impl will reserve up front from a
+/// format-supplied `size_hint`.
+///
+/// The hint is advisory and comes from the format, so trusting a huge one would mean
+/// locking that much memory before a single element has been read. The vector still grows
+/// to whatever the real length turns out to be, so a low cap costs nothing but
+/// reallocation.
+#[cfg(feature = "serde")]
+const MAX_PREALLOCATION_FROM_SIZE_HINT: usize = 4096;
+
 /// Serializes as a byte buffer, matching the `deserialize_bytes` request of the
 /// `Deserialize` impl below. Formats that support byte buffers get the contents in one
 /// piece rather than element by element; `serde_json` renders either form as an array of
@@ -797,9 +807,14 @@ impl<'de> serde::Deserialize<'de> for SecureVec<u8> {
          where
             A: serde::de::SeqAccess<'de>,
          {
-            // Reserve whatever the format advertises, so the locked buffer is not grown
-            // (re-allocated and re-`mprotect`ed) once per element.
-            let capacity = seq.size_hint().unwrap_or(0);
+            // Reserve what the format advertises, so the locked buffer is not grown
+            // (re-allocated and re-`mprotect`ed) once per element — but cap it. The hint
+            // comes from the format, and a huge one would otherwise have us lock that
+            // much memory before reading a single byte.
+            let capacity = seq
+               .size_hint()
+               .unwrap_or(0)
+               .min(MAX_PREALLOCATION_FROM_SIZE_HINT);
             let mut vec =
                SecureVec::new_with_capacity(capacity).map_err(serde::de::Error::custom)?;
 
@@ -1376,6 +1391,70 @@ mod tests {
       let secure: SecureVec<u8> = serde_json::from_str("[1,2,3]").unwrap();
 
       secure.unlock_slice(|slice| assert_eq!(slice, &[1, 2, 3]));
+   }
+
+   /// A `size_hint` is a hint, not an allocation size. A format that advertises an absurd
+   /// one must not make us lock that much memory up front.
+   ///
+   /// Without the cap this fails outright: `usize::MAX` bytes cannot be allocated.
+   #[cfg(feature = "serde")]
+   #[test]
+   fn test_deserialize_does_not_trust_an_absurd_size_hint() {
+      use serde::de::IntoDeserializer;
+
+      struct AbsurdHint;
+
+      impl<'de> serde::Deserializer<'de> for AbsurdHint {
+         type Error = serde::de::value::Error;
+
+         fn deserialize_any<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+         where
+            V: serde::de::Visitor<'de>,
+         {
+            visitor.visit_seq(AbsurdHintSeq { remaining: 3 })
+         }
+
+         serde::forward_to_deserialize_any! {
+            bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
+            bytes byte_buf option unit unit_struct newtype_struct seq tuple
+            tuple_struct map struct enum identifier ignored_any
+         }
+      }
+
+      struct AbsurdHintSeq {
+         remaining: usize,
+      }
+
+      impl<'de> serde::de::SeqAccess<'de> for AbsurdHintSeq {
+         type Error = serde::de::value::Error;
+
+         fn next_element_seed<T>(&mut self, seed: T) -> Result<Option<T::Value>, Self::Error>
+         where
+            T: serde::de::DeserializeSeed<'de>,
+         {
+            if self.remaining == 0 {
+               return Ok(None);
+            }
+            self.remaining -= 1;
+
+            seed.deserialize(1u8.into_deserializer()).map(Some)
+         }
+
+         fn size_hint(&self) -> Option<usize> {
+            Some(usize::MAX)
+         }
+      }
+
+      let decoded = <SecureVec<u8> as serde::Deserialize>::deserialize(AbsurdHint).unwrap();
+
+      decoded.unlock(|vec| {
+         assert!(
+            vec.capacity <= MAX_PREALLOCATION_FROM_SIZE_HINT,
+            "reserved {} bytes from a size hint",
+            vec.capacity
+         );
+      });
+      decoded.unlock_slice(|bytes| assert_eq!(bytes, &[1, 1, 1]));
    }
 
    #[test]

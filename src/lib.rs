@@ -14,20 +14,11 @@ pub mod vec;
 #[cfg(feature = "use_os")]
 pub mod writer;
 
-#[cfg(all(feature = "use_os", feature = "serde_json"))]
-pub mod json;
-
 pub use array::SecureArray;
 pub use string::SecureString;
 pub use vec::{SecureBytes, SecureVec};
 #[cfg(feature = "use_os")]
 pub use writer::SecureBytesWriter;
-
-#[cfg(all(feature = "use_os", feature = "serde_json"))]
-pub use json::{
-   JsonError, serialize_json_into_secure_bytes, serialize_json_into_secure_bytes_with_capacity,
-   serialize_json_into_secure_string, serialize_json_into_secure_string_with_capacity,
-};
 
 #[cfg(feature = "codec")]
 pub use codec::{

@@ -168,7 +168,6 @@ Irrelevant for a one-shot unlock, worth knowing before decoding in a loop.
 - `use_os` (default): Enables all OS-level security features.
 - `no_os`: No-op, kept for backwards compatibility. `no_std` is selected by disabling the default features (`--no-default-features`), which leaves only the zeroize-on-drop guarantee.
 - `serde`: Enables serialization/deserialization.
-- `serde_json`: Adds `serialize_json_into_secure_bytes` / `serialize_json_into_secure_string`, which serialize straight into a `SecureVec<u8>` / `SecureString` instead of an ordinary `Vec`/`String`. Implies `serde` and requires `use_os`.
 - `codec`: Adds `encode` / `encode_with_capacity` / `decode` / `decode_slice`, a binary format written into locked memory and read out of it. Implies `serde`, works in `no_std` + `alloc`, and adds no dependency.
 - `expose-ptr`: For testing purposes. Exposes the locked memory region pointer.
 
@@ -176,15 +175,13 @@ Irrelevant for a one-shot unlock, worth knowing before decoding in a loop.
 
 - **Serialization writes plaintext.** `Serialize` cannot wipe the buffer the serializer
   builds for it: `serde_json::to_string`/`to_vec` leave the plaintext in an ordinary
-  `String`/`Vec` that nothing zeroizes, so zeroize that buffer yourself if you call them.
-  Prefer `serialize_json_into_secure_bytes` (feature `serde_json`) when the JSON is going to
-  be compressed or encrypted, or `serialize_json_into_secure_string` if you want the text
-  form; or wire any serializer around `SecureBytesWriter` — the plaintext then only ever
-  lives in locked memory that is zeroized on drop. For a format with no such gaps at all, use
-  the [binary codec](#binary-codec) (feature `codec`).
+  `String`/`Vec` that nothing zeroizes, so zeroize that buffer yourself if you call them, or
+  wire the serializer around `SecureBytesWriter` so the plaintext only ever lives in locked
+  memory that is zeroized on drop. Better still, use the [binary codec](#binary-codec)
+  (feature `codec`), which has no such gap to begin with.
 - **Deserializing reads from a buffer you own.** `serde_json::from_str`/`from_slice` take a
   plain `&str`/`&[u8]`, and nothing can wipe that input for you. Parse from inside the locked
-  buffer instead — `secure_json.unlock_str(|json| serde_json::from_str::<Vault>(json))` — so
+  buffer instead — `locked.unlock_slice(|json| serde_json::from_slice::<Vault>(json))` — so
   the plaintext is unlocked only for the duration of the parse. Note that when a JSON string
   contains escape sequences, `serde_json` unescapes it into an internal scratch buffer of its
   own before handing it over; that copy is not ours to erase (strings without escapes are read

@@ -9,7 +9,7 @@ use crate::SecureBytes;
 /// Handing a secret to `serde_json::to_string`/`to_vec` leaves the plaintext in an
 /// ordinary `String`/`Vec` that nothing zeroizes, and `impl Serialize` cannot wipe
 /// that buffer for you — a `Serialize` impl only ever sees a generic
-/// [`serde::Serializer`]. Building the serializer around this writer instead keeps the
+/// `serde::Serializer`. Building the serializer around this writer instead keeps the
 /// only heap copy of the plaintext in memory that is locked while unused and zeroized
 /// on drop. Growth cannot leave a stale copy behind either: `SecureVec::reserve`
 /// zeroizes the old allocation after moving the elements.
@@ -26,12 +26,12 @@ use crate::SecureBytes;
 /// buffer.unlock_slice(|bytes| assert_eq!(bytes, b"secret"));
 /// ```
 ///
-/// For JSON in particular, `serialize_json_into_secure_string` (feature `serde_json`)
-/// wires this up for you.
+/// This writer targets [`SecureBytes`]. If you want the result as a
+/// [`SecureString`](crate::SecureString), follow up with `SecureString::try_from`,
+/// which validates the UTF-8 in a single pass.
 ///
-/// This writer targets [`SecureBytes`]. If you want the result as a [`SecureString`]
-/// (what `serialize_json_into_secure_string` returns), follow up with
-/// [`SecureString::try_from`], which validates the UTF-8 in a single pass.
+/// The `codec` feature's `encode` writes its own format into locked memory; this writer is
+/// for pointing some *other* serializer at locked memory.
 pub struct SecureBytesWriter<'a> {
    bytes: &'a mut SecureBytes,
 }
