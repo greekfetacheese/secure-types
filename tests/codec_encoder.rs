@@ -633,3 +633,45 @@ impl Serialize for Displays {
       serializer.collect_str(self)
    }
 }
+
+/// The encode-side half of the property the decoder pins in
+/// `codec_decoder.rs::test_error_messages_never_echo_wire_bytes`: an error must
+/// never carry payload bytes, in `Display` or `Debug`.
+#[test]
+fn test_encode_errors_never_echo_payload_bytes() {
+   const MARKER: &str = "SEED-PHRASE-MARKER-ENCODE";
+
+   /// Writes a secret, then declares a different element count, so encoding
+   /// fails *after* the secret has already been written.
+   struct FailsAfterWritingTheSecret;
+
+   impl Serialize for FailsAfterWritingTheSecret {
+      fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+      where
+         S: ser::Serializer,
+      {
+         let mut seq = serializer.serialize_seq(Some(2))?;
+         seq.serialize_element(MARKER)?;
+         seq.end()
+      }
+   }
+
+   // `SecureBytes` deliberately does not implement `Debug`, so `unwrap_err()`
+   // (which needs `T: Debug`) is not available here.
+   let error = match secure_types::encode(&FailsAfterWritingTheSecret) {
+      Ok(_) => panic!("encoding a mismatched element count should have failed"),
+      Err(error) => error,
+   };
+
+   assert!(
+      matches!(&error, EncodeError::ElementCountMismatch),
+      "expected the count mismatch to fail the encoding, got {error:?}"
+   );
+
+   for form in [error.to_string(), format!("{error:?}")] {
+      assert!(
+         !form.contains(MARKER),
+         "an encode error echoed payload bytes: {form}"
+      );
+   }
+}

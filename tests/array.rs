@@ -106,8 +106,13 @@ fn test_drop_without_initialization_is_sound() {
    );
 }
 
-/// Regression test: a panic while filling the array must only leave the
-/// already-written elements to be zeroized by `drop`.
+/// Regression test: a panic while filling the array must not crash. `drop` must
+/// never interpret the unwritten slots as a `T`.
+///
+/// Note what is *not* asserted here: because `initialized` is committed only
+/// after the whole loop, the elements cloned before the panic are leaked rather
+/// than dropped or zeroized (the same trade-off `SecureVec` documents). This
+/// pins the soundness (no SIGSEGV/SIGABRT), not the wipe.
 #[test]
 fn test_panic_during_partial_init_is_sound() {
    let arg = "CRASH_TEST_ARRAY_PANIC_INIT";
@@ -154,11 +159,15 @@ fn test_erase() {
    });
 }
 
+/// A zero-length array is rejected with `LengthCannotBeZero` (a `SecureArray`
+/// cannot hold a zero-sized allocation), asserted on the variant rather than on
+/// an incidental `unwrap` panic.
 #[test]
-#[should_panic]
 fn test_length_cannot_be_zero() {
    let secure_vec = SecureVec::new().unwrap();
-   let _secure_array: SecureArray<u8, 0> = SecureArray::try_from(secure_vec).unwrap();
+   let result: Result<SecureArray<u8, 0>, _> = SecureArray::try_from(secure_vec);
+
+   assert!(matches!(result, Err(Error::LengthCannotBeZero)));
 }
 
 #[test]

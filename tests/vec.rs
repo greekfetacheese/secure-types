@@ -109,7 +109,9 @@ fn test_do_not_call_forget_on_drain() {
    let mut secure = SecureVec::from_vec(vec).unwrap();
    let drain = secure.drain(..3);
    core::mem::forget(drain);
-   // we can still use secure vec but its state is unreachable
+   // A forgotten `Drain` never runs `compact`, so `len` stays at the drain start
+   // and the drained elements are leaked rather than dropped. The vector is also
+   // left locked — `test_forgotten_drain_keeps_memory_locked` pins that.
    secure.unlock_slice(|secure| {
       assert_eq!(secure.len(), 0);
    });
@@ -684,7 +686,9 @@ fn test_vec_generic_basics<T: Zeroize + Clone + PartialEq + Debug>(initial: &[T]
    for item in initial {
       res.push(item.clone());
    }
-   assert!(res.capacity() >= initial.len() + 2 || res.capacity() >= initial.len());
+   // `reserve` was asked for room for `initial.len() + 2`, so the capacity must
+   // still cover that after every element has been pushed.
+   assert!(res.capacity() >= initial.len() + 2);
    res.unlock_slice(|slice| {
       assert_eq!(slice, initial);
    });
