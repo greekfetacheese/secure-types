@@ -11,35 +11,20 @@ Currently there are 3 types:
 ## Features
 
 - **Zeroization on Drop**: Memory is wiped when dropped.
-- **Memory Locking**: (OS-only) While no `unlock*` scope is active the pages holding the data are `mprotect`ed `PROT_NONE`, so nothing — this process's own code included — can read them until an `unlock*` scope opens. That guards against accidental access; it is not a defence against `ptrace`/a debugger. On the `malloc_sized` path the allocation is also `mlock`ed (Windows: `VirtualLock`) and, where the OS provides it, excluded from core dumps (`MADV_DONTDUMP` on Linux, `MADV_NOCORE` on FreeBSD/DragonFly; macOS has no equivalent), so it is not swapped out or captured in a crash dump — best-effort, see [How memory is locked](#how-memory-is-locked). On Linux, when the kernel supports it, the allocation is backed by `memfd_secret` instead: `memsec` issues no `mlock` or `madvise` on that path, and the pages come from kernel secret memory.
-- **Safe Scoped Access**: Direct access on these types is not possible — there is no `Index`/`Deref`, so `secret[0]` is a compile error — and the contents are reachable only through the `unlock*` methods (the `expose-ptr` testing feature aside), which are safe functions taking a safe closure. The memory is protected by default and unprotected only for the duration of that closure.
-- **Send, not Sync**: Values can be moved to another thread. Sharing one instance across threads requires an explicit lock (`Arc<Mutex<_>>`). Concurrent `unlock` would race on page protection.
-- **`no_std` Support**: For embedded and Web environments (with zeroization only). Select it by turning off the default features — see [Feature Flags](#feature-flags).
-- **Serde Support**: Optional serialization/deserialization for `SecureString`, plus `SecureVec<T>` and `SecureArray<T, LENGTH>`. A `u8` container is a byte string and serializes as one bulk byte buffer; any other element type is serialized as a sequence of values, and more element types can opt in through the `SeqElement` trait.
-- **Binary Codec**: (feature `codec`) A self-owned binary format implemented as a `serde::Serializer`/`serde::Deserializer`, which encodes straight into locked memory and decodes straight out of it, so serialization does not have to leave plaintext in a buffer nothing can wipe. Adds no dependency beyond `serde`.
+- **Memory locking** (OS only): Pages are `mprotect`ed `PROT_NONE` except during an `unlock*` scope. That stops accidental reads, including from this process; it is not a defence against `ptrace` or a debugger. On the malloc path the allocation is also mlocked (Windows: `VirtualLock`) and, where the OS allows it, excluded from core dumps. Linux uses `memfd_secret` when the kernel supports it. See [How memory is locked](#how-memory-is-locked).
+- **Scoped access**: No `Index`/`Deref` — `secret[0]` does not compile. Contents are only reachable through the `unlock*` closures (the `expose-ptr` testing feature aside). Memory is unprotected only for that closure.
+- **Send, not Sync**: Values can move to another thread. Sharing one instance needs an explicit lock (`Arc<Mutex<_>>`); concurrent `unlock` races on page protection.
+- **`no_std`**: Zeroization only. Disable the default features — see [Feature Flags](#feature-flags).
+- **Serde**: Optional serialization for `SecureString`, `SecureVec<T>`, and `SecureArray<T, LENGTH>`. A `u8` container serializes as a byte buffer; other element types as a sequence (`SeqElement`).
+- **Binary codec** (feature `codec`): A `serde` Serializer/Deserializer that encodes into locked memory and decodes out of it. No extra dependency beyond `serde`.
 
 ## How memory is locked
 
-- **Windows**: Using [VirtualProtect](https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualprotect) & [VirtualLock](https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtuallock).
+- **Windows**: [VirtualProtect](https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualprotect) and [VirtualLock](https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtuallock).
+- **Linux**: [memfd_secret](https://man.archlinux.org/man/memfd_secret.2.en) when the kernel supports it. Otherwise [mlock](https://man.archlinux.org/man/mlock.2) and [madvise](https://man.archlinux.org/man/madvise.2) (`MADV_DONTDUMP`) on the malloc path. A `memfd_secret` allocation is not `mlock`ed and is not marked `MADV_DONTDUMP` by `memsec`. Every path still uses `mprotect(PROT_NONE)` between unlocks.
+- **Other Unix** (macOS, FreeBSD, …): [mlock](https://man.archlinux.org/man/mlock.2) plus `mprotect(PROT_NONE)`. FreeBSD/DragonFly also use `madvise(MADV_NOCORE)`. No `memfd_secret`.
 
-- **Linux**: Using [mlock](https://man.archlinux.org/man/mlock.2) & [madvise](https://man.archlinux.org/man/madvise.2).
-  If the kernel supports it, it will allocate with [memfd_secret](https://man.archlinux.org/man/memfd_secret.2.en).
-  Note that the `mlock`/`madvise` pair belongs to the `malloc_sized` path: a `memfd_secret`
-  allocation is **not** `mlock`ed and is **not** marked `MADV_DONTDUMP` by `memsec`, so on that
-  path core-dump exclusion is not requested and swappability is whatever the kernel's secret
-  memory provides. This crate's own contribution on every path is the `mprotect(PROT_NONE)`
-  window discipline.
-
-- **Other Unix (macOS, FreeBSD, …)**: Using [mlock](https://man.archlinux.org/man/mlock.2) — which also issues
-  `madvise(MADV_NOCORE)` on FreeBSD/DragonFly — plus the same `mprotect(PROT_NONE)` window discipline described
-  above. `memfd_secret` and `MADV_DONTDUMP` are Linux-only, so `supports_memfd_secret()`
-  returns `false` here and the allocation uses `malloc_sized` — the same path Linux takes when the kernel lacks `memfd_secret`.
-
-Locking is best-effort in one respect: on the `malloc_sized` path `memsec` discards the return
-value of `mlock`, so exhausting `RLIMIT_MEMLOCK` does not fail construction — the allocation is
-still `mprotect`ed (and a `memfd_secret` allocation is never `mlock`ed at all, see above). The
-constructors return `Error::LockFailed` when that `mprotect` fails, and a failed re-lock after
-an `unlock*` scope panics in every profile rather than silently leaving the memory readable.
+`mlock` is best-effort: `memsec` ignores its return value, so hitting `RLIMIT_MEMLOCK` still constructs. `mprotect` failure is `Error::LockFailed`. A failed re-lock after an `unlock*` scope panics in every profile.
 
 ## Usage
 
@@ -103,15 +88,7 @@ secure_array.unlock_mut(|unlocked_slice| {
 
 ### Binary codec
 
-`serde_json` cannot be made to leave no traces, and the parts that leak belong to the format
-rather than to serde: its `Deserializer` keeps a private `scratch: Vec<u8>` that it reuses for
-every escaped string and never zeroizes, `from_reader` copies *every* string into that scratch,
-`Value` deserializes a whole document into plain `String`s, and its error formatting renders
-`string "…the plaintext…"` into the message.
-
-The `codec` feature adds a small binary format implemented as a `serde::Serializer` and a
-`serde::Deserializer`. Your `#[derive(Serialize, Deserialize)]` and `#[serde(...)]` attributes
-work unchanged, and no dependency is added beyond `serde` itself:
+The `codec` feature is a small binary `serde` format. Encode goes into locked memory; decode reads out of it. `#[derive(Serialize, Deserialize)]` and `#[serde(...)]` work as usual. No extra dependency beyond `serde`.
 
 ```rust
 # #[cfg(feature = "codec")] {
@@ -146,31 +123,11 @@ assert!(decoded.contacts.is_empty()); // `skip_serializing` -> `default`
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-`encode` returns a `SecureBytes`, so the result is locked while unused and wiped on drop;
-`decode` unlocks it only for the duration of the decode and re-locks it afterwards, even on
-the error path. Types are written as raw binary — a `SecureArray<u8, 32>` is 32 bytes, not
-64 hex characters — and strings carry no escaping pass, so there is no scratch copy of an
-unescaped string to survive anywhere.
+`encode` returns a `SecureBytes`. `decode` unlocks only for the parse and re-locks afterwards, including on error. Types are raw binary — a `SecureArray<u8, 32>` is 32 bytes — and strings are not escaped, so there is no scratch copy of an unescaped string.
 
-**Evolving a stored format.** `FORMAT_VERSION` is the first byte of every document, and a
-reader refuses a version it does not recognise rather than guessing. Adding a field with
-`#[serde(default)]` does *not* need a version bump: struct fields are tagged by name and each
-one carries its own length, so a reader that does not know a field skips it whole and a field
-the writer omitted falls back to its default. Changing a field's *type* does need one.
+**Format evolution.** `FORMAT_VERSION` is the first byte. An unknown version is refused. Adding a field with `#[serde(default)]` does not need a bump: fields are named and length-prefixed, so unknown fields are skipped and missing ones take their default. Changing a field's type does need a bump.
 
-**Not supported.** The format carries no type tags, so `deserialize_any` cannot be
-implemented and anything built on it fails with `DecodeError::Unsupported` rather than
-guessing: `#[serde(flatten)]`, `#[serde(untagged)]`, and `Value`-shaped fields. Note the
-asymmetry for untagged enums — an untagged variant *serializes* fine (writing one needs no
-tag) but cannot be read back, so a successful `encode` is not on its own a promise that the
-value is decodable.
-
-**Cost.** Decoding locks memory per secure allocation, so a decode is dominated by
-`mprotect`/`mlock` syscalls rather than by parsing: a small vault-shaped payload measures
-~0.7 ms per decode in a release build with `use_os`, against a few microseconds with locking
-disabled (`--no-default-features`) — roughly two orders of magnitude. Irrelevant for a one-shot
-unlock, worth knowing before decoding in a loop. Measured on one machine, so read the figures as
-orders of magnitude rather than as a benchmark.
+**Not supported.** No type tags, so `deserialize_any` is unimplemented. `#[serde(flatten)]`, `#[serde(untagged)]`, and `Value`-shaped fields fail with `DecodeError::Unsupported`. Untagged enums can still serialize; they cannot be read back.
 
 ## See also the [examples](/examples/).
 
@@ -185,63 +142,12 @@ orders of magnitude rather than as a benchmark.
 
 ## Security notes
 
-- **Serialization writes plaintext.** `Serialize` cannot wipe the buffer the serializer
-  builds for it: `serde_json::to_string`/`to_vec` leave the plaintext in an ordinary
-  `String`/`Vec` that nothing zeroizes, so zeroize that buffer yourself if you call them, or
-  wire the serializer around `SecureBytesWriter` so the plaintext only ever lives in locked
-  memory that is zeroized on drop. Better still, use the [binary codec](#binary-codec)
-  (feature `codec`), which has no such gap to begin with.
-- **Deserializing reads from a buffer you own.** `serde_json::from_str`/`from_slice` take a
-  plain `&str`/`&[u8]`, and nothing can wipe that input for you. Parse from inside the locked
-  buffer instead — `locked.unlock_slice(|json| serde_json::from_slice::<Vault>(json))` — so
-  the plaintext is unlocked only for the duration of the parse. Note that when a JSON string
-  contains escape sequences, `serde_json` unescapes it into an internal scratch buffer of its
-  own before handing it over; that copy is not ours to erase (strings without escapes are read
-  straight out of your input). The `codec` decoder has no such scratch: it hands over borrowed
-  slices with `visit_str`/`visit_bytes` and never `visit_borrowed_*`, so nothing it produces
-  can outlive the unlock window.
-- **The codec never puts payload bytes in an error.** Every `DecodeError` and `EncodeError` is
-  built from a length, an index or a `&'static str`, and the one variant of each that an impl
-  can steer — `DecodeError::Custom` and `EncodeError::Custom` — carries no message at all.
-  serde's own `unknown_variant` / `unknown_field` helpers, and any `Serialize`/`Deserialize`
-  impl calling `Error::custom`, build that text by formatting data that came out of the document
-  or out of the value being written, so discarding it is what keeps a name — or a secret — from
-  reaching a log. That is deliberately unlike serde's `Unexpected::Str(s)`, which renders
-  `string "…the value…"` — exactly the sort of thing that ends up in a log or a crash report.
-- **Deserializing into plain fields re-opens the hole.** The codec removes the format's own
-  leaks; it cannot remove yours. A struct holding `String`/`Vec<u8>` fields deserializes those
-  fields into unprotected memory that nothing wipes. Make the persisted fields the secure
-  types (`SecureString`, `SecureVec<u8>`, `SecureArray<u8, LENGTH>`); they implement
-  `Deserialize`, so the derives work unchanged.
-- **Owned buffers a deserializer hands over are wiped.** When a format gives up ownership of a
-  `String`/`Vec<u8>` (`visit_string`/`visit_byte_buf`), the contents are copied into locked
-  memory and the buffer is zeroized before it is released, instead of being dropped with the
-  plaintext still inside.
-- **Leaking a `Drain` still skips drops.** `SecureVec::drain` unlocks the memory only while
-  an item is read and while the iterator compacts the vector, so a `core::mem::forget`ped
-  iterator leaves the memory locked but the elements left in the drained range are never
-  dropped or zeroized, and the length stays at the drain start. Consume or drop the iterator.
-- **`clear()` does not wipe.** `SecureVec::clear` only sets the length to zero the bytes
-  are still there. Use `erase()` to zeroize the contents.
-- **`SecureArray::empty()` has a strict contract.** Only the elements that were actually
-  written are tracked as initialized, so dropping a partially-filled array never reads the
-  unwritten slots. Those slots are not valid `T`s though: fill the whole array (for example
-  via `unlock_mut`) before reading it.
+- **Serialization writes plaintext.** `serde_json::to_string`/`to_vec` leave the document in an ordinary `String`/`Vec` that nothing wipes. Zeroize that buffer yourself, write through `SecureBytesWriter`, or use the [binary codec](#binary-codec).
+- **Deserialization reads a buffer you own.** `serde_json::from_str`/`from_slice` take a plain `&str`/`&[u8]`. Parse from inside locked memory (`locked.unlock_slice(|json| serde_json::from_slice::<Vault>(json))`) so the input is unlocked only for the parse. Escaped JSON strings still land in `serde_json`'s own scratch buffer, which this crate cannot wipe. The codec decoder has no such scratch.
 
 ## Running tests
 
-The suite lives in `tests/`, one integration crate per source module — `tests/vec.rs`, `tests/array.rs`,
-`tests/string.rs`, `tests/writer.rs`, `tests/crate_level.rs`, and `tests/codec.rs` plus
-`tests/codec_encoder.rs` / `tests/codec_decoder.rs` / `tests/codec_format.rs` for the binary codec.
-Because each file is its own crate, those tests see only the **public API**, which doubles as a check
-that nothing internal leaked into it.
-
-The tests that cannot work that way stay in `tests` modules inside `src/`: the `patch_at` internals, the
-memory-protection checks, the varint helpers, and the crash tests that spawn a child process — a fault on
-locked memory kills the process, so the child either dies with a `SIGSEGV` (proving the protection holds for
-a leaked `Drain` or a direct dereference) or exits cleanly (proving a never-initialized drop is sound) without
-taking the test runner down with it. They read `pub(crate)` state or a private field. Shared fixtures and the
-owned-input deserializers live in `tests/common/`.
+Public-API tests live in `tests/` (one integration crate per module). Internals, memory-protection checks, and crash tests that spawn a child stay in `src/` — a fault on locked memory kills the process, so they run in a child. Shared fixtures are in `tests/common/`.
 
 ```bash
 cargo test                                          # default features
