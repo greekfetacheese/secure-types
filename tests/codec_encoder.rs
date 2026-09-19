@@ -675,3 +675,48 @@ fn test_encode_errors_never_echo_payload_bytes() {
       );
    }
 }
+
+/// A `Serialize` impl's own rejection message must not reach the error either.
+///
+/// `serde::ser::Error::custom` is the only way an impl can attach text, and it is free to
+/// format a secret into that text — which is exactly why the codec must not keep it. This is
+/// the encode-side counterpart of the decoder's `test_wire_names_never_reach_the_error_message`;
+/// before `Custom` lost its payload the marker below was rendered by both `Display` and `Debug`.
+#[test]
+fn test_a_serialize_impls_rejection_message_never_reaches_the_error() {
+   const MARKER: &str = "SEED-PHRASE-MARKER-ENCODE-CUSTOM";
+
+   struct RejectsWithTheSecret;
+
+   impl Serialize for RejectsWithTheSecret {
+      fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+      where
+         S: ser::Serializer,
+      {
+         // A hand-written impl can put payload into its message; the codec discards it
+         // rather than render it, so nothing reaches a log.
+         let _ = serializer;
+         Err(ser::Error::custom(format!(
+            "refusing to encode {MARKER}"
+         )))
+      }
+   }
+
+   // `SecureBytes` deliberately does not implement `Debug`, so `unwrap_err()` is unavailable.
+   let error = match secure_types::encode(&RejectsWithTheSecret) {
+      Ok(_) => panic!("a rejected value should not encode"),
+      Err(error) => error,
+   };
+
+   assert!(
+      matches!(&error, EncodeError::Custom),
+      "expected the message-free `Custom` variant, got {error:?}"
+   );
+
+   for form in [error.to_string(), format!("{error:?}")] {
+      assert!(
+         !form.contains(MARKER),
+         "the encode error echoed the impl's message: {form}"
+      );
+   }
+}

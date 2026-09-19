@@ -3,9 +3,6 @@
 
 use core::fmt;
 
-#[cfg(not(feature = "use_os"))]
-use alloc::string::{String, ToString};
-
 use zeroize::Zeroize;
 
 use crate::{Error, SecureBytes};
@@ -101,6 +98,11 @@ pub(crate) fn read_varint(buf: &[u8], pos: &mut usize) -> Result<usize, DecodeEr
 }
 
 /// Why encoding a value into the binary format failed.
+///
+/// Every variant is built from a length or a `&'static str`, and the one variant a
+/// `Serialize` impl can steer — [`Custom`](Self::Custom) — deliberately carries no message,
+/// for the same reason [`DecodeError::Custom`] does: the text is the impl's own, and a
+/// hand-written one is free to format a secret into it.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum EncodeError {
@@ -123,7 +125,11 @@ pub enum EncodeError {
    /// The value's `Serialize` impl asked for something the format cannot express.
    Unsupported(&'static str),
    /// The value's `Serialize` impl rejected the value.
-   Custom(String),
+   ///
+   /// Carries no message on purpose: it is the text the impl passed to
+   /// `serde::ser::Error::custom`, and a hand-written impl is free to format payload —
+   /// a secret included — into it. Discarding it is what keeps that text out of a log.
+   Custom,
 }
 
 impl fmt::Display for EncodeError {
@@ -139,7 +145,7 @@ impl fmt::Display for EncodeError {
             "A container declared a different number of elements than it wrote"
          ),
          Self::Unsupported(what) => write!(f, "The binary codec does not support {what}"),
-         Self::Custom(message) => write!(f, "Failed to encode the value: {message}"),
+         Self::Custom => write!(f, "Failed to encode the value"),
       }
    }
 }
@@ -151,7 +157,7 @@ impl core::error::Error for EncodeError {
          Self::LengthOverflow
          | Self::ElementCountMismatch
          | Self::Unsupported(_)
-         | Self::Custom(_) => None,
+         | Self::Custom => None,
       }
    }
 }
@@ -245,8 +251,12 @@ impl fmt::Display for DecodeError {
 impl core::error::Error for DecodeError {}
 
 impl serde::ser::Error for EncodeError {
-   fn custom<T: fmt::Display>(msg: T) -> Self {
-      Self::Custom(msg.to_string())
+   /// The message is deliberately dropped rather than stored. It is the `Serialize` impl's own
+   /// text, so it can contain payload — a secret included — and there is nothing to redact
+   /// because nothing is kept. Symmetric with the [`DecodeError`] impl below; see
+   /// [`EncodeError::Custom`].
+   fn custom<T: fmt::Display>(_msg: T) -> Self {
+      Self::Custom
    }
 }
 

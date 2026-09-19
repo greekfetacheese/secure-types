@@ -41,7 +41,7 @@ fn test_every_error_variant_renders() {
       EncodeError::LengthOverflow,
       EncodeError::ElementCountMismatch,
       EncodeError::Unsupported("a bespoke Serialize trait"),
-      EncodeError::Custom("a Serialize impl rejected the value".to_owned()),
+      EncodeError::Custom,
    ];
 
    for error in encode_variants {

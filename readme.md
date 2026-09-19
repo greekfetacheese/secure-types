@@ -196,14 +196,14 @@ Irrelevant for a one-shot unlock, worth knowing before decoding in a loop.
   straight out of your input). The `codec` decoder has no such scratch: it hands over borrowed
   slices with `visit_str`/`visit_bytes` and never `visit_borrowed_*`, so nothing it produces
   can outlive the unlock window.
-- **The codec never puts payload bytes in an error.** Every `DecodeError` is built from a
-  length, an index or a `&'static str`, and the one variant a `Deserialize` impl can steer —
-  `DecodeError::Custom` — carries no message at all. serde's own `unknown_variant` /
-  `unknown_field` helpers (and any hand-written impl) build their text by formatting data read
-  out of the document, so discarding it is what keeps a name — a secret, if a field's type
-  changed between writes — from reaching a log. That is deliberately unlike serde's
-  `Unexpected::Str(s)`, which renders `string "…the value…"` — exactly the sort of thing that
-  ends up in a log or a crash report.
+- **The codec never puts payload bytes in an error.** Every `DecodeError` and `EncodeError` is
+  built from a length, an index or a `&'static str`, and the one variant of each that an impl
+  can steer — `DecodeError::Custom` and `EncodeError::Custom` — carries no message at all.
+  serde's own `unknown_variant` / `unknown_field` helpers, and any `Serialize`/`Deserialize`
+  impl calling `Error::custom`, build that text by formatting data that came out of the document
+  or out of the value being written, so discarding it is what keeps a name — or a secret — from
+  reaching a log. That is deliberately unlike serde's `Unexpected::Str(s)`, which renders
+  `string "…the value…"` — exactly the sort of thing that ends up in a log or a crash report.
 - **Deserializing into plain fields re-opens the hole.** The codec removes the format's own
   leaks; it cannot remove yours. A struct holding `String`/`Vec<u8>` fields deserializes those
   fields into unprotected memory that nothing wipes. Make the persisted fields the secure
