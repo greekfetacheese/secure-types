@@ -134,6 +134,9 @@ impl<T: Zeroize> SecureVec<T> {
    pub fn new() -> Result<Self, Error> {
       let capacity = 1;
       let size = capacity * mem::size_of::<T>();
+      // SAFETY: `alloc` is `unsafe` only as a raw-allocation marker — it has no
+      // preconditions beyond rejecting a zero `size`, and returns a pointer
+      // aligned for `T`.
       let ptr = unsafe { alloc::<T>(size)? };
 
       let secure = SecureVec {
@@ -159,11 +162,12 @@ impl<T: Zeroize> SecureVec<T> {
          capacity = 1;
       }
 
-      capacity
+      let size = capacity
          .checked_mul(size_of::<T>())
          .ok_or(Error::AllocationFailed)?;
 
-      let size = capacity * mem::size_of::<T>();
+      // SAFETY: as in `new` — `alloc` has no preconditions beyond a non-zero
+      // `size`, and `size` here is `capacity * size_of::<T>()` for `capacity >= 1`.
       let ptr = unsafe { alloc::<T>(size)? };
 
       let secure = SecureVec {
@@ -203,6 +207,9 @@ impl<T: Zeroize> SecureVec<T> {
          }
       };
 
+      // SAFETY: `alloc` is `unsafe` only as a raw-allocation marker — it has no
+      // preconditions beyond rejecting a zero `size`. `size` is
+      // `capacity * size_of::<T>()` for `capacity >= 1`.
       let ptr = match unsafe { alloc::<T>(size) } {
          Ok(ptr) => ptr,
          Err(_) => {
@@ -215,6 +222,11 @@ impl<T: Zeroize> SecureVec<T> {
       // This correctly transfers ownership for non-Copy types (e.g. structs containing String).
       // We then zero the *bytes* of the source buffer (after moving values out) to avoid
       // leaving sensitive data, and prevent double-drop by clearing the vec length.
+      //
+      // SAFETY: `len <= capacity` elements are initialized in `vec`, and `dst`
+      // points at a fresh allocation of at least `capacity` elements. Each slot is
+      // moved (read + write), never duplicated, and `vec`'s length is zeroed right
+      // after so it cannot drop them again.
       unsafe {
          let src = vec.as_ptr();
          let dst = ptr.as_ptr();
@@ -232,6 +244,8 @@ impl<T: Zeroize> SecureVec<T> {
       // via ptr::read. The normal Vec::zeroize impl would zeroize+drop the
       // moved-from elements, which is UB (and often SIGABRT for a non-copy type).
       let old_byte_size = capacity * mem::size_of::<T>();
+      // SAFETY: every element in `0..len` was moved out above, so `len` must be
+      // zero before `vec` is dropped; the buffer stays owned by `vec`.
       unsafe {
          vec.set_len(0);
       }
@@ -372,6 +386,13 @@ impl<T: Zeroize> SecureVec<T> {
    }
 
    /// Immutable access to the `SecureVec`
+   ///
+   /// # Re-entrancy
+   ///
+   /// The closure must not call another `unlock*` method on this vector: the
+   /// pages are unprotected once and re-protected when this call returns, so a
+   /// nested unlock would re-lock the memory while the inner scope is still
+   /// reading it. The same holds for every `unlock*` method.
    pub fn unlock<F, R>(&self, f: F) -> R
    where
       F: FnOnce(&SecureVec<T>) -> R,
@@ -386,6 +407,9 @@ impl<T: Zeroize> SecureVec<T> {
       F: FnOnce(&[T]) -> R,
    {
       let _guard = UnlockGuard::new(self);
+      // SAFETY: the guard unprotects the live allocation, `len` counts only
+      // initialized elements, so the slice is in bounds and never reads an
+      // uninitialised slot; `&self` rules out a concurrent `&mut`.
       let slice = unsafe { core::slice::from_raw_parts(self.ptr.as_ptr(), self.len) };
       f(slice)
    }
@@ -395,6 +419,8 @@ impl<T: Zeroize> SecureVec<T> {
    where
       F: FnOnce(&mut [T]) -> R,
    {
+      // SAFETY: `&mut self` guarantees exclusive access, the guard unprotects
+      // the live allocation, and `len` counts only initialized elements.
       unsafe {
          let _guard = UnlockGuard::new(self);
          let slice = core::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len);
@@ -407,6 +433,8 @@ impl<T: Zeroize> SecureVec<T> {
    where
       F: FnOnce(core::slice::Iter<T>) -> R,
    {
+      // SAFETY: as in `unlock_slice` — the guard unprotects the live allocation
+      // and `len` counts only initialized elements.
       unsafe {
          let _guard = UnlockGuard::new(self);
          let slice = core::slice::from_raw_parts(self.ptr.as_ptr(), self.len);
@@ -420,6 +448,8 @@ impl<T: Zeroize> SecureVec<T> {
    where
       F: FnOnce(core::slice::IterMut<T>) -> R,
    {
+      // SAFETY: `&mut self` gives exclusive access; the guard unprotects the
+      // live allocation and `len` counts only initialized elements.
       unsafe {
          let _guard = UnlockGuard::new(self);
          let slice = core::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len);
@@ -435,10 +465,10 @@ impl<T: Zeroize> SecureVec<T> {
       {
          let _guard = UnlockGuard::new(self);
 
+         // SAFETY: the guard unprotects the live allocation; only the `len`
+         // initialized elements are exposed, so uninitialised capacity is never
+         // read as a `T`.
          unsafe {
-            // Only zero the initialized elements. Zeroizing capacity would try to
-            // zeroize uninitialized memory as T, which for Drop types (eg. String)
-            // is UB and causes SIGSEGV/SIGABRT.
             let slice = core::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len);
             for elem in slice.iter_mut() {
                elem.zeroize();
@@ -465,6 +495,9 @@ impl<T: Zeroize> SecureVec<T> {
       {
          let _guard = UnlockGuard::new(self);
 
+         // SAFETY: `write_at == self.len` and `reserve(1)` above guaranteed
+         // `len < capacity`, so the slot is in bounds; it is uninitialised, and
+         // `ptr::write` does not read it. `value` is moved in exactly once.
          unsafe {
             core::ptr::write(dst.add(write_at), value);
          }
@@ -499,6 +532,9 @@ impl<T: Zeroize> SecureVec<T> {
       {
          let _guard = UnlockGuard::new(self);
 
+         // SAFETY: `try_reserve` above made room for `src.len()` more elements,
+         // so every `dst.add(write_at + i)` is an uninitialised in-bounds slot;
+         // `ptr::write` never reads it. `len` is committed only after the loop.
          unsafe {
             for (i, item) in src.iter().enumerate() {
                core::ptr::write(dst.add(write_at + i), item.clone());
@@ -551,9 +587,16 @@ impl<T: Zeroize> SecureVec<T> {
          .checked_mul(mem::size_of::<T>())
          .ok_or(Error::AllocationFailed)?;
 
+      // SAFETY: `alloc` has no preconditions beyond a non-zero `size`; `new_size`
+      // is `new_capacity * size_of::<T>()` and `new_capacity >= required > capacity`.
       let new_ptr = unsafe { alloc::<T>(new_size)? };
 
       // Copy data to new pointer
+      // SAFETY: `new_ptr` is a fresh allocation of `new_capacity >= self.len`
+      // elements. Each initialized element is moved (read + write) into it, so
+      // ownership transfers exactly once; the old buffer's bytes are wiped and
+      // then freed with the layout `alloc` used. `self.ptr`/`capacity` are
+      // updated only after this block.
       unsafe {
          let ok = self.unlock_memory();
          debug_assert!(ok, "SecureVec::try_reserve: unlock_memory failed");
@@ -640,6 +683,10 @@ impl<T: Zeroize> SecureVec<T> {
       {
          let _guard = UnlockGuard::new(self);
 
+         // SAFETY: `src.len() <= self.capacity` (asserted above), so every
+         // `dst.add(i)` is an uninitialised in-bounds slot; the guard unprotects
+         // the allocation and `ptr::write` never reads the destination. `len` is
+         // committed only after the loop.
          unsafe {
             let dst = self.ptr.as_ptr();
             for (i, item) in src.iter().enumerate() {
@@ -698,6 +745,9 @@ impl SecureVec<u8> {
 }
 
 impl<T: Clone + Zeroize> Clone for SecureVec<T> {
+   /// # Panics
+   ///
+   /// Panics if the clone's secure allocation cannot be made or locked.
    fn clone(&self) -> Self {
       let mut new_vec = SecureVec::new_with_capacity(self.capacity).unwrap();
       self.unlock_slice(|src_slice| {
@@ -708,6 +758,9 @@ impl<T: Clone + Zeroize> Clone for SecureVec<T> {
 }
 
 impl<T: Clone + Zeroize, const LENGTH: usize> From<SecureArray<T, LENGTH>> for SecureVec<T> {
+   /// # Panics
+   ///
+   /// Panics if the new secure allocation cannot be made or locked.
    fn from(array: SecureArray<T, LENGTH>) -> Self {
       let mut new_vec = SecureVec::new_with_capacity(LENGTH)
          .expect("Failed to allocate SecureVec during conversion");
@@ -720,13 +773,13 @@ impl<T: Clone + Zeroize, const LENGTH: usize> From<SecureArray<T, LENGTH>> for S
 
 impl<T: Zeroize> Drop for SecureVec<T> {
    fn drop(&mut self) {
+      // SAFETY: `drop` has exclusive ownership; `unlock_memory` restores access.
+      // Only the `len` initialized elements are touched — zeroizing the
+      // uninitialised capacity would interpret poison bytes as a `T`.
       unsafe {
          let ok = self.unlock_memory();
          debug_assert!(ok, "SecureVec::drop: unlock_memory failed");
 
-         // Only zero the initialized elements. Zeroizing capacity would try to
-         // zeroize uninitialized memory as T, which for Drop types (eg. String)
-         // is UB and causes SIGSEGV/SIGABRT.
          let slice = core::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len);
          for elem in slice.iter_mut() {
             elem.zeroize();
@@ -737,11 +790,11 @@ impl<T: Zeroize> Drop for SecureVec<T> {
       free(self.ptr);
 
       #[cfg(not(feature = "use_os"))]
+      // SAFETY: `allocated_byte_size()` is the full allocation size, still owned
+      // here and unprotected above; the `Layout` matches the one `alloc` used.
+      // Byte-wiping it also removes anything a `clear()` left behind, which
+      // `use_os` gets from `memsec::free` instead.
       unsafe {
-         // `T::zeroize()` above only covers the initialized elements. Wipe the
-         // bytes of the whole allocation as well, so anything a `clear()` left
-         // behind (and the spare capacity) is gone before the allocator gets the
-         // memory back. Without `use_os` there is no `memsec::free` doing it.
          let byte_size = self.allocated_byte_size();
          let bytes = core::slice::from_raw_parts_mut(self.ptr.as_ptr() as *mut u8, byte_size);
          bytes.zeroize();
@@ -1013,6 +1066,10 @@ impl<'a, T: Zeroize> Iterator for Drain<'a, T> {
       // this returns — and stays locked if the iterator is forgotten.
       let _guard = UnlockGuard::new(&*self.vec_ref);
 
+      // SAFETY: `current_drain_iter_index < drain_end_index <= original len`, so
+      // this is an initialized element of the live allocation, unprotected by the
+      // guard. It is moved out (never duplicated): the index advances so the slot
+      // is not read again, and `compact` treats its old bits as moved-from.
       let item = unsafe { ptr::read(base.add(self.current_drain_iter_index)) };
       self.current_drain_iter_index += 1;
 
@@ -1040,6 +1097,11 @@ impl<'a, T: Zeroize> Drain<'a, T> {
 
       let _guard = UnlockGuard::new(&*self.vec_ref);
 
+      // SAFETY: the guard unprotects the live vector. Every index is within the
+      // original length; unyielded drain-range elements are dropped exactly once,
+      // the tail is moved (not copied) into the hole, and the leftover slots hold
+      // only moved-from / duplicate bit patterns — wiped as bytes, never
+      // reinterpreted as a `T`.
       unsafe {
          // Drop drain-range elements that were never yielded. `next` already
          // `ptr::read` them out to the caller; dropping those again would
@@ -1192,6 +1254,8 @@ mod tests {
 
       let ok = secure.unlock_memory();
       assert!(ok);
+      // SAFETY: test-only — the memory was just unlocked above, and the three
+      // slots were erased, so reading them is valid and must show zeros.
       unsafe {
          let slice = core::slice::from_raw_parts(secure.ptr.as_ptr(), 3);
          assert_eq!(slice, &[0, 0, 0]);
@@ -1260,8 +1324,9 @@ mod tests {
          let drain = secure.drain(..3);
          core::mem::forget(drain);
 
-         // A leaked `Drain` must not leave the vector exposed: this read is
-         // expected to fault because the memory is still locked.
+         // SAFETY (test-only): a leaked `Drain` must not leave the vector
+         // exposed, so this deliberately reads a locked, `PROT_NONE` page and is
+         // expected to fault (the child process dies with SIGSEGV).
          let _value = unsafe { core::hint::black_box(*secure.ptr.as_ptr()) };
 
          std::process::exit(1);
@@ -1322,8 +1387,9 @@ mod tests {
       if std::env::args().any(|a| a == arg) {
          let vec: Vec<u8> = vec![1, 2, 3];
          let secure = SecureVec::from_vec(vec).unwrap();
-         // Deliberately dereference the locked pointer to test that
-         // the security model (mlock + no normal access) works as expected.
+         // SAFETY (test-only): deliberately dereferences the locked pointer to
+         // prove the security model (mlock + `PROT_NONE`) works — the child process
+         // is expected to die with SIGSEGV.
          let _value = unsafe { core::hint::black_box(*secure.ptr.as_ptr()) };
 
          std::process::exit(1);

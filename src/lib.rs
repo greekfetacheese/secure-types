@@ -121,6 +121,8 @@ pub fn supports_memfd_secret() -> bool {
          MEMFD_YES => true,
          MEMFD_NO => false,
          _ => {
+            // SAFETY: probes `memfd_secret` with no flags and no pointers; any
+            // returned fd is closed immediately.
             let supported = unsafe {
                use libc::{SYS_memfd_secret, close, syscall};
                let res = syscall(SYS_memfd_secret as _, 0isize);
@@ -164,6 +166,8 @@ pub(crate) unsafe fn alloc<T>(size: usize) -> Result<NonNull<T>, Error> {
       }
 
       #[cfg(windows)]
+      // SAFETY: `size != 0` was checked above; `malloc_sized` returns either a
+      // valid pointer to `size` bytes or `None`, and the pointer is re-checked.
       unsafe {
          let allocated_ptr = memsec::malloc_sized(size);
          let non_null = allocated_ptr.ok_or(Error::AllocationFailed)?;
@@ -198,6 +202,8 @@ pub(crate) unsafe fn alloc<T>(size: usize) -> Result<NonNull<T>, Error> {
          #[cfg(target_os = "linux")]
          {
             let ptr_opt = if supports_memfd_secret() {
+               // SAFETY: `memsec` allocation of the byte count computed above;
+               // its result is checked for null before use.
                unsafe { memsec::memfd_secret_sized(alloc_size) }
             } else {
                None
@@ -211,14 +217,22 @@ pub(crate) unsafe fn alloc<T>(size: usize) -> Result<NonNull<T>, Error> {
                   "allocator returned a pointer not aligned for the usize header tag"
                );
 
-               // Write the MEMFD tag
+               // SAFETY: `raw_ptr` is `memsec`'s user pointer for a live
+               // `alloc_size`-byte allocation, aligned for a `usize` (asserted
+               // above). The tag goes at offset 0 and the user region starts at
+               // `header_offset`, which `alloc_size` reserves — both in bounds.
                unsafe { *(raw_ptr as *mut usize) = ALLOC_TAG_MEMFD };
 
+               // SAFETY: `header_offset <= alloc_size`, so the offset pointer
+               // stays inside the allocation.
                let user_ptr = unsafe { raw_ptr.add(header_offset) as *mut T };
                return NonNull::new(user_ptr).ok_or(Error::NullAllocation);
             }
          }
 
+         // SAFETY: as in the memfd branch — `memsec`'s user pointer for an
+         // `alloc_size`-byte allocation, aligned for the `usize` tag, with the tag
+         // at offset 0 and the user region at `header_offset`.
          unsafe {
             let allocated_ptr = memsec::malloc_sized(alloc_size);
             let non_null = allocated_ptr.ok_or(Error::AllocationFailed)?;
@@ -241,12 +255,22 @@ pub(crate) unsafe fn alloc<T>(size: usize) -> Result<NonNull<T>, Error> {
 
    #[cfg(not(feature = "use_os"))]
    {
+      // `alloc::alloc::alloc` requires a non-zero-size layout, so a zero-sized
+      // `T` (a ZST, where `capacity * size_of::<T>() == 0`) must be rejected
+      // rather than handed to it. `use_os` refuses the same input.
+      if size == 0 {
+         return Err(Error::SizeCannotBeZero);
+      }
+
       let layout = core::alloc::Layout::from_size_align(size, core::mem::align_of::<T>())
          .map_err(|_| Error::AlignmentFailed)?;
+      // SAFETY: `size != 0` was checked just above, so the `Layout` is valid for
+      // `alloc`, which returns either an aligned pointer or null.
       let ptr = unsafe { alloc::alloc::alloc(layout) as *mut T };
       if ptr.is_null() {
          return Err(Error::NullAllocation);
       }
+      // SAFETY: the null case returned above, so `ptr` is non-null.
       unsafe { Ok(NonNull::new_unchecked(ptr)) }
    }
 }
@@ -254,6 +278,8 @@ pub(crate) unsafe fn alloc<T>(size: usize) -> Result<NonNull<T>, Error> {
 #[cfg(feature = "use_os")]
 pub(crate) fn free<T>(ptr: NonNull<T>) {
    #[cfg(windows)]
+   // SAFETY: `ptr` was returned by `memsec::malloc_sized` in `alloc` and is freed
+   // exactly once here, so `memsec::free` receives the pointer it handed out.
    unsafe {
       memsec::free(ptr);
    }
@@ -262,6 +288,10 @@ pub(crate) fn free<T>(ptr: NonNull<T>) {
    {
       let header_offset = get_header_offset::<T>();
 
+      // SAFETY: `ptr` is this allocation's user pointer, so `ptr - header_offset`
+      // is exactly the pointer `memsec` returned; `alloc` wrote the tag there, so
+      // reading it back and dispatching to the matching deallocator is sound. The
+      // allocation is freed exactly once (this consumes the `NonNull`).
       unsafe {
          let user_ptr = ptr.as_ptr() as *mut u8;
          let raw_ptr = user_ptr.sub(header_offset);
@@ -301,6 +331,9 @@ pub(crate) fn mprotect<T>(ptr: NonNull<T>, prot: Prot::Ty) -> bool {
    {
       // We need to protect the whole block, including the header.
       let header_offset = get_header_offset::<T>();
+      // SAFETY: `ptr - header_offset` is the pointer `memsec` returned (see
+      // `alloc`), which is what `memsec::mprotect` expects, and `prot` is a valid
+      // `Prot` value. The block stays allocated while `ptr` is live.
       unsafe {
          let raw_ptr = (ptr.as_ptr() as *mut u8).sub(header_offset);
          let raw_non_null = NonNull::new_unchecked(raw_ptr as *mut T);
@@ -310,6 +343,7 @@ pub(crate) fn mprotect<T>(ptr: NonNull<T>, prot: Prot::Ty) -> bool {
    }
    #[cfg(windows)]
    {
+      // SAFETY: `ptr` is a live `memsec` allocation and `prot` a valid `Prot`.
       unsafe { memsec::mprotect(ptr, prot) }
    }
 }

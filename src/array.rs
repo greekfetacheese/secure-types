@@ -127,6 +127,9 @@ where
          return Err(Error::LengthCannotBeZero);
       }
 
+      // SAFETY: `alloc` is `unsafe` only as a raw-allocation marker — it has no
+      // preconditions beyond rejecting a zero `size`, and returns a pointer
+      // aligned for `T`.
       let ptr = unsafe { alloc::<T>(size)? };
 
       let secure_array = SecureArray {
@@ -163,6 +166,11 @@ where
       {
          let _guard = UnlockGuard::new(&secure_array);
 
+         // SAFETY: the fresh allocation holds `LENGTH` uninitialised slots and
+         // the guard unprotects it. `content` has exactly `LENGTH` elements, so
+         // every `dst.add(i)` is in bounds, and `ptr::write` never reads the
+         // uninitialised destination. `initialized` is committed only after the
+         // loop, so a panic here still leaves the array sound.
          unsafe {
             let dst = secure_array.ptr.as_ptr();
             for (i, item) in content.iter().enumerate() {
@@ -189,6 +197,9 @@ where
       {
          let _guard = UnlockGuard::new(&secure_array);
 
+         // SAFETY: as in `from_slice_mut` — `LENGTH` uninitialised slots in a
+         // fresh allocation, `content` has exactly `LENGTH` elements, `ptr::write`
+         // never reads the destination, and `initialized` is committed afterwards.
          unsafe {
             let dst = secure_array.ptr.as_ptr();
             for (i, item) in content.iter().enumerate() {
@@ -263,12 +274,18 @@ where
    }
 
    /// Immutable access to the array's data as a `&[T]`
+   ///
+   /// The slice covers exactly the elements that have been initialized: `LENGTH`
+   /// for any array built through a constructor or `unlock_mut`, and empty for
+   /// an [`empty`](Self::empty) array that was never filled (see its contract).
    pub fn unlock<F, R>(&self, f: F) -> R
    where
       F: FnOnce(&[T]) -> R,
    {
       let _guard = UnlockGuard::new(self);
-      let slice = unsafe { core::slice::from_raw_parts(self.ptr.as_ptr(), LENGTH) };
+      // SAFETY: the guard unprotects the live allocation. Only the `initialized`
+      // written slots are exposed, so no uninitialised memory is read as a `T`.
+      let slice = unsafe { core::slice::from_raw_parts(self.ptr.as_ptr(), self.initialized) };
       f(slice)
    }
 
@@ -283,6 +300,10 @@ where
       self.initialized = LENGTH;
 
       let _guard = UnlockGuard::new(self);
+      // SAFETY: the guard unprotects the live allocation. Exposing all `LENGTH`
+      // slots as `&mut [T]` is `unlock_mut`'s documented contract — it treats
+      // every slot as initialized storage, which is why `initialized` is set to
+      // `LENGTH` above.
       let slice = unsafe { core::slice::from_raw_parts_mut(self.ptr.as_ptr(), LENGTH) };
       f(slice)
    }
@@ -291,9 +312,10 @@ where
    pub fn erase(&mut self) {
       let _guard = UnlockGuard::new(self);
 
+      // SAFETY: the guard unprotects the live allocation; only the `initialized`
+      // written slots are exposed as `&mut [T]`, so uninitialised memory is never
+      // interpreted as a `T`.
       unsafe {
-         // Only the initialized elements are zeroized: the slots after them are
-         // uninitialized and must not be interpreted as a `T`.
          let slice = core::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.initialized);
          for element in slice.iter_mut() {
             element.zeroize();
@@ -312,6 +334,9 @@ where
       {
          let _guard = UnlockGuard::new(self);
 
+         // SAFETY: `src.len() == LENGTH` is the caller's contract, so every
+         // `dst.add(i)` is in bounds of this fixed-size allocation, the guard
+         // unprotects it, and `ptr::write` never reads the unwritten destination.
          unsafe {
             let dst = self.ptr.as_ptr();
             for (i, item) in src.iter().enumerate() {
@@ -335,6 +360,8 @@ impl<T: Zeroize, const LENGTH: usize> Drop for SecureArray<T, LENGTH> {
       // array that was never filled) still holds the allocator's poison bytes in
       // the remaining slots, and interpreting those as a `T` would dereference
       // garbage.
+      // SAFETY: the memory was unprotected above; the slice covers only the
+      // `initialized` written slots.
       let slice = unsafe { core::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.initialized) };
       for element in slice.iter_mut() {
          element.zeroize();
@@ -349,11 +376,10 @@ impl<T: Zeroize, const LENGTH: usize> Drop for SecureArray<T, LENGTH> {
       free(self.ptr);
 
       #[cfg(not(feature = "use_os"))]
+      // SAFETY: `size` is the full allocation size (`LENGTH * size_of::<T>()`),
+      // the region was unprotected above and is still owned here, and the
+      // `Layout` below matches the one `alloc` used.
       unsafe {
-         // `T::zeroize()` above only covers the initialized elements. Wipe the
-         // bytes of the whole allocation as well, so spare / unwritten slots
-         // are gone before the allocator gets the memory back. Without
-         // `use_os` there is no `memsec::free` doing it.
          let bytes = core::slice::from_raw_parts_mut(self.ptr.as_ptr() as *mut u8, size);
          bytes.zeroize();
 
@@ -364,6 +390,9 @@ impl<T: Zeroize, const LENGTH: usize> Drop for SecureArray<T, LENGTH> {
 }
 
 impl<T: Clone + Zeroize, const LENGTH: usize> Clone for SecureArray<T, LENGTH> {
+   /// # Panics
+   ///
+   /// Panics if the clone's secure allocation cannot be made or locked.
    fn clone(&self) -> Self {
       let mut new_array = Self::empty().unwrap();
       self.unlock(|src_slice| {
@@ -651,8 +680,9 @@ mod tests {
       if std::env::args().any(|a| a == arg) {
          let exposed: &mut [u8; 3] = &mut [1, 2, 3];
          let array: SecureArray<u8, 3> = SecureArray::from_slice_mut(exposed).unwrap();
-         // Deliberately dereference the locked pointer to test that
-         // the security model works as expected.
+         // SAFETY (test-only): this deliberately dereferences a locked,
+         // `PROT_NONE` page to prove the access faults — the child process is
+         // expected to die with SIGSEGV, so the read never completes.
          let _value = unsafe { core::hint::black_box(*array.ptr.as_ptr()) };
 
          std::process::exit(1);

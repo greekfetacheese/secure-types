@@ -97,7 +97,11 @@ impl SecureString {
       self.vec.is_empty()
    }
 
-   /// Removes the specified range from the string
+   /// Removes the specified byte range from the string.
+   ///
+   /// `range` is a **byte** range, not a character range: take it from `&str`
+   /// byte offsets. For a character range use
+   /// [`delete_text_char_range`](Self::delete_text_char_range).
    ///
    /// # Panics
    /// Panics if the range is not on UTF-8 char boundaries.
@@ -162,6 +166,8 @@ impl SecureString {
       F: FnOnce(&str) -> R,
    {
       self.vec.unlock_slice(|slice| {
+         // SAFETY: this is the `unchecked` variant — the caller promised the
+         // internal bytes are valid UTF-8.
          let str = unsafe { core::str::from_utf8_unchecked(slice) };
          f(str)
       })
@@ -221,6 +227,12 @@ impl SecureString {
       let new_byte_len = {
          let _guard = UnlockGuard::new(&self.vec);
 
+         // SAFETY: the guard has unprotected `self.vec`'s live buffer for this
+         // block. `reserve(insert_len)` above guaranteed room for
+         // `old_byte_len + insert_len` bytes and `byte_idx <= old_byte_len`, so
+         // both the shifted tail and the inserted span stay inside the
+         // allocation. `ptr::copy` tolerates source/destination overlap; the
+         // `copy_nonoverlapping` source is `text_to_insert`, a distinct `&str`.
          unsafe {
             // Shift the "tail" of the string (from the insertion point to the end)
             // to the right to make a gap for the new content.
@@ -248,7 +260,10 @@ impl SecureString {
       chars_to_insert_count
    }
 
-   /// Deletes the text in the given character range
+   /// Deletes the text in the given **character** range.
+   ///
+   /// `char_range` is a char range, not a byte range — unlike
+   /// [`drain`](Self::drain), which takes byte offsets.
    ///
    /// # Example
    ///
@@ -267,6 +282,9 @@ impl SecureString {
       }
 
       let new_len = self.vec.unlock_slice_mut(|current_bytes| {
+         // SAFETY: `SecureString` upholds the invariant that its bytes are valid
+         // UTF-8 — every constructor but the `unsafe` `from_utf8_unchecked`
+         // validates it. `current_bytes` is that buffer, unlocked by the guard.
          let current_text = unsafe { core::str::from_utf8_unchecked(current_bytes) };
          let byte_start = char_to_byte_idx(current_text.as_bytes(), char_range.start);
          let byte_end = char_to_byte_idx(current_text.as_bytes(), char_range.end);
@@ -297,6 +315,11 @@ impl From<String> for SecureString {
    /// Creates a new `SecureString` from a `String`.
    ///
    /// The `String` is zeroized afterwards.
+   ///
+   /// # Panics
+   /// Panics if the secure allocation cannot be made or locked — `From` cannot
+   /// return an error. Use [`SecureVec::from_vec`] with
+   /// [`SecureString::try_from`] for a fallible path.
    fn from(s: String) -> SecureString {
       let vec = SecureVec::from_vec(s.into_bytes()).unwrap();
       SecureString { vec }
@@ -307,6 +330,10 @@ impl From<&str> for SecureString {
    /// Creates a new `SecureString` from a `&str`.
    ///
    /// The `&str` is not zeroized, you are responsible for zeroizing it.
+   ///
+   /// # Panics
+   /// Panics if the secure allocation cannot be made or locked — `From` cannot
+   /// return an error.
    fn from(s: &str) -> SecureString {
       let bytes = s.as_bytes();
       // new_with_capacity bumps 0 -> 1 internally, so empty &str is fine.
