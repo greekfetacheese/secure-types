@@ -119,7 +119,9 @@ where
    /// never be read as a `T`. Initialize the whole array (for example through
    /// [`unlock_mut`](Self::unlock_mut)) before accessing it.
    pub fn empty() -> Result<Self, Error> {
-      let size = LENGTH * mem::size_of::<T>();
+      let size = LENGTH
+         .checked_mul(mem::size_of::<T>())
+         .ok_or(Error::AllocationFailed)?;
       if size == 0 {
          // Cannot create a zero-sized secure array
          return Err(Error::LengthCannotBeZero);
@@ -158,29 +160,19 @@ where
          }
       };
 
-      let unlocked = secure_array.unlock_memory();
+      {
+         let _guard = UnlockGuard::new(&secure_array);
 
-      if !unlocked {
-         content.zeroize();
-         return Err(Error::UnlockFailed);
-      }
-
-      unsafe {
-         let dst = secure_array.ptr.as_ptr();
-         for (i, item) in content.iter().enumerate() {
-            core::ptr::write(dst.add(i), item.clone());
+         unsafe {
+            let dst = secure_array.ptr.as_ptr();
+            for (i, item) in content.iter().enumerate() {
+               core::ptr::write(dst.add(i), item.clone());
+            }
          }
       }
       secure_array.initialized = LENGTH;
 
       content.zeroize();
-
-      let _locked = secure_array.lock_memory();
-
-      #[cfg(feature = "use_os")]
-      if !_locked {
-         return Err(Error::LockFailed);
-      }
 
       Ok(secure_array)
    }
@@ -194,26 +186,17 @@ where
    {
       let mut secure_array = Self::empty()?;
 
-      let unlocked = secure_array.unlock_memory();
+      {
+         let _guard = UnlockGuard::new(&secure_array);
 
-      if !unlocked {
-         return Err(Error::UnlockFailed);
-      }
-
-      unsafe {
-         let dst = secure_array.ptr.as_ptr();
-         for (i, item) in content.iter().enumerate() {
-            core::ptr::write(dst.add(i), item.clone());
+         unsafe {
+            let dst = secure_array.ptr.as_ptr();
+            for (i, item) in content.iter().enumerate() {
+               core::ptr::write(dst.add(i), item.clone());
+            }
          }
       }
       secure_array.initialized = LENGTH;
-
-      let _locked = secure_array.lock_memory();
-
-      #[cfg(feature = "use_os")]
-      if !_locked {
-         return Err(Error::LockFailed);
-      }
 
       Ok(secure_array)
    }
@@ -306,8 +289,7 @@ where
 
    /// Securely erases the contents of the array by zeroizing the initialized elements.
    pub fn erase(&mut self) {
-      let ok = self.unlock_memory();
-      debug_assert!(ok, "SecureArray::erase: unlock_memory failed");
+      let _guard = UnlockGuard::new(self);
 
       unsafe {
          // Only the initialized elements are zeroized: the slots after them are
@@ -317,9 +299,6 @@ where
             element.zeroize();
          }
       }
-
-      let ok = self.lock_memory();
-      assert!(ok, "SecureArray::erase: lock_memory failed");
    }
 
    /// Same as `SecureVec::init_from_clone`, for the fixed-size buffer.
@@ -330,26 +309,19 @@ where
    {
       debug_assert_eq!(src.len(), LENGTH);
 
-      let ok = self.unlock_memory();
-      debug_assert!(
-         ok,
-         "SecureArray::init_from_clone: unlock_memory failed"
-      );
+      {
+         let _guard = UnlockGuard::new(self);
 
-      unsafe {
-         let dst = self.ptr.as_ptr();
-         for (i, item) in src.iter().enumerate() {
-            core::ptr::write(dst.add(i), item.clone());
+         unsafe {
+            let dst = self.ptr.as_ptr();
+            for (i, item) in src.iter().enumerate() {
+               core::ptr::write(dst.add(i), item.clone());
+            }
          }
       }
       // Commit only after every write succeeded, so a panic from `T::clone`
       // leaves the array with just the elements that were actually written.
       self.initialized = src.len();
-      let ok = self.lock_memory();
-      assert!(
-         ok,
-         "SecureArray::init_from_clone: lock_memory failed"
-      );
    }
 }
 
@@ -368,7 +340,7 @@ impl<T: Zeroize, const LENGTH: usize> Drop for SecureArray<T, LENGTH> {
          element.zeroize();
       }
 
-      let size = LENGTH * mem::size_of::<T>();
+      let size = LENGTH.checked_mul(mem::size_of::<T>()).unwrap_or(0);
       if size == 0 {
          return;
       }
@@ -378,6 +350,13 @@ impl<T: Zeroize, const LENGTH: usize> Drop for SecureArray<T, LENGTH> {
 
       #[cfg(not(feature = "use_os"))]
       unsafe {
+         // `T::zeroize()` above only covers the initialized elements. Wipe the
+         // bytes of the whole allocation as well, so spare / unwritten slots
+         // are gone before the allocator gets the memory back. Without
+         // `use_os` there is no `memsec::free` doing it.
+         let bytes = core::slice::from_raw_parts_mut(self.ptr.as_ptr() as *mut u8, size);
+         bytes.zeroize();
+
          let layout = Layout::from_size_align_unchecked(size, mem::align_of::<T>());
          alloc::alloc::dealloc(self.ptr.as_ptr() as *mut u8, layout);
       }
@@ -529,9 +508,9 @@ impl<'de, const LENGTH: usize> serde::Deserialize<'de> for SecureArray<u8, LENGT
          where
             E: serde::de::Error,
          {
-            let array = self.visit_bytes(&v)?;
+            let array = self.visit_bytes(&v);
             v.zeroize();
-            Ok(array)
+            array
          }
       }
 

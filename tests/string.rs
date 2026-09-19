@@ -104,6 +104,18 @@ fn test_delete_text_char_range() {
    });
 }
 
+/// An empty or out-of-range char range is a no-op: it must not set `len` to 0.
+#[test]
+fn test_delete_text_char_range_out_of_range_is_a_noop() {
+   let mut secure = SecureString::from("hello");
+
+   secure.delete_text_char_range(10..11);
+   secure.unlock_str(|value| assert_eq!(value, "hello"));
+
+   secure.delete_text_char_range(5..8);
+   secure.unlock_str(|value| assert_eq!(value, "hello"));
+}
+
 #[test]
 fn test_drain() {
    let hello_world = "Hello, world!";

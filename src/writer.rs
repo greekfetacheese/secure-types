@@ -45,7 +45,10 @@ impl<'a> SecureBytesWriter<'a> {
 
 impl Write for SecureBytesWriter<'_> {
    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-      self.bytes.extend_from_slice(buf);
+      self
+         .bytes
+         .extend_from_slice(buf)
+         .map_err(|error| io::Error::new(io::ErrorKind::OutOfMemory, error))?;
       Ok(buf.len())
    }
 
@@ -54,7 +57,10 @@ impl Write for SecureBytesWriter<'_> {
    ///
    /// [`write`]: Write::write
    fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
-      self.bytes.extend_from_slice(buf);
+      self
+         .bytes
+         .extend_from_slice(buf)
+         .map_err(|error| io::Error::new(io::ErrorKind::OutOfMemory, error))?;
       Ok(())
    }
 

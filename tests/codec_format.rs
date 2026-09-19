@@ -6,8 +6,8 @@ use secure_types::DecodeError;
 
 #[test]
 fn test_errors_are_log_safe() {
-   // Neither form may grow a payload from the input: that is the property
-   // that keeps `serde_json`'-style `string "…secret…"` messages impossible.
+   const MARKER: &str = "SECRET-MARK-SHOULD-NOT-APPEAR";
+
    let variants = [
       DecodeError::UnexpectedEnd,
       DecodeError::InvalidVarint,
@@ -16,12 +16,21 @@ fn test_errors_are_log_safe() {
       DecodeError::InvalidBool,
       DecodeError::InvalidOptionTag,
       DecodeError::InvalidChar,
+      DecodeError::UnsupportedVersion(1),
+      DecodeError::TrailingBytes { extra: 7 },
+      DecodeError::FrameMismatch { unconsumed: 3 },
       DecodeError::Unsupported("deserialize_any"),
       DecodeError::Custom("a visitor rejected the value".to_owned()),
    ];
 
    for error in variants {
-      assert!(!format!("{error}").is_empty());
-      assert!(!format!("{error:?}").is_empty());
+      let display = format!("{error}");
+      let debug = format!("{error:?}");
+      assert!(!display.is_empty());
+      assert!(!debug.is_empty());
+      assert!(
+         !display.contains(MARKER) && !debug.contains(MARKER),
+         "error echoed planted marker: {display} / {debug}"
+      );
    }
 }

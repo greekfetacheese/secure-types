@@ -29,7 +29,7 @@ pub(crate) const MAX_VARINT_LEN: usize = 10;
 /// one per byte. The stack buffer is wiped before returning — the bytes also
 /// live in the destination, which is locked and zeroized, so this copy would
 /// otherwise be the only trace left behind.
-pub(crate) fn write_varint(buffer: &mut SecureBytes, value: usize) {
+pub(crate) fn write_varint(buffer: &mut SecureBytes, value: usize) -> Result<(), Error> {
    let mut scratch = [0u8; MAX_VARINT_LEN];
 
    let mut remaining = value;
@@ -49,8 +49,9 @@ pub(crate) fn write_varint(buffer: &mut SecureBytes, value: usize) {
       len += 1;
    }
 
-   buffer.extend_from_slice(&scratch[..len]);
+   let result = buffer.extend_from_slice(&scratch[..len]);
    scratch.zeroize();
+   result
 }
 
 /// Decodes an unsigned LEB128 varint from `buf` starting at `*pos`.
@@ -255,15 +256,15 @@ mod tests {
    /// Encodes `value` into a fresh locked buffer of exactly the varint size.
    fn varint_bytes(value: usize) -> SecureBytes {
       let mut buffer = SecureBytes::new_with_capacity(MAX_VARINT_LEN).unwrap();
-      write_varint(&mut buffer, value);
+      write_varint(&mut buffer, value).unwrap();
       buffer
    }
 
    #[test]
    fn test_varint_appends_without_clobbering() {
       let mut buffer = SecureBytes::new_with_capacity(16).unwrap();
-      buffer.extend_from_slice(b"ab");
-      write_varint(&mut buffer, 300);
+      buffer.extend_from_slice(b"ab").unwrap();
+      write_varint(&mut buffer, 300).unwrap();
 
       buffer.unlock_slice(|bytes| assert_eq!(bytes, [b'a', b'b', 0xAC, 0x02]));
    }

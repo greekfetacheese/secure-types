@@ -272,7 +272,7 @@ impl SecureString {
          let byte_end = char_to_byte_idx(current_text.as_bytes(), char_range.end);
 
          if byte_start >= byte_end || byte_end > current_bytes.len() {
-            return 0;
+            return current_bytes.len();
          }
 
          let remove_len = byte_end - byte_start;

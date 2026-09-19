@@ -432,23 +432,21 @@ impl<T: Zeroize> SecureVec<T> {
    ///
    /// The memory is locked again and the capacity is preserved for reuse
    pub fn erase(&mut self) {
-      unsafe {
-         let ok = self.unlock_memory();
-         debug_assert!(ok, "SecureVec::erase: unlock_memory failed");
+      {
+         let _guard = UnlockGuard::new(self);
 
-         // Only zero the initialized elements. Zeroizing capacity would try to
-         // zeroize uninitialized memory as T, which for Drop types (eg. String)
-         // is UB and causes SIGSEGV/SIGABRT.
-         let slice = core::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len);
-         for elem in slice.iter_mut() {
-            elem.zeroize();
+         unsafe {
+            // Only zero the initialized elements. Zeroizing capacity would try to
+            // zeroize uninitialized memory as T, which for Drop types (eg. String)
+            // is UB and causes SIGSEGV/SIGABRT.
+            let slice = core::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len);
+            for elem in slice.iter_mut() {
+               elem.zeroize();
+            }
          }
-
-         self.clear();
-
-         let ok = self.lock_memory();
-         assert!(ok, "SecureVec::erase: lock_memory failed");
       }
+
+      self.clear();
    }
 
    /// Clear the vector
@@ -461,18 +459,18 @@ impl<T: Zeroize> SecureVec<T> {
    pub fn push(&mut self, value: T) {
       self.reserve(1);
 
-      let ok = self.unlock_memory();
-      debug_assert!(ok, "SecureVec::push: unlock_memory failed");
+      let dst = self.ptr.as_ptr();
+      let write_at = self.len;
 
-      unsafe {
-         // Write the new value at the end of the vector.
-         core::ptr::write(self.ptr.as_ptr().add(self.len), value);
+      {
+         let _guard = UnlockGuard::new(self);
 
-         self.len += 1;
+         unsafe {
+            core::ptr::write(dst.add(write_at), value);
+         }
       }
 
-      let ok = self.lock_memory();
-      assert!(ok, "SecureVec::push: lock_memory failed");
+      self.len = write_at + 1;
    }
 
    /// Appends every element of `src` using a single unlock/lock cycle.
@@ -485,15 +483,15 @@ impl<T: Zeroize> SecureVec<T> {
    /// Gated on `use_os` or `codec`: those are the two features that call it, and
    /// compiling it for neither would only produce a `dead_code` warning.
    #[cfg(any(feature = "use_os", feature = "codec"))]
-   pub(crate) fn extend_from_slice(&mut self, src: &[T])
+   pub(crate) fn extend_from_slice(&mut self, src: &[T]) -> Result<(), Error>
    where
       T: Clone,
    {
       if src.is_empty() {
-         return;
+         return Ok(());
       }
 
-      self.reserve(src.len());
+      self.try_reserve(src.len())?;
 
       let write_at = self.len;
       let dst = self.ptr.as_ptr();
@@ -509,6 +507,7 @@ impl<T: Zeroize> SecureVec<T> {
       }
 
       self.len = write_at + src.len();
+      Ok(())
    }
 
    /// Ensures that the vector has enough capacity for at least `additional` more elements.
@@ -519,16 +518,23 @@ impl<T: Zeroize> SecureVec<T> {
    ///
    /// Panics if the new capacity overflows `usize` or if the allocation fails.
    pub fn reserve(&mut self, additional: usize) {
-      let required_capacity = match self.len.checked_add(additional) {
-         Some(required_capacity) => required_capacity,
-         None => panic!(
-            "secure-types: SecureVec::reserve overflow: len ({}) + additional ({}) exceeds usize",
-            self.len, additional
-         ),
-      };
+      self.try_reserve(additional).unwrap_or_else(|error| {
+         panic!(
+            "secure-types: SecureVec::reserve overflow or allocation failed ({error}); SecureVec left unchanged"
+         )
+      });
+   }
+
+   /// Fallible [`reserve`](Self::reserve). The codec uses this so growth is an
+   /// [`Error`] rather than a panic, matching [`EncodeError::Secure`].
+   pub(crate) fn try_reserve(&mut self, additional: usize) -> Result<(), Error> {
+      let required_capacity = self
+         .len
+         .checked_add(additional)
+         .ok_or(Error::AllocationFailed)?;
 
       if required_capacity <= self.capacity {
-         return;
+         return Ok(());
       }
 
       // Use an amortized growth strategy to avoid reallocating on every push.
@@ -541,30 +547,16 @@ impl<T: Zeroize> SecureVec<T> {
          .unwrap_or(required_capacity)
          .max(required_capacity);
 
-      let new_size = match new_capacity.checked_mul(mem::size_of::<T>()) {
-         Some(new_size) => new_size,
-         None => panic!(
-            "secure-types: SecureVec::reserve overflow: capacity ({}) * size_of::<T>() ({}) exceeds usize",
-            new_capacity,
-            mem::size_of::<T>()
-         ),
-      };
+      let new_size = new_capacity
+         .checked_mul(mem::size_of::<T>())
+         .ok_or(Error::AllocationFailed)?;
 
-      // Safe to panic here because the memory is locked
-      let new_ptr = unsafe {
-         alloc::<T>(new_size).unwrap_or_else(|_| {
-            panic!(
-               "secure-types: failed to allocate {} bytes of locked memory \
-          (possibly RLIMIT_MEMLOCK exhausted); SecureVec left unchanged",
-               new_size
-            )
-         })
-      };
+      let new_ptr = unsafe { alloc::<T>(new_size)? };
 
       // Copy data to new pointer
       unsafe {
          let ok = self.unlock_memory();
-         debug_assert!(ok, "SecureVec::reserve: unlock_memory failed");
+         debug_assert!(ok, "SecureVec::try_reserve: unlock_memory failed");
 
          // Move (not copy) elements to new buffer to support non-Copy T correctly.
          // Using read+write transfers ownership of e.g. Strings.
@@ -596,7 +588,8 @@ impl<T: Zeroize> SecureVec<T> {
       self.ptr = new_ptr;
       self.capacity = new_capacity;
       let ok = self.lock_memory();
-      assert!(ok, "SecureVec::reserve: lock_memory failed");
+      assert!(ok, "SecureVec::try_reserve: lock_memory failed");
+      Ok(())
    }
 
    /// Creates a draining iterator that removes the specified range from the vector
@@ -644,25 +637,18 @@ impl<T: Zeroize> SecureVec<T> {
    {
       debug_assert!(src.len() <= self.capacity);
 
-      let ok = self.unlock_memory();
-      debug_assert!(
-         ok,
-         "SecureVec::init_from_clone: unlock_memory failed"
-      );
+      {
+         let _guard = UnlockGuard::new(self);
 
-      unsafe {
-         let dst = self.ptr.as_ptr();
-         for (i, item) in src.iter().enumerate() {
-            core::ptr::write(dst.add(i), item.clone());
+         unsafe {
+            let dst = self.ptr.as_ptr();
+            for (i, item) in src.iter().enumerate() {
+               core::ptr::write(dst.add(i), item.clone());
+            }
          }
       }
 
       self.len = src.len();
-      let ok = self.lock_memory();
-      assert!(
-         ok,
-         "SecureVec::init_from_clone: lock_memory failed"
-      );
    }
 }
 
@@ -693,23 +679,21 @@ impl SecureVec<u8> {
          self.len
       );
 
-      let ok = self.unlock_memory();
-      debug_assert!(ok, "SecureVec::patch_at: unlock_memory failed");
-
       // SAFETY: `end <= self.len`, so `offset..end` lies inside the initialized
       // region of the allocation. `src` is a distinct live slice that cannot
       // overlap it, so the copy is non-overlapping. The length is untouched, so
       // no element is created, duplicated, or dropped here.
-      unsafe {
-         core::ptr::copy_nonoverlapping(
-            src.as_ptr(),
-            self.ptr.as_ptr().add(offset),
-            src.len(),
-         );
-      }
+      {
+         let _guard = UnlockGuard::new(self);
 
-      let ok = self.lock_memory();
-      assert!(ok, "SecureVec::patch_at: lock_memory failed");
+         unsafe {
+            core::ptr::copy_nonoverlapping(
+               src.as_ptr(),
+               self.ptr.as_ptr().add(offset),
+               src.len(),
+            );
+         }
+      }
    }
 }
 
@@ -848,9 +832,9 @@ impl<'de> serde::Deserialize<'de> for SecureVec<u8> {
          where
             E: serde::de::Error,
          {
-            let vec = self.visit_bytes(&v)?;
+            let vec = self.visit_bytes(&v);
             v.zeroize();
-            Ok(vec)
+            vec
          }
       }
 
@@ -1057,6 +1041,9 @@ impl<'a, T: Zeroize> Drain<'a, T> {
       let _guard = UnlockGuard::new(&*self.vec_ref);
 
       unsafe {
+         // Drop drain-range elements that were never yielded. `next` already
+         // `ptr::read` them out to the caller; dropping those again would
+         // double-free.
          if mem::needs_drop::<T>() {
             let mut current_ptr = base.add(self.current_drain_iter_index);
             let end_ptr = base.add(self.drain_end_index);
@@ -1073,44 +1060,18 @@ impl<'a, T: Zeroize> Drain<'a, T> {
             ptr::copy(tail_src_ptr, hole_dst_ptr, self.tail_len);
          }
 
-         // The new length of the vector.
          let new_len = self.drain_start_index + self.tail_len;
 
-         // Process the memory region that is no longer part of the active vector's content.
-         // This region is from `vec_ref.ptr + new_len` up to `vec_ref.ptr + original_vec_len`.
-         // It contains:
-         //    a) Original data of the latter part of the drained slice (if not overwritten by tail).
-         //       These were dropped in step 1 if T:Drop.
-         //    b) Original data of the tail items (which have now been copied).
-         //       These need to be dropped if T:Drop, as ptr::copy doesn't drop the source.
-         // After any necessary drops, this entire region must be zeroized.
-
-         let mut current_cleanup_ptr = base.add(new_len);
-         let end_cleanup_ptr = base.add(self.original_vec_len);
-
-         // Determine the start of the original tail's memory region
-         let original_tail_start_ptr_val = tail_src_ptr as usize;
-
-         while current_cleanup_ptr < end_cleanup_ptr {
-            if mem::needs_drop::<T>() {
-               let current_ptr_val = current_cleanup_ptr as usize;
-               let original_tail_end_ptr_val =
-                  original_tail_start_ptr_val + self.tail_len * mem::size_of::<T>();
-
-               if current_ptr_val >= original_tail_start_ptr_val
-                  && current_ptr_val < original_tail_end_ptr_val
-               {
-                  // This element was part of the original tail. ptr::copy moved its value.
-                  // The original instance here needs to be dropped.
-                  ptr::drop_in_place(current_cleanup_ptr);
-               }
-               // Else, it was part of the drained range (not covered by tail move).
-               // If it needed dropping, it was handled in step 1.
-            }
-
-            // Zeroize the memory of this element.
-            (*current_cleanup_ptr).zeroize();
-            current_cleanup_ptr = current_cleanup_ptr.add(1);
+         // Leftover slots are not valid `T`: they are either dropped unyielded
+         // items, moved-from yielded items, or the bitwise source of the tail
+         // copy. `T::zeroize` / `drop_in_place` here aliases the caller's
+         // values (and the kept tail). Wipe as bytes.
+         let leftover_elems = self.original_vec_len.saturating_sub(new_len);
+         let leftover_bytes = leftover_elems.saturating_mul(mem::size_of::<T>());
+         if leftover_bytes > 0 {
+            let bytes =
+               core::slice::from_raw_parts_mut(base.add(new_len) as *mut u8, leftover_bytes);
+            bytes.zeroize();
          }
 
          new_len
@@ -1164,11 +1125,14 @@ fn resolve_range_indices<R: RangeBounds<usize>>(range: R, len: usize) -> (usize,
    (start, end)
 }
 
-#[cfg(all(test, feature = "use_os"))]
+#[cfg(test)]
 mod tests {
    use super::*;
+
+   #[cfg(feature = "use_os")]
    use std::process::{Command, Stdio};
 
+   #[cfg(feature = "use_os")]
    #[test]
    fn lock_unlock_works() {
       let secure: SecureVec<u8> = SecureVec::new().unwrap();
@@ -1217,11 +1181,30 @@ mod tests {
       secure.unlock_slice(|bytes| assert_eq!(bytes, b"abc"));
    }
 
+   #[cfg(feature = "use_os")]
+   #[test]
+   fn test_erase_zeroizes_initialized_slots() {
+      let mut secure = SecureVec::from_slice(&[1u8, 2, 3]).unwrap();
+      let capacity = secure.capacity;
+      secure.erase();
+      assert_eq!(secure.len, 0);
+      assert_eq!(secure.capacity, capacity);
+
+      let ok = secure.unlock_memory();
+      assert!(ok);
+      unsafe {
+         let slice = core::slice::from_raw_parts(secure.ptr.as_ptr(), 3);
+         assert_eq!(slice, &[0, 0, 0]);
+      }
+      let ok = secure.lock_memory();
+      assert!(ok);
+   }
+
    #[cfg(feature = "codec")]
    #[test]
    fn test_patch_at_leaves_length_and_capacity_alone() {
       let mut secure = SecureBytes::new_with_capacity(16).unwrap();
-      secure.extend_from_slice(b"abc");
+      secure.extend_from_slice(b"abc").unwrap();
       let capacity_before = secure.unlock(|vec| vec.capacity);
 
       secure.patch_at(0, b"ZY");
@@ -1239,9 +1222,9 @@ mod tests {
       // Growth moves the buffer to a new locked allocation; the patch must land
       // in the live one rather than a stale pointer.
       let mut secure = SecureBytes::new().unwrap();
-      secure.extend_from_slice(b"first");
+      secure.extend_from_slice(b"first").unwrap();
       secure.reserve(4096);
-      secure.extend_from_slice(b"second");
+      secure.extend_from_slice(b"second").unwrap();
 
       secure.patch_at(0, b"FIRST");
 
@@ -1266,6 +1249,7 @@ mod tests {
       secure.patch_at(4, b"");
    }
 
+   #[cfg(feature = "use_os")]
    #[test]
    fn test_forgotten_drain_keeps_memory_locked() {
       let arg = "CRASH_TEST_DRAIN_FORGET_LOCKED";
@@ -1330,6 +1314,7 @@ mod tests {
       }
    }
 
+   #[cfg(feature = "use_os")]
    #[test]
    fn test_index_should_fail_when_locked() {
       let arg = "CRASH_TEST_SECUREVEC_LOCKED";

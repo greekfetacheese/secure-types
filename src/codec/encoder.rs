@@ -76,7 +76,9 @@ pub(crate) fn encode_into<T>(buffer: &mut SecureBytes, value: &T) -> Result<(), 
 where
    T: ?Sized + Serialize,
 {
-   buffer.extend_from_slice(&[FORMAT_VERSION]);
+   buffer
+      .extend_from_slice(&[FORMAT_VERSION])
+      .map_err(EncodeError::Secure)?;
 
    let mut encoder = Encoder::new(buffer);
    value.serialize(&mut encoder)
@@ -91,20 +93,23 @@ impl<'a> Encoder<'a> {
    }
 
    /// Appends raw bytes to the document.
-   fn write_bytes(&mut self, bytes: &[u8]) {
-      self.bytes.extend_from_slice(bytes);
+   fn write_bytes(&mut self, bytes: &[u8]) -> Result<(), EncodeError> {
+      self
+         .bytes
+         .extend_from_slice(bytes)
+         .map_err(EncodeError::Secure)
    }
 
    /// Appends `value` as an unsigned LEB128 varint.
-   fn write_varint(&mut self, value: usize) {
-      write_varint(self.bytes, value);
+   fn write_varint(&mut self, value: usize) -> Result<(), EncodeError> {
+      write_varint(self.bytes, value).map_err(EncodeError::Secure)
    }
 
    /// Appends a length-prefixed UTF-8 name: a struct field name or an enum
    /// variant name.
-   fn write_name(&mut self, name: &str) {
-      self.write_varint(name.len());
-      self.write_bytes(name.as_bytes());
+   fn write_name(&mut self, name: &str) -> Result<(), EncodeError> {
+      self.write_varint(name.len())?;
+      self.write_bytes(name.as_bytes())
    }
 
    /// Opens a struct field: writes its name, reserves its length frame, and
@@ -123,10 +128,10 @@ impl<'a> Encoder<'a> {
             .map_err(|_| EncodeError::LengthOverflow)?;
       }
 
-      self.write_name(name);
+      self.write_name(name)?;
 
       let placeholder = self.bytes.len();
-      self.write_bytes(&[0u8; FIELD_FRAME_LEN]);
+      self.write_bytes(&[0u8; FIELD_FRAME_LEN])?;
 
       self.frames.push(Frame {
          placeholder,
@@ -188,101 +193,84 @@ impl<'a, 'b> ser::Serializer for &'b mut Encoder<'a> {
    type SerializeStructVariant = StructEncoder<'b, 'a>;
 
    fn serialize_bool(self, value: bool) -> Result<Self::Ok, Self::Error> {
-      self.write_bytes(&[u8::from(value)]);
-      Ok(())
+      self.write_bytes(&[u8::from(value)])
    }
 
    fn serialize_i8(self, value: i8) -> Result<Self::Ok, Self::Error> {
-      self.write_bytes(&value.to_le_bytes());
-      Ok(())
+      self.write_bytes(&value.to_le_bytes())
    }
 
    fn serialize_i16(self, value: i16) -> Result<Self::Ok, Self::Error> {
-      self.write_bytes(&value.to_le_bytes());
-      Ok(())
+      self.write_bytes(&value.to_le_bytes())
    }
 
    fn serialize_i32(self, value: i32) -> Result<Self::Ok, Self::Error> {
-      self.write_bytes(&value.to_le_bytes());
-      Ok(())
+      self.write_bytes(&value.to_le_bytes())
    }
 
    fn serialize_i64(self, value: i64) -> Result<Self::Ok, Self::Error> {
-      self.write_bytes(&value.to_le_bytes());
-      Ok(())
+      self.write_bytes(&value.to_le_bytes())
    }
 
    fn serialize_i128(self, value: i128) -> Result<Self::Ok, Self::Error> {
-      self.write_bytes(&value.to_le_bytes());
-      Ok(())
+      self.write_bytes(&value.to_le_bytes())
    }
 
    fn serialize_u8(self, value: u8) -> Result<Self::Ok, Self::Error> {
-      self.write_bytes(&value.to_le_bytes());
-      Ok(())
+      self.write_bytes(&value.to_le_bytes())
    }
 
    fn serialize_u16(self, value: u16) -> Result<Self::Ok, Self::Error> {
-      self.write_bytes(&value.to_le_bytes());
-      Ok(())
+      self.write_bytes(&value.to_le_bytes())
    }
 
    fn serialize_u32(self, value: u32) -> Result<Self::Ok, Self::Error> {
-      self.write_bytes(&value.to_le_bytes());
-      Ok(())
+      self.write_bytes(&value.to_le_bytes())
    }
 
    fn serialize_u64(self, value: u64) -> Result<Self::Ok, Self::Error> {
-      self.write_bytes(&value.to_le_bytes());
-      Ok(())
+      self.write_bytes(&value.to_le_bytes())
    }
 
    fn serialize_u128(self, value: u128) -> Result<Self::Ok, Self::Error> {
-      self.write_bytes(&value.to_le_bytes());
-      Ok(())
+      self.write_bytes(&value.to_le_bytes())
    }
 
    /// Floats are written as their raw IEEE-754 bit pattern, never reformatted,
    /// so a round-trip cannot round or normalise the value.
    fn serialize_f32(self, value: f32) -> Result<Self::Ok, Self::Error> {
-      self.write_bytes(&value.to_bits().to_le_bytes());
-      Ok(())
+      self.write_bytes(&value.to_bits().to_le_bytes())
    }
 
    fn serialize_f64(self, value: f64) -> Result<Self::Ok, Self::Error> {
-      self.write_bytes(&value.to_bits().to_le_bytes());
-      Ok(())
+      self.write_bytes(&value.to_bits().to_le_bytes())
    }
 
    fn serialize_char(self, value: char) -> Result<Self::Ok, Self::Error> {
-      self.write_bytes(&u32::from(value).to_le_bytes());
-      Ok(())
+      self.write_bytes(&u32::from(value).to_le_bytes())
    }
 
    /// Strings are written as raw UTF-8 with a length prefix: no escaping pass,
    /// no scratch buffer, and nothing for an un-wiped copy to survive in.
    fn serialize_str(self, value: &str) -> Result<Self::Ok, Self::Error> {
-      self.write_varint(value.len());
-      self.write_bytes(value.as_bytes());
-      Ok(())
+      self.write_varint(value.len())?;
+      self.write_bytes(value.as_bytes())
    }
 
    fn serialize_bytes(self, value: &[u8]) -> Result<Self::Ok, Self::Error> {
-      self.write_varint(value.len());
-      self.write_bytes(value);
-      Ok(())
+      self.write_varint(value.len())?;
+      self.write_bytes(value)
    }
 
    fn serialize_none(self) -> Result<Self::Ok, Self::Error> {
-      self.write_bytes(&[0x00]);
-      Ok(())
+      self.write_bytes(&[0x00])
    }
 
    fn serialize_some<T>(self, value: &T) -> Result<Self::Ok, Self::Error>
    where
       T: ?Sized + Serialize,
    {
-      self.write_bytes(&[0x01]);
+      self.write_bytes(&[0x01])?;
       value.serialize(self)
    }
 
@@ -300,8 +288,7 @@ impl<'a, 'b> ser::Serializer for &'b mut Encoder<'a> {
       _variant_index: u32,
       variant: &'static str,
    ) -> Result<Self::Ok, Self::Error> {
-      self.write_name(variant);
-      Ok(())
+      self.write_name(variant)
    }
 
    fn serialize_newtype_struct<T>(
@@ -325,7 +312,7 @@ impl<'a, 'b> ser::Serializer for &'b mut Encoder<'a> {
    where
       T: ?Sized + Serialize,
    {
-      self.write_name(variant);
+      self.write_name(variant)?;
       value.serialize(self)
    }
 
@@ -334,7 +321,7 @@ impl<'a, 'b> ser::Serializer for &'b mut Encoder<'a> {
    }
 
    fn serialize_tuple(self, len: usize) -> Result<Self::SerializeTuple, Self::Error> {
-      Ok(CompoundEncoder::from_len(self, len))
+      CompoundEncoder::from_len(self, len)
    }
 
    fn serialize_tuple_struct(
@@ -342,7 +329,7 @@ impl<'a, 'b> ser::Serializer for &'b mut Encoder<'a> {
       _name: &'static str,
       len: usize,
    ) -> Result<Self::SerializeTupleStruct, Self::Error> {
-      Ok(CompoundEncoder::from_len(self, len))
+      CompoundEncoder::from_len(self, len)
    }
 
    fn serialize_tuple_variant(
@@ -352,8 +339,8 @@ impl<'a, 'b> ser::Serializer for &'b mut Encoder<'a> {
       variant: &'static str,
       len: usize,
    ) -> Result<Self::SerializeTupleVariant, Self::Error> {
-      self.write_name(variant);
-      Ok(CompoundEncoder::from_len(self, len))
+      self.write_name(variant)?;
+      CompoundEncoder::from_len(self, len)
    }
 
    fn serialize_map(self, len: Option<usize>) -> Result<Self::SerializeMap, Self::Error> {
@@ -365,7 +352,8 @@ impl<'a, 'b> ser::Serializer for &'b mut Encoder<'a> {
       _name: &'static str,
       len: usize,
    ) -> Result<Self::SerializeStruct, Self::Error> {
-      self.write_varint(len);
+      self.write_varint(len)?;
+      self.frames.reserve(len);
       Ok(StructEncoder::new(self, len))
    }
 
@@ -376,8 +364,9 @@ impl<'a, 'b> ser::Serializer for &'b mut Encoder<'a> {
       variant: &'static str,
       len: usize,
    ) -> Result<Self::SerializeStructVariant, Self::Error> {
-      self.write_name(variant);
-      self.write_varint(len);
+      self.write_name(variant)?;
+      self.write_varint(len)?;
+      self.frames.reserve(len);
       Ok(StructEncoder::new(self, len))
    }
 
@@ -392,16 +381,24 @@ impl<'a, 'b> ser::Serializer for &'b mut Encoder<'a> {
       let mut scratch =
          SecureBytes::new_with_capacity(SCRATCH_CAPACITY).map_err(EncodeError::Secure)?;
 
-      {
-         let mut sink = DisplaySink {
-            bytes: &mut scratch,
-         };
-         core::fmt::write(&mut sink, format_args!("{value}"))
-            .map_err(|_| EncodeError::Unsupported("a Display impl that failed to format"))?;
+      let mut sink = DisplaySink {
+         bytes: &mut scratch,
+         error: None,
+      };
+      match core::fmt::write(&mut sink, format_args!("{value}")) {
+         Ok(()) => {}
+         Err(_) => {
+            if let Some(error) = sink.error {
+               return Err(EncodeError::Secure(error));
+            }
+            return Err(EncodeError::Unsupported(
+               "a Display impl that failed to format",
+            ));
+         }
       }
 
-      self.write_varint(scratch.len());
-      scratch.unlock_slice(|bytes| self.write_bytes(bytes));
+      self.write_varint(scratch.len())?;
+      scratch.unlock_slice(|bytes| self.write_bytes(bytes))?;
 
       Ok(())
    }
@@ -418,11 +415,15 @@ impl<'a, 'b> ser::Serializer for &'b mut Encoder<'a> {
 /// `String`.
 struct DisplaySink<'a> {
    bytes: &'a mut SecureBytes,
+   error: Option<crate::Error>,
 }
 
 impl fmt::Write for DisplaySink<'_> {
    fn write_str(&mut self, s: &str) -> fmt::Result {
-      self.bytes.extend_from_slice(s.as_bytes());
+      if let Err(error) = self.bytes.extend_from_slice(s.as_bytes()) {
+         self.error = Some(error);
+         return Err(fmt::Error);
+      }
       Ok(())
    }
 }
@@ -464,7 +465,7 @@ impl<'b, 'a> CompoundEncoder<'b, 'a> {
    ) -> Result<Self, EncodeError> {
       let mode = match len {
          Some(len) => {
-            encoder.write_varint(len);
+            encoder.write_varint(len)?;
             CompoundMode::Direct { remaining: len }
          }
          None => CompoundMode::Buffered {
@@ -478,13 +479,13 @@ impl<'b, 'a> CompoundEncoder<'b, 'a> {
    }
 
    /// Opens a container whose length is fixed and known, writing the count.
-   fn from_len(encoder: &'b mut Encoder<'a>, len: usize) -> Self {
-      encoder.write_varint(len);
+   fn from_len(encoder: &'b mut Encoder<'a>, len: usize) -> Result<Self, EncodeError> {
+      encoder.write_varint(len)?;
 
-      Self {
+      Ok(Self {
          encoder,
          mode: CompoundMode::Direct { remaining: len },
-      }
+      })
    }
 
    /// Accounts for one more element, failing if the declared length is already
@@ -528,8 +529,8 @@ impl<'b, 'a> CompoundEncoder<'b, 'a> {
             Ok(())
          }
          CompoundMode::Buffered { buffer, count } => {
-            self.encoder.write_varint(count);
-            buffer.unlock_slice(|bytes| self.encoder.write_bytes(bytes));
+            self.encoder.write_varint(count)?;
+            buffer.unlock_slice(|bytes| self.encoder.write_bytes(bytes))?;
 
             // `buffer` is dropped here: locked, then zeroized.
             Ok(())

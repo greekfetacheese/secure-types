@@ -258,6 +258,10 @@ fn test_deserialize_from_owned_byte_buf() {
    let array = SecureArray::<u8, 3>::deserialize(OwnedBytes(vec![1, 2, 3])).unwrap();
 
    array.unlock(|slice| assert_eq!(slice, &[1, 2, 3]));
+
+   // Wrong length still has to return an error. The owned buffer is wiped on
+   // this path too; that wipe is not observable without reading freed memory.
+   assert!(SecureArray::<u8, 3>::deserialize(OwnedBytes(vec![1, 2])).is_err());
 }
 
 #[cfg(feature = "serde")]
@@ -402,6 +406,11 @@ fn test_array_generic_basics<T: Zeroize + Clone + PartialEq + Debug, const N: us
    er.erase();
    er.unlock(|slice| {
       assert_eq!(slice.len(), N);
+      let mut expected = initial.clone();
+      for item in expected.iter_mut() {
+         item.zeroize();
+      }
+      assert_eq!(slice, expected.as_slice());
    });
 }
 

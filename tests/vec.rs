@@ -131,6 +131,42 @@ fn test_drain() {
    });
 }
 
+/// `Drain::compact` must not `T::zeroize` / `drop_in_place` slots after a move.
+/// For `String` that aliases the heap the caller now owns.
+#[test]
+fn test_drain_does_not_zeroize_moved_drop_elements() {
+   let mut secure = SecureVec::from_vec(vec![
+      "aa".to_owned(),
+      "bb".to_owned(),
+      "cc".to_owned(),
+      "dd".to_owned(),
+      "ee".to_owned(),
+   ])
+   .unwrap();
+
+   let drained: Vec<String> = secure.drain(0..4).collect();
+
+   assert_eq!(drained, ["aa", "bb", "cc", "dd"]);
+   secure.unlock_slice(|remaining| {
+      assert_eq!(remaining, &["ee".to_owned()]);
+   });
+
+   let mut secure = SecureVec::from_vec(vec![
+      "aa".to_owned(),
+      "bb".to_owned(),
+      "cc".to_owned(),
+   ])
+   .unwrap();
+   {
+      let mut drain = secure.drain(0..2);
+      assert_eq!(drain.next(), Some("aa".to_owned()));
+      // `bb` is unyielded and must be dropped, not zeroized-as-T after a move.
+   }
+   secure.unlock_slice(|remaining| {
+      assert_eq!(remaining, &["cc".to_owned()]);
+   });
+}
+
 #[cfg(feature = "serde")]
 #[test]
 fn test_secure_vec_serde() {
@@ -327,11 +363,12 @@ fn test_erase() {
       assert_eq!(secure.capacity(), 10);
    });
 
-   secure.unlock_iter(|iter| {
-      for elem in iter {
-         assert_eq!(elem, &0);
-      }
-   });
+   // `len == 0`, so `unlock_iter` cannot observe the wipe. Pushing again
+   // must not see leftover plaintext in the reused slots.
+   for i in 0..3 {
+      secure.push(i);
+   }
+   secure.unlock_slice(|slice| assert_eq!(slice, &[0, 1, 2]));
 }
 
 #[test]
