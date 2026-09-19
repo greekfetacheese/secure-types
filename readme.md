@@ -11,7 +11,7 @@ Currently there are 3 types:
 ## Features
 
 - **Zeroization on Drop**: Memory is wiped when dropped.
-- **Memory Locking**: (OS-only) The allocation is `mlock`ed (Windows: `VirtualLock`) and excluded from core dumps (`MADV_DONTDUMP`), so it cannot be swapped out or captured in a crash dump. While no `unlock*` scope is active the pages are also `mprotect`ed `PROT_NONE`, which is what keeps the contents away from other processes. On Linux the allocation is backed by `memfd_secret` when the kernel supports it.
+- **Memory Locking**: (OS-only) The allocation is `mlock`ed (Windows: `VirtualLock`) and, where the OS provides it, excluded from core dumps (`MADV_DONTDUMP` on Linux, `MADV_NOCORE` on FreeBSD/DragonFly; macOS has no equivalent), so it cannot be swapped out or captured in a crash dump. While no `unlock*` scope is active the pages are also `mprotect`ed `PROT_NONE`, which is what keeps the contents away from other processes. On Linux the allocation is backed by `memfd_secret` when the kernel supports it.
 - **Safe Scoped Access**: Direct access on these types is not possible, data is protected by default and only accessible within safe blocks.
 - **Send, not Sync**: Values can be moved to another thread. Sharing one instance across threads requires an explicit lock (`Arc<Mutex<_>>`). Concurrent `unlock` would race on page protection.
 - **`no_std` Support**: For embedded and Web environments (with zeroization only). Select it by turning off the default features — see [Feature Flags](#feature-flags).
@@ -24,6 +24,10 @@ Currently there are 3 types:
 
 - **Linux**: Using [mlock](https://man.archlinux.org/man/mlock.2) & [madvise](https://man.archlinux.org/man/madvise.2).
   If the kernel supports it, it will allocate with [memfd_secret](https://man.archlinux.org/man/memfd_secret.2.en).
+
+- **Other Unix (macOS, FreeBSD, …)**: Using [mlock](https://man.archlinux.org/man/mlock.2) & [mprotect](https://man.archlinux.org/man/mprotect.2), with
+  `madvise(MADV_NOCORE)` on FreeBSD/DragonFly. `memfd_secret` and `MADV_DONTDUMP` are Linux-only, so `supports_memfd_secret()`
+  returns `false` here and the allocation uses `malloc_sized` — the same path Linux takes when the kernel lacks `memfd_secret`.
 
 Locking is best-effort in one respect: `memsec` discards the return value of `mlock`, so
 exhausting `RLIMIT_MEMLOCK` does not fail construction — the allocation is still
@@ -164,7 +168,7 @@ Irrelevant for a one-shot unlock, worth knowing before decoding in a loop.
 
 ## Feature Flags
 
-- `use_os` (default): Enables all OS-level security features.
+- `use_os` (default): Enables all OS-level security features. Supported on Linux, Windows, and other Unix (macOS, FreeBSD, …); the `memfd_secret` backing (and core-dump exclusion via `MADV_DONTDUMP`) is Linux-only.
 - `no_os`: No-op, kept for backwards compatibility. `no_std` is selected by disabling the default features (`--no-default-features`), which leaves only the zeroize-on-drop guarantee.
 - `serde`: Enables serialization/deserialization.
 - `codec`: Adds `encode` / `encode_with_capacity` / `decode` / `decode_slice`, a binary format written into locked memory and read out of it. Implies `serde`, works in `no_std` + `alloc`, and adds no dependency.

@@ -1,9 +1,9 @@
 //! Crate-level behavior: the OS capability the locking is built on, and the
 //! `SecureArray`/`SecureVec` serde-compatibility contract.
 
-// `memsec` and `supports_memfd_secret` only exist with OS support, so this test is
-// gated like the ones in the other modules.
-#[cfg(all(unix, feature = "use_os"))]
+// `memfd_secret` is Linux-only, so this test is gated to Linux as well as to OS
+// support; non-Linux Unix gets `test_memfd_secret_is_unavailable_off_linux` instead.
+#[cfg(all(target_os = "linux", feature = "use_os"))]
 #[test]
 fn test_supports_memfd_secret() {
    use secure_types::{memsec, supports_memfd_secret};
@@ -18,6 +18,14 @@ fn test_supports_memfd_secret() {
    } else {
       print!("memfd_secret is not supported");
    }
+}
+
+/// `memfd_secret` is Linux-only, so every other Unix reports it as unavailable
+/// rather than probing a syscall that does not exist there.
+#[cfg(all(unix, not(target_os = "linux"), feature = "use_os"))]
+#[test]
+fn test_memfd_secret_is_unavailable_off_linux() {
+   assert!(!secure_types::supports_memfd_secret());
 }
 
 #[cfg(feature = "serde")]
