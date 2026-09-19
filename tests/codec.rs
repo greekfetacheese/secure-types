@@ -18,7 +18,7 @@
 use std::collections::BTreeMap;
 
 use secure_types::{
-   DecodeError, SecureArray, SecureString, SecureVec, decode, decode_slice, encode,
+   DecodeError, FORMAT_VERSION, SecureArray, SecureString, SecureVec, decode, decode_slice, encode,
 };
 
 use serde::Serialize;
@@ -515,6 +515,90 @@ fn test_untagged_can_be_written_but_not_read_back() {
       decode_bytes::<Untagged>(&document),
       Err(DecodeError::Unsupported(_))
    ));
+}
+
+/// `SecureVec<T>` / `SecureArray<T, N>` for non-byte element types encode as a
+/// sequence of values. For fixed-width scalars that is the same bytes a bulk
+/// buffer would have produced, so nothing surprising lands on the wire.
+#[test]
+fn test_non_byte_element_containers_round_trip() {
+   let words = SecureVec::from_slice(&[0x0102u16, 0x0304]).unwrap();
+
+   assert_eq!(
+      encoded_bytes(&words),
+      [FORMAT_VERSION, 0x02, 0x02, 0x01, 0x04, 0x03]
+   );
+
+   let decoded: SecureVec<u16> = decode_bytes(&encoded_bytes(&words)).unwrap();
+   decoded.unlock_slice(|slice| assert_eq!(slice, &[0x0102u16, 0x0304]));
+
+   // A fixed-size array follows serde's own `[T; N]` convention: a tuple of elements.
+   let block = SecureArray::<u32, 3>::from_slice(&[1, 2, u32::MAX]).unwrap();
+
+   assert_eq!(
+      encoded_bytes(&block),
+      [
+         FORMAT_VERSION,
+         0x03,
+         0x01,
+         0x00,
+         0x00,
+         0x00,
+         0x02,
+         0x00,
+         0x00,
+         0x00,
+         0xFF,
+         0xFF,
+         0xFF,
+         0xFF,
+      ]
+   );
+
+   let decoded: SecureArray<u32, 3> = decode_bytes(&encoded_bytes(&block)).unwrap();
+   decoded.unlock(|slice| assert_eq!(slice, &[1u32, 2, u32::MAX]));
+}
+
+/// A container's declared count is part of the wire format, so a mismatch with the
+/// destination type is rejected rather than silently truncated or padded.
+#[test]
+fn test_array_element_count_mismatch_is_rejected() {
+   // Three `u32` elements where the destination wants four.
+   let document = [
+      FORMAT_VERSION,
+      0x03,
+      0x01,
+      0x00,
+      0x00,
+      0x00,
+      0x02,
+      0x00,
+      0x00,
+      0x00,
+      0x03,
+      0x00,
+      0x00,
+      0x00,
+   ];
+
+   assert!(matches!(
+      decode_bytes::<SecureArray<u32, 4>>(&document),
+      Err(DecodeError::InvalidLength)
+   ));
+}
+
+/// These containers go out as JSON arrays, not as strings: only the `u8` byte-buffer
+/// impl accepts a JSON string for its contents.
+#[test]
+fn test_non_byte_element_containers_use_json_arrays() {
+   let words = SecureVec::from_slice(&[1u16, 2]).unwrap();
+   assert_eq!(serde_json::to_string(&words).unwrap(), "[1,2]");
+
+   let block = SecureArray::<u16, 2>::from_slice(&[7, 8]).unwrap();
+   assert_eq!(serde_json::to_string(&block).unwrap(), "[7,8]");
+
+   // And the JSON string form is not accepted for them.
+   assert!(serde_json::from_str::<SecureVec<u16>>("\"ab\"").is_err());
 }
 
 /// `#[serde(flatten)]` buffers unknown fields through `deserialize_any` too.

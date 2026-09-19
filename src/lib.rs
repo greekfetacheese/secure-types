@@ -20,6 +20,9 @@ pub use vec::{SecureBytes, SecureVec};
 #[cfg(feature = "use_os")]
 pub use writer::SecureBytesWriter;
 
+#[cfg(feature = "serde")]
+pub use vec::SeqElement;
+
 #[cfg(feature = "codec")]
 pub use codec::{
    DecodeError, EncodeError, FORMAT_VERSION, decode, decode_slice, encode, encode_with_capacity,

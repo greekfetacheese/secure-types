@@ -539,6 +539,98 @@ impl<'de, const LENGTH: usize> serde::Deserialize<'de> for SecureArray<u8, LENGT
    }
 }
 
+/// Serializes a `SecureArray<T, LENGTH>` of [`SeqElement`](crate::vec::SeqElement)s as a
+/// tuple of `T` values, matching serde's own `[T; N]` convention.
+///
+/// `SecureArray<u8, LENGTH>` takes the byte-buffer impl above instead; the bound here is
+/// what keeps the two disjoint.
+#[cfg(feature = "serde")]
+impl<const LENGTH: usize, T> serde::Serialize for SecureArray<T, LENGTH>
+where
+   T: crate::vec::SeqElement + serde::Serialize,
+{
+   fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+   where
+      S: serde::Serializer,
+   {
+      use serde::ser::SerializeTuple;
+
+      let mut tuple = serializer.serialize_tuple(LENGTH)?;
+
+      let elements: Result<(), S::Error> = self.unlock(|slice| {
+         for item in slice {
+            tuple.serialize_element(item)?;
+         }
+
+         Ok(())
+      });
+      elements?;
+
+      tuple.end()
+   }
+}
+
+/// Deserializes a `SecureArray<T, LENGTH>` of [`SeqElement`](crate::vec::SeqElement)s from a
+/// tuple of `T` values.
+#[cfg(feature = "serde")]
+impl<'de, const LENGTH: usize, T> serde::Deserialize<'de> for SecureArray<T, LENGTH>
+where
+   T: crate::vec::SeqElement + Clone + serde::Deserialize<'de>,
+{
+   fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+   where
+      D: serde::Deserializer<'de>,
+   {
+      struct SecureArraySeqVisitor<const L: usize, T>(::core::marker::PhantomData<T>);
+
+      impl<'de, const L: usize, T> serde::de::Visitor<'de> for SecureArraySeqVisitor<L, T>
+      where
+         T: crate::vec::SeqElement + Clone + serde::Deserialize<'de>,
+      {
+         type Value = SecureArray<T, L>;
+
+         fn expecting(&self, formatter: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+            write!(formatter, "a secure array of length {}", L)
+         }
+
+         fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+         where
+            A: serde::de::SeqAccess<'de>,
+         {
+            // Pre-sized to the exact length, and rejected as soon as it overflows, so a
+            // malformed (over-long) input cannot grow the locked buffer.
+            let mut data: SecureVec<T> =
+               SecureVec::new_with_capacity(L).map_err(serde::de::Error::custom)?;
+
+            while let Some(element) = seq.next_element::<T>()? {
+               if data.len() == L {
+                  return Err(serde::de::Error::invalid_length(
+                     data.len() + 1,
+                     &self,
+                  ));
+               }
+
+               data.push(element);
+            }
+
+            if data.len() != L {
+               return Err(serde::de::Error::invalid_length(
+                  data.len(),
+                  &self,
+               ));
+            }
+
+            SecureArray::try_from(data).map_err(serde::de::Error::custom)
+         }
+      }
+
+      deserializer.deserialize_tuple(
+         LENGTH,
+         SecureArraySeqVisitor::<LENGTH, T>(::core::marker::PhantomData),
+      )
+   }
+}
+
 #[cfg(all(test, feature = "use_os"))]
 mod tests {
    use super::*;

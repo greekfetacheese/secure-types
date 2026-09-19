@@ -850,6 +850,139 @@ impl<'de> serde::Deserialize<'de> for SecureVec<u8> {
    }
 }
 
+/// Elements that a [`SecureVec`] or [`SecureArray`] encodes as a *sequence of values*
+/// rather than as one byte buffer.
+///
+/// [`u8`] is deliberately absent. A `u8` container is a byte string, so it encodes as a
+/// single bulk buffer — the compact form, and one unlock/lock cycle instead of one per
+/// element. A blanket impl that covered `u8` too would overlap with the byte-buffer impls
+/// above, and Rust has no specialization, so each element type opts in here instead.
+///
+/// Implemented for the core scalar types. Implement it for your own type to make
+/// `SecureVec<T>` and `SecureArray<T, N>` serializable. It is a safe trait: implementing it
+/// only selects an encoding.
+#[cfg(feature = "serde")]
+pub trait SeqElement: Zeroize {}
+
+#[cfg(feature = "serde")]
+impl SeqElement for bool {}
+
+#[cfg(feature = "serde")]
+impl SeqElement for char {}
+
+#[cfg(feature = "serde")]
+impl SeqElement for f32 {}
+
+#[cfg(feature = "serde")]
+impl SeqElement for f64 {}
+
+#[cfg(feature = "serde")]
+impl SeqElement for i8 {}
+
+#[cfg(feature = "serde")]
+impl SeqElement for i16 {}
+
+#[cfg(feature = "serde")]
+impl SeqElement for i32 {}
+
+#[cfg(feature = "serde")]
+impl SeqElement for i64 {}
+
+#[cfg(feature = "serde")]
+impl SeqElement for i128 {}
+
+#[cfg(feature = "serde")]
+impl SeqElement for u16 {}
+
+#[cfg(feature = "serde")]
+impl SeqElement for u32 {}
+
+#[cfg(feature = "serde")]
+impl SeqElement for u64 {}
+
+#[cfg(feature = "serde")]
+impl SeqElement for u128 {}
+
+/// Serializes a `SecureVec<T>` of [`SeqElement`]s as a sequence of `T` values.
+///
+/// `SecureVec<u8>` takes the byte-buffer impl above instead; the bound here is what keeps
+/// the two disjoint.
+#[cfg(feature = "serde")]
+impl<T> serde::Serialize for SecureVec<T>
+where
+   T: SeqElement + serde::Serialize,
+{
+   fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+   where
+      S: serde::Serializer,
+   {
+      use serde::ser::SerializeSeq;
+
+      let mut seq = serializer.serialize_seq(Some(self.len()))?;
+
+      // One unlock for the whole run. Element writes are per element, which for these
+      // types is unavoidable: the container cannot hand a `&[T]` to a format that asked
+      // for a sequence.
+      let elements: Result<(), S::Error> = self.unlock_slice(|slice| {
+         for item in slice {
+            seq.serialize_element(item)?;
+         }
+
+         Ok(())
+      });
+      elements?;
+
+      seq.end()
+   }
+}
+
+/// Deserializes a `SecureVec<T>` of [`SeqElement`]s from a sequence of `T` values.
+#[cfg(feature = "serde")]
+impl<'de, T> serde::Deserialize<'de> for SecureVec<T>
+where
+   T: SeqElement + serde::Deserialize<'de>,
+{
+   fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+   where
+      D: serde::Deserializer<'de>,
+   {
+      struct SecureSeqVisitor<T>(PhantomData<T>);
+
+      impl<'de, T> serde::de::Visitor<'de> for SecureSeqVisitor<T>
+      where
+         T: SeqElement + serde::Deserialize<'de>,
+      {
+         type Value = SecureVec<T>;
+
+         fn expecting(&self, formatter: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+            write!(formatter, "a sequence of secure elements")
+         }
+
+         fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+         where
+            A: serde::de::SeqAccess<'de>,
+         {
+            // The same capped reservation as the byte-buffer visitor: the hint comes from
+            // the format and is only advisory.
+            let capacity = seq
+               .size_hint()
+               .unwrap_or(0)
+               .min(MAX_PREALLOCATION_FROM_SIZE_HINT);
+            let mut vec =
+               SecureVec::new_with_capacity(capacity).map_err(serde::de::Error::custom)?;
+
+            while let Some(item) = seq.next_element::<T>()? {
+               vec.push(item);
+            }
+
+            Ok(vec)
+         }
+      }
+
+      deserializer.deserialize_seq(SecureSeqVisitor::<T>(PhantomData))
+   }
+}
+
 /// A draining iterator for `SecureVec<T>`.
 ///
 /// This struct is created by the `drain` method on `SecureVec`.
@@ -1455,6 +1588,82 @@ mod tests {
          );
       });
       decoded.unlock_slice(|bytes| assert_eq!(bytes, &[1, 1, 1]));
+   }
+
+   /// The `u8` impls ask for a byte buffer; the generic ones ask for a sequence. A format
+   /// that offers *only* `deserialize_bytes` is the cheapest way to prove the byte fast path
+   /// is still wired up — the two are otherwise indistinguishable, because a `u8` sequence
+   /// encodes to the very same bytes.
+   #[cfg(feature = "serde")]
+   #[test]
+   fn test_byte_containers_still_use_the_byte_buffer_request() {
+      struct BytesOnly;
+
+      impl<'de> serde::Deserializer<'de> for BytesOnly {
+         type Error = serde::de::value::Error;
+
+         fn deserialize_any<V>(self, _visitor: V) -> Result<V::Value, Self::Error>
+         where
+            V: serde::de::Visitor<'de>,
+         {
+            Err(serde::de::Error::custom(
+               "only bytes are supported",
+            ))
+         }
+
+         fn deserialize_bytes<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+         where
+            V: serde::de::Visitor<'de>,
+         {
+            visitor.visit_bytes(&[1, 2, 3])
+         }
+
+         // `bytes` is deliberately absent: it is implemented above, and every other
+         // request falls through to the error.
+         serde::forward_to_deserialize_any! {
+            bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
+            byte_buf option unit unit_struct newtype_struct seq tuple
+            tuple_struct map struct enum identifier ignored_any
+         }
+      }
+
+      let bytes = <SecureVec<u8> as serde::Deserialize>::deserialize(BytesOnly).unwrap();
+      bytes.unlock_slice(|slice| assert_eq!(slice, &[1, 2, 3]));
+
+      // A non-byte container must not be taking that path.
+      assert!(<SecureVec<u16> as serde::Deserialize>::deserialize(BytesOnly).is_err());
+   }
+
+   /// Non-byte elements go out as a sequence of values.
+   #[cfg(feature = "serde")]
+   #[test]
+   fn test_non_byte_elements_serialize_as_a_sequence() {
+      let words = SecureVec::from_slice(&[0x0102u16, 0x0304]).unwrap();
+      assert_eq!(
+         serde_json::to_string(&words).unwrap(),
+         "[258,772]"
+      );
+
+      let back: SecureVec<u16> = serde_json::from_str("[258,772]").unwrap();
+      back.unlock_slice(|slice| assert_eq!(slice, &[0x0102u16, 0x0304]));
+
+      let flags = SecureVec::from_slice(&[true, false]).unwrap();
+      assert_eq!(
+         serde_json::to_string(&flags).unwrap(),
+         "[true,false]"
+      );
+
+      let letters = SecureVec::from_slice(&['a', 'β']).unwrap();
+      assert_eq!(
+         serde_json::to_string(&letters).unwrap(),
+         "[\"a\",\"β\"]"
+      );
+
+      let signed = SecureVec::from_slice(&[-1i32, i32::MIN]).unwrap();
+      assert_eq!(
+         serde_json::to_string(&signed).unwrap(),
+         format!("[-1,{}]", i32::MIN)
+      );
    }
 
    #[test]
