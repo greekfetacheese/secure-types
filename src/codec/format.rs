@@ -252,19 +252,11 @@ impl serde::de::Error for DecodeError {
 mod tests {
    use super::*;
 
-   #[cfg(not(feature = "use_os"))]
-   use alloc::{borrow::ToOwned, format};
-
    /// Encodes `value` into a fresh locked buffer of exactly the varint size.
    fn varint_bytes(value: usize) -> SecureBytes {
       let mut buffer = SecureBytes::new_with_capacity(MAX_VARINT_LEN).unwrap();
       write_varint(&mut buffer, value);
       buffer
-   }
-
-   #[test]
-   fn test_varint_zero_is_a_single_byte() {
-      varint_bytes(0).unlock_slice(|bytes| assert_eq!(bytes, [0x00]));
    }
 
    #[test]
@@ -306,15 +298,6 @@ mod tests {
             );
          });
       }
-   }
-
-   #[test]
-   fn test_varint_is_minimal() {
-      // 127 fits in one byte, 128 needs two, and 16383 fits in exactly two.
-      varint_bytes(127).unlock_slice(|bytes| assert_eq!(bytes.len(), 1));
-      varint_bytes(128).unlock_slice(|bytes| assert_eq!(bytes.len(), 2));
-      varint_bytes(16_383).unlock_slice(|bytes| assert_eq!(bytes.len(), 2));
-      varint_bytes(16_384).unlock_slice(|bytes| assert_eq!(bytes.len(), 3));
    }
 
    #[test]
@@ -363,24 +346,16 @@ mod tests {
    }
 
    #[test]
-   fn test_errors_are_log_safe() {
-      // Neither form may grow a payload from the input: that is the property
-      // that keeps `serde_json`'-style `string "…secret…"` messages impossible.
-      let variants = [
-         DecodeError::UnexpectedEnd,
-         DecodeError::InvalidVarint,
-         DecodeError::InvalidLength,
-         DecodeError::InvalidUtf8,
-         DecodeError::InvalidBool,
-         DecodeError::InvalidOptionTag,
-         DecodeError::InvalidChar,
-         DecodeError::Unsupported("deserialize_any"),
-         DecodeError::Custom("a visitor rejected the value".to_owned()),
-      ];
+   fn test_varint_zero_is_a_single_byte() {
+      varint_bytes(0).unlock_slice(|bytes| assert_eq!(bytes, [0x00]));
+   }
 
-      for error in variants {
-         assert!(!format!("{error}").is_empty());
-         assert!(!format!("{error:?}").is_empty());
-      }
+   #[test]
+   fn test_varint_is_minimal() {
+      // 127 fits in one byte, 128 needs two, and 16383 fits in exactly two.
+      varint_bytes(127).unlock_slice(|bytes| assert_eq!(bytes.len(), 1));
+      varint_bytes(128).unlock_slice(|bytes| assert_eq!(bytes.len(), 2));
+      varint_bytes(16_383).unlock_slice(|bytes| assert_eq!(bytes.len(), 2));
+      varint_bytes(16_384).unlock_slice(|bytes| assert_eq!(bytes.len(), 3));
    }
 }

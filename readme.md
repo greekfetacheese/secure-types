@@ -213,6 +213,17 @@ Irrelevant for a one-shot unlock, worth knowing before decoding in a loop.
 
 ## Running tests
 
+The suite lives in `tests/`, one integration crate per source module — `tests/vec.rs`, `tests/array.rs`,
+`tests/string.rs`, `tests/writer.rs`, `tests/crate_level.rs`, and `tests/codec.rs` plus
+`tests/codec_encoder.rs` / `tests/codec_decoder.rs` / `tests/codec_format.rs` for the binary codec.
+Because each file is its own crate, those tests see only the **public API**, which doubles as a check
+that nothing internal leaked into it.
+
+The tests that cannot work that way stay in `tests` modules inside `src/`: the `patch_at` internals, the
+memory-protection checks, the varint helpers, and the crash tests that spawn a child process to
+reproduce a re-lock failure — they read `pub(crate)` state or a private field. Shared fixtures and the
+owned-input deserializers live in `tests/common/`.
+
 ```bash
 cargo test                                          # default features
 cargo test --all-features

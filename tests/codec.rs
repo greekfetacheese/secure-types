@@ -15,10 +15,14 @@
 //! attribute combinations that motivated the codec in the first place.
 #![cfg(feature = "codec")]
 
+mod common;
+
 use std::collections::BTreeMap;
 
+use common::{decode_bytes, encoded_bytes};
 use secure_types::{
-   DecodeError, FORMAT_VERSION, SecureArray, SecureString, SecureVec, decode, decode_slice, encode,
+   DecodeError, FORMAT_VERSION, SecureArray, SecureBytes, SecureString, SecureVec, decode,
+   decode_slice, encode, encode_with_capacity,
 };
 
 use serde::Serialize;
@@ -115,22 +119,6 @@ fn vault() -> VaultData {
 }
 
 // ------------------------------------------------------------------- helpers
-
-fn encoded_bytes<T>(value: &T) -> Vec<u8>
-where
-   T: ?Sized + Serialize,
-{
-   encode(value)
-      .expect("encode failed")
-      .unlock_slice(<[u8]>::to_vec)
-}
-
-fn decode_bytes<T>(bytes: &[u8]) -> Result<T, DecodeError>
-where
-   T: DeserializeOwned,
-{
-   decode_slice(bytes)
-}
 
 /// Round-trips `value` and requires the re-encoding to be byte-identical, which
 /// catches a field that was dropped, reordered, or silently defaulted.
@@ -636,4 +624,122 @@ fn test_the_locked_buffer_path_works_and_survives() {
    locked.unlock_slice(|bytes| {
       assert!(contains(bytes, SEED_MARKER.as_bytes()));
    });
+}
+
+// ---- from `codec::mod`'s test module ----
+
+#[test]
+fn test_the_document_starts_with_the_format_version() {
+   let encoded = encode(&7u8).unwrap();
+
+   encoded.unlock_slice(|bytes| {
+      assert_eq!(bytes, &[FORMAT_VERSION, 0x07]);
+   });
+}
+
+#[test]
+fn test_scalars_round_trip_through_the_public_api() {
+   let encoded = encode(&0xDEAD_BEEFu32).unwrap();
+
+   encoded.unlock_slice(|bytes| {
+      assert_eq!(bytes, &[FORMAT_VERSION, 0xEF, 0xBE, 0xAD, 0xDE]);
+   });
+
+   assert_eq!(decode::<u32>(&encoded).unwrap(), 0xDEAD_BEEF);
+}
+
+/// The point of the whole exercise: our own types go in and come back out
+/// through the locked buffer.
+#[test]
+fn test_secure_types_round_trip_through_the_public_api() {
+   let secret = SecureString::from("hunter2");
+   let encoded = encode(&secret).unwrap();
+   decode::<SecureString>(&encoded)
+      .unwrap()
+      .unlock_str(|value| assert_eq!(value, "hunter2"));
+
+   let key = SecureVec::from_slice(&[1u8, 2, 3]).unwrap();
+   let encoded = encode(&key).unwrap();
+   decode::<SecureVec<u8>>(&encoded)
+      .unwrap()
+      .unlock_slice(|value| assert_eq!(value, &[1, 2, 3]));
+
+   let array = SecureArray::<u8, 32>::from_slice(&[0xAB; 32]).unwrap();
+   let encoded = encode(&array).unwrap();
+   decode::<SecureArray<u8, 32>>(&encoded)
+      .unwrap()
+      .unlock(|value| assert_eq!(value, &[0xAB; 32]));
+}
+
+#[test]
+fn test_capacity_changes_nothing_about_the_document() {
+   let value = SecureString::from("hunter2");
+
+   let default = encode(&value).unwrap();
+   let sized = encode_with_capacity(&value, 4096).unwrap();
+
+   default.unlock_slice(|left| {
+      sized.unlock_slice(|right| assert_eq!(left, right));
+   });
+}
+
+#[test]
+fn test_a_zero_capacity_still_works() {
+   // `SecureVec::new_with_capacity(0)` bumps to 1 internally, so this must
+   // grow rather than fail.
+   let encoded = encode_with_capacity(&7u8, 0).unwrap();
+
+   assert_eq!(decode::<u8>(&encoded).unwrap(), 7);
+}
+
+/// Decoding must leave the buffer usable and protected: the unlock window is
+/// closed again, and nothing about the document was consumed.
+#[test]
+fn test_the_buffer_survives_decoding() {
+   let encoded = encode(&42u8).unwrap();
+
+   assert_eq!(decode::<u8>(&encoded).unwrap(), 42);
+   assert_eq!(decode::<u8>(&encoded).unwrap(), 42);
+
+   encoded.unlock_slice(|bytes| assert_eq!(bytes, &[FORMAT_VERSION, 42]));
+}
+
+#[test]
+fn test_decode_slice_matches_decode() {
+   let encoded = encode(&1234u32).unwrap();
+
+   let from_slice = encoded.unlock_slice(|bytes| decode_slice::<u32>(bytes).unwrap());
+
+   assert_eq!(from_slice, decode::<u32>(&encoded).unwrap());
+}
+
+#[test]
+fn test_errors_are_reported_from_a_locked_buffer_too() {
+   // Version byte, then a one-field struct header with nothing after it.
+   let mut buffer = SecureBytes::new_with_capacity(4).unwrap();
+   buffer.push(FORMAT_VERSION);
+   buffer.push(0x01);
+
+   assert!(matches!(
+      decode::<SecureString>(&buffer),
+      Err(DecodeError::UnexpectedEnd)
+   ));
+}
+
+#[test]
+fn test_header_errors_from_a_slice() {
+   assert!(matches!(
+      decode_slice::<u8>(&[]),
+      Err(DecodeError::UnexpectedEnd)
+   ));
+
+   assert!(matches!(
+      decode_slice::<u8>(&[0x02, 0x01]),
+      Err(DecodeError::UnsupportedVersion(2))
+   ));
+
+   assert!(matches!(
+      decode_slice::<u8>(&[FORMAT_VERSION, 0x01, 0xFF]),
+      Err(DecodeError::TrailingBytes { extra: 1 })
+   ));
 }
