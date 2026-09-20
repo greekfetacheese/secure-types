@@ -842,3 +842,69 @@ fn test_encode_into_vec_erases_its_partial_document_on_failure() {
       "the failed encoding left bytes behind in the caller's buffer"
    );
 }
+
+/// `encoded_len` must equal the document `encode` writes, whatever the shape.
+///
+/// The length is measured by the same serializer that produces the document, so
+/// the cases that matter most are the ones whose size is only known at the end:
+/// the sequences and maps with no declared length, and `collect_str`.
+fn assert_encoded_len_matches<T>(value: &T)
+where
+   T: ?Sized + Serialize,
+{
+   let document = locked_bytes(value);
+
+   assert_eq!(
+      secure_types::encoded_len(value).unwrap(),
+      document.len(),
+      "encoded_len disagreed with the encoded document"
+   );
+}
+
+#[test]
+fn test_encoded_len_matches_the_document() {
+   assert_encoded_len_matches(&EmptyStruct {});
+   assert_encoded_len_matches(&UnitStruct);
+   assert_encoded_len_matches(&NewtypeStruct(7));
+   assert_encoded_len_matches(&true);
+   assert_encoded_len_matches(&"a string");
+   assert_encoded_len_matches(&Some(7u8));
+   assert_encoded_len_matches(&Option::<u8>::None);
+   assert_encoded_len_matches(&vec![1u8, 2, 3]);
+   assert_encoded_len_matches(&BTreeMap::from([("k", 1u8)]));
+   assert_encoded_len_matches(&Point { x: 1, y: 0x0102 });
+   assert_encoded_len_matches(&Outer {
+      name: "vault",
+      point: Point { x: 3, y: 4 },
+   });
+   assert_encoded_len_matches(&MidSkip {
+      first: 1,
+      middle: None,
+      last: 2,
+   });
+   assert_encoded_len_matches(&WithNever { kept: 1, never: 2 });
+   assert_encoded_len_matches(&Shape::Unit);
+   assert_encoded_len_matches(&Shape::New(1));
+   assert_encoded_len_matches(&Shape::Tup(1, 2));
+   assert_encoded_len_matches(&Shape::Named { a: 1 });
+
+   // A length prefix changes width at 128, so the count has to come from the
+   // varint the encoder actually wrote rather than from `len()`.
+   assert_encoded_len_matches(&"x".repeat(127));
+   assert_encoded_len_matches(&"x".repeat(128));
+
+   // Sizes that are only known once the value has been walked.
+   assert_encoded_len_matches(&UnknownLengthSeq);
+   assert_encoded_len_matches(&UnknownLengthMap);
+   assert_encoded_len_matches(&Displays(7));
+}
+
+/// Measuring has the same failure modes as writing: a value that cannot be
+/// encoded has no length, and the partial count is never returned.
+#[test]
+fn test_encoded_len_fails_where_encode_fails() {
+   let error = secure_types::encoded_len(&DeclaresTooMany)
+      .expect_err("a mismatched element count should fail the measurement");
+
+   assert!(matches!(error, EncodeError::ElementCountMismatch));
+}

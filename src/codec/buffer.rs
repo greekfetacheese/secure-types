@@ -100,3 +100,55 @@ impl Buffer for Vec<u8> {
       self.truncate(len);
    }
 }
+
+/// A sink that stores nothing and only measures.
+///
+/// The encoder writes through [`Buffer`], so a document's length is measured by
+/// the *same* serializer that produces it: every byte the encoder would append
+/// passes through [`append`](Buffer::append). That is what makes
+/// [`encoded_len`](crate::encoded_len) exact instead of an estimate of a rule
+/// re-derived outside this crate — including for the values whose size is only
+/// known at the end (`collect_str`, and the sequences and maps whose length was
+/// not declared up front).
+pub(crate) struct Counter {
+   len: usize,
+}
+
+impl Counter {
+   pub(crate) fn new() -> Self {
+      Self { len: 0 }
+   }
+
+   /// The number of bytes the encoder appended.
+   pub(crate) fn count(&self) -> usize {
+      self.len
+   }
+}
+
+impl Buffer for Counter {
+   fn len(&self) -> usize {
+      self.len
+   }
+
+   fn append(&mut self, bytes: &[u8]) -> Result<(), Error> {
+      self.len += bytes.len();
+      Ok(())
+   }
+
+   /// Patching the `u32` length frame overwrites bytes that were already
+   /// counted, so it cannot change the length.
+   fn patch_at(&mut self, offset: usize, bytes: &[u8]) {
+      debug_assert!(
+         offset + bytes.len() <= self.len,
+         "Counter::patch_at: range {offset}..{} exceeds length {}",
+         offset + bytes.len(),
+         self.len
+      );
+   }
+
+   /// Discards everything written after the first `len` bytes — what
+   /// `encode_into` calls when an encoding fails partway.
+   fn rollback(&mut self, len: usize) {
+      self.len = len;
+   }
+}

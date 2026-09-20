@@ -133,7 +133,7 @@ assert_eq!(payload[0], 0x07);
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-`encode` returns a `SecureBytes`. `encode_to_vec` / `encode_into_vec` produce the same document into a plain `Vec<u8>` the caller owns: not locked, and not zeroized on drop, but a *failed* encoding erases everything it appended rather than leaving a partial document behind. `decode` unlocks only for the parse and re-locks afterwards, including on error. Types are raw binary — a `SecureArray<u8, 32>` is 32 bytes — and strings are not escaped, so there is no scratch copy of an unescaped string.
+`encode` returns a `SecureBytes`. `encode_to_vec` / `encode_into_vec` produce the same document into a plain `Vec<u8>` the caller owns: not locked, and not zeroized on drop, but a *failed* encoding erases everything it appended rather than leaving a partial document behind. `encoded_len` reports how many bytes a document takes — measured by the same serializer, so a destination can be sized exactly and never grow (a growing `Vec` leaves a copy of the partial document in the allocation it abandons). `decode` unlocks only for the parse and re-locks afterwards, including on error. Types are raw binary — a `SecureArray<u8, 32>` is 32 bytes — and strings are not escaped, so there is no scratch copy of an unescaped string.
 
 **Format evolution.** `FORMAT_VERSION` is the first byte. An unknown version is refused. Adding a field with `#[serde(default)]` does not need a bump: fields are named and length-prefixed, so unknown fields are skipped and missing ones take their default. Changing a field's type does need a bump.
 
@@ -147,7 +147,7 @@ assert_eq!(payload[0], 0x07);
 - `use_os` (default): Enables all OS-level security features. Supported on Linux, Windows, and other Unix (macOS, FreeBSD, …); the `memfd_secret` backing (and core-dump exclusion via `MADV_DONTDUMP`) is Linux-only.
 - `no_os`: No-op, kept for backwards compatibility. `no_std` is selected by disabling the default features (`--no-default-features`), which leaves only the zeroize-on-drop guarantee.
 - `serde`: Enables serialization/deserialization.
-- `codec`: Adds `encode` / `encode_with_capacity` / `encode_to_vec` / `encode_to_vec_with_capacity` / `encode_into_vec` / `decode` / `decode_slice`, a binary format written into locked memory (or, for the `_vec` pair, into a `Vec<u8>` you own) and read out of it. Implies `serde`, works in `no_std` + `alloc`, and adds no dependency.
+- `codec`: Adds `encode` / `encode_with_capacity` / `encode_to_vec` / `encode_to_vec_with_capacity` / `encode_into_vec` / `encoded_len` / `decode` / `decode_slice`, a binary format written into locked memory (or, for the `_vec` pair, into a `Vec<u8>` you own) and read out of it. Implies `serde`, works in `no_std` + `alloc`, and adds no dependency.
 - `expose-ptr`: For testing purposes. Exposes the locked memory region pointer.
 
 ## Security notes

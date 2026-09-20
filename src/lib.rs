@@ -25,8 +25,8 @@ pub use vec::SeqElement;
 
 #[cfg(feature = "codec")]
 pub use codec::{
-   DecodeError, EncodeError, FORMAT_VERSION, decode, decode_slice, encode, encode_into_vec,
-   encode_to_vec, encode_to_vec_with_capacity, encode_with_capacity,
+   DecodeError, EncodeError, FORMAT_VERSION, decode, decode_slice, encode, encode_into_vec, encode_to_vec,
+   encode_to_vec_with_capacity, encode_with_capacity, encoded_len,
 };
 
 use core::ptr::NonNull;

@@ -96,6 +96,10 @@
 //! produced into a `Vec` decodes without being copied back into locked memory
 //! first.
 //!
+//! [`encoded_len`] reports how many bytes a document would take, measured by the
+//! same serializer, so a destination can be sized exactly and never grow — which
+//! is what keeps a partially written document out of a freed `Vec` allocation.
+//!
 //! # The wire format
 //!
 //! Integers are little-endian; lengths and counts are unsigned LEB128 varints.
@@ -265,6 +269,48 @@ where
    encoder::encode_into(&mut buffer, value)?;
 
    Ok(buffer)
+}
+
+/// The number of bytes [`encode`] / [`encode_into_vec`] would write for `value`,
+/// version byte included.
+///
+/// Measured, not estimated: `value` is serialized once into a sink that only
+/// counts, through the same [`serde::Serializer`] that produces a document, so
+/// the answer cannot drift from the wire format. Nothing is allocated and no
+/// memory is locked; the cost is one extra pass over `value`.
+///
+/// This is for sizing a destination so that it never has to grow. Growth is not
+/// free for a plain `Vec`: reallocating leaves a copy of the partial document in
+/// the allocation it walks away from, and nothing wipes that. Sizing with this
+/// length and then calling [`encode_into_vec`] keeps the buffer in place:
+///
+/// ```
+/// use secure_types::{encode_into_vec, encoded_len};
+///
+/// // A codec tag ahead of the document, the way a caller storing the payload
+/// // in its own envelope would write it.
+/// let mut payload = vec![0x07u8];
+/// payload.reserve(encoded_len(&"hunter2")?);
+/// encode_into_vec(&mut payload, &"hunter2")?;
+///
+/// assert_eq!(payload.len(), 1 + encoded_len(&"hunter2")?);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+///
+/// # Errors
+///
+/// The same errors as [`encode`], because this is the same serialization: a
+/// value that cannot be encoded has no length. A `Serialize` impl that wrote a
+/// different number of bytes on each call would make this a hint rather than a
+/// promise, which is all a buffer capacity needs.
+pub fn encoded_len<T>(value: &T) -> Result<usize, EncodeError>
+where
+   T: ?Sized + Serialize,
+{
+   let mut counter = buffer::Counter::new();
+   encoder::encode_into(&mut counter, value)?;
+
+   Ok(counter.count())
 }
 
 /// Decodes `value` out of a locked buffer.
