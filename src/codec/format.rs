@@ -5,7 +5,8 @@ use core::fmt;
 
 use zeroize::Zeroize;
 
-use crate::{Error, SecureBytes};
+use super::buffer::Buffer;
+use crate::Error;
 
 /// Version byte written ahead of every encoded value.
 ///
@@ -22,11 +23,10 @@ pub(crate) const MAX_VARINT_LEN: usize = 10;
 /// Encodes `value` as an unsigned LEB128 varint and appends it to `buffer`.
 ///
 /// The varint is assembled in a stack buffer and appended with a single
-/// `extend_from_slice`, so one varint costs one unlock/lock cycle rather than
-/// one per byte. The stack buffer is wiped before returning — the bytes also
-/// live in the destination, which is locked and zeroized, so this copy would
-/// otherwise be the only trace left behind.
-pub(crate) fn write_varint(buffer: &mut SecureBytes, value: usize) -> Result<(), Error> {
+/// [`Buffer::append`], so one varint costs one unlock/lock cycle rather than one
+/// per byte. The stack buffer is wiped before returning — the bytes also live in
+/// the destination — so this copy would otherwise be the only trace left behind.
+pub(crate) fn write_varint<B: Buffer>(buffer: &mut B, value: usize) -> Result<(), Error> {
    let mut scratch = [0u8; MAX_VARINT_LEN];
 
    let mut remaining = value;
@@ -46,7 +46,7 @@ pub(crate) fn write_varint(buffer: &mut SecureBytes, value: usize) -> Result<(),
       len += 1;
    }
 
-   let result = buffer.extend_from_slice(&scratch[..len]);
+   let result = buffer.append(&scratch[..len]);
    scratch.zeroize();
    result
 }
@@ -274,6 +274,7 @@ impl serde::de::Error for DecodeError {
 #[cfg(test)]
 mod tests {
    use super::*;
+   use crate::SecureBytes;
 
    /// Encodes `value` into a fresh locked buffer of exactly the varint size.
    fn varint_bytes(value: usize) -> SecureBytes {

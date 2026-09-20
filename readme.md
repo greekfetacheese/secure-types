@@ -92,7 +92,7 @@ The `codec` feature is a small binary `serde` format. Encode goes into locked me
 
 ```rust
 # #[cfg(feature = "codec")] {
-use secure_types::{decode, encode};
+use secure_types::{decode, encode, encode_into_vec};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
@@ -119,11 +119,21 @@ let decoded = decode::<VaultData>(&encoded)?;
 
 assert_eq!(decoded.wallet_state_key, Some(7));
 assert!(decoded.contacts.is_empty()); // `skip_serializing` -> `default`
+
+// When the caller is going to hold the document in a `Vec<u8>` anyway,
+// `encode_into_vec` appends it straight into that buffer — a codec tag first,
+// the document after it — so there is no `SecureBytes` to allocate and nothing
+// copied twice. `encode_to_vec` is the same into a fresh buffer.
+//
+// That buffer is ordinary memory: not locked, and not wiped on drop.
+let mut payload = vec![0x07];
+encode_into_vec(&mut payload, &vault)?;
+assert_eq!(payload[0], 0x07);
 # }
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-`encode` returns a `SecureBytes`. `decode` unlocks only for the parse and re-locks afterwards, including on error. Types are raw binary — a `SecureArray<u8, 32>` is 32 bytes — and strings are not escaped, so there is no scratch copy of an unescaped string.
+`encode` returns a `SecureBytes`. `encode_to_vec` / `encode_into_vec` produce the same document into a plain `Vec<u8>` the caller owns: not locked, and not zeroized on drop, but a *failed* encoding erases everything it appended rather than leaving a partial document behind. `decode` unlocks only for the parse and re-locks afterwards, including on error. Types are raw binary — a `SecureArray<u8, 32>` is 32 bytes — and strings are not escaped, so there is no scratch copy of an unescaped string.
 
 **Format evolution.** `FORMAT_VERSION` is the first byte. An unknown version is refused. Adding a field with `#[serde(default)]` does not need a bump: fields are named and length-prefixed, so unknown fields are skipped and missing ones take their default. Changing a field's type does need a bump.
 
@@ -137,7 +147,7 @@ assert!(decoded.contacts.is_empty()); // `skip_serializing` -> `default`
 - `use_os` (default): Enables all OS-level security features. Supported on Linux, Windows, and other Unix (macOS, FreeBSD, …); the `memfd_secret` backing (and core-dump exclusion via `MADV_DONTDUMP`) is Linux-only.
 - `no_os`: No-op, kept for backwards compatibility. `no_std` is selected by disabling the default features (`--no-default-features`), which leaves only the zeroize-on-drop guarantee.
 - `serde`: Enables serialization/deserialization.
-- `codec`: Adds `encode` / `encode_with_capacity` / `decode` / `decode_slice`, a binary format written into locked memory and read out of it. Implies `serde`, works in `no_std` + `alloc`, and adds no dependency.
+- `codec`: Adds `encode` / `encode_with_capacity` / `encode_to_vec` / `encode_to_vec_with_capacity` / `encode_into_vec` / `decode` / `decode_slice`, a binary format written into locked memory (or, for the `_vec` pair, into a `Vec<u8>` you own) and read out of it. Implies `serde`, works in `no_std` + `alloc`, and adds no dependency.
 - `expose-ptr`: For testing purposes. Exposes the locked memory region pointer.
 
 ## Security notes

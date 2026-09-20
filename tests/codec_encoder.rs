@@ -720,3 +720,125 @@ fn test_a_serialize_impls_rejection_message_never_reaches_the_error() {
       );
    }
 }
+
+/// Encodes `value` into a fresh locked buffer, for comparison.
+fn locked_bytes<T>(value: &T) -> Vec<u8>
+where
+   T: ?Sized + Serialize,
+{
+   secure_types::encode(value)
+      .unwrap()
+      .unlock_slice(<[u8]>::to_vec)
+}
+
+/// `encode_to_vec` and `encode_to_vec_with_capacity` must produce the same
+/// document as `encode`, byte for byte, whatever the initial capacity was.
+fn assert_vec_encoding_matches<T>(value: &T)
+where
+   T: ?Sized + Serialize,
+{
+   let expected = locked_bytes(value);
+
+   let plain = secure_types::encode_to_vec(value).unwrap();
+   assert_eq!(
+      plain, expected,
+      "\n  encode_to_vec: {plain:02X?}\n  encode:        {expected:02X?}"
+   );
+   assert_eq!(plain.first(), Some(&FORMAT_VERSION));
+
+   // The initial capacity is a sizing hint, never part of the document: an
+   // under-sized and an exactly-sized buffer must land on the same bytes.
+   for capacity in [0, 1, expected.len()] {
+      let sized = secure_types::encode_to_vec_with_capacity(value, capacity).unwrap();
+      assert_eq!(
+         sized, expected,
+         "encode_to_vec_with_capacity({capacity}) disagreed with encode"
+      );
+   }
+}
+
+#[test]
+fn test_encode_to_vec_matches_encode() {
+   // Scalars, strings and the containers that exercise the varint length
+   // prefixes.
+   assert_vec_encoding_matches(&true);
+   assert_vec_encoding_matches(&(-1i64));
+   assert_vec_encoding_matches(&u64::MAX);
+   assert_vec_encoding_matches(&'x');
+   assert_vec_encoding_matches(&"a string");
+   assert_vec_encoding_matches(&Some(7u8));
+   assert_vec_encoding_matches(&Option::<u8>::None);
+   assert_vec_encoding_matches(&vec![1u8, 2, 3]);
+   assert_vec_encoding_matches(&BTreeMap::from([("k", 1u8)]));
+
+   // Structs, enums, and the shapes whose length is only known at the end.
+   assert_vec_encoding_matches(&EmptyStruct {});
+   assert_vec_encoding_matches(&UnitStruct);
+   assert_vec_encoding_matches(&NewtypeStruct(7));
+   assert_vec_encoding_matches(&Point { x: 1, y: 0x0102 });
+   assert_vec_encoding_matches(&Outer {
+      name: "vault",
+      point: Point { x: 3, y: 4 },
+   });
+   assert_vec_encoding_matches(&MidSkip {
+      first: 1,
+      middle: None,
+      last: 2,
+   });
+   assert_vec_encoding_matches(&WithNever { kept: 1, never: 2 });
+   assert_vec_encoding_matches(&Shape::Unit);
+   assert_vec_encoding_matches(&Shape::New(1));
+   assert_vec_encoding_matches(&Shape::Tup(1, 2));
+   assert_vec_encoding_matches(&Shape::Named { a: 1 });
+   assert_vec_encoding_matches(&UnknownLengthSeq);
+   assert_vec_encoding_matches(&UnknownLengthMap);
+   assert_vec_encoding_matches(&Displays(7));
+}
+
+/// The pattern `encode_into_vec` exists for: a codec tag in front of the
+/// document, written once into the buffer the caller keeps.
+#[test]
+fn test_encode_into_vec_appends_after_a_prefix() {
+   const VAULT_PAYLOAD_CODEC: u8 = 0x07;
+
+   let value = Outer {
+      name: "vault",
+      point: Point { x: 1, y: 2 },
+   };
+   let document = locked_bytes(&value);
+
+   let mut buffer = Vec::new();
+   buffer.push(VAULT_PAYLOAD_CODEC);
+
+   secure_types::encode_into_vec(&mut buffer, &value).unwrap();
+
+   assert_eq!(buffer[0], VAULT_PAYLOAD_CODEC);
+   assert_eq!(
+      &buffer[1..],
+      document.as_slice(),
+      "the document must be appended after the prefix, unchanged"
+   );
+}
+
+/// A failed encoding must not leave a partial document in a buffer this crate
+/// cannot wipe — and must leave whatever the caller already had in it alone.
+///
+/// `DeclaresTooMany` fails at `end()`, after the version byte and two of its
+/// three declared elements have already been written, so there is always
+/// something to erase. `rollback` wipes those bytes and restores the length;
+/// a bare `truncate` would only forget them.
+#[test]
+fn test_encode_into_vec_erases_its_partial_document_on_failure() {
+   const PREFIX: &[u8] = b"tag";
+
+   let mut buffer = PREFIX.to_vec();
+
+   let error = secure_types::encode_into_vec(&mut buffer, &DeclaresTooMany)
+      .expect_err("a mismatched element count should fail the encoding");
+
+   assert!(matches!(error, EncodeError::ElementCountMismatch));
+   assert_eq!(
+      buffer, PREFIX,
+      "the failed encoding left bytes behind in the caller's buffer"
+   );
+}

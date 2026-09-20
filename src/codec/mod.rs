@@ -81,6 +81,21 @@
 //! That is what makes "add a field with `#[serde(default)]`" a compatible
 //! change, and it is why struct fields carry a length.
 //!
+//! # Where the document ends up
+//!
+//! [`encode`] and [`encode_with_capacity`] write into a [`SecureBytes`]: locked
+//! while unused, zeroized on drop, and with the previous allocation wiped on
+//! growth. [`encode_to_vec`] and [`encode_into_vec`] write into an ordinary
+//! `Vec<u8>` the caller owns — for callers that keep the document in one anyway,
+//! such as a codec tag to prefix it with or an API that only takes `Vec<u8>`,
+//! and would otherwise allocate a [`SecureBytes`] just to copy out of it. Both
+//! go through the same serializer, and every scratch buffer it needs internally
+//! is a [`SecureBytes`], so this only decides where the *result* lives.
+//!
+//! Note that the reader takes a plain `&[u8]` ([`decode_slice`]), so a document
+//! produced into a `Vec` decodes without being copied back into locked memory
+//! first.
+//!
 //! # The wire format
 //!
 //! Integers are little-endian; lengths and counts are unsigned LEB128 varints.
@@ -111,9 +126,13 @@
 //! and the `u32` length around each field body is what lets a reader skip a
 //! field it does not know.
 
+mod buffer;
 mod decoder;
 mod encoder;
 mod format;
+
+#[cfg(not(feature = "use_os"))]
+use alloc::vec::Vec;
 
 use crate::SecureBytes;
 
@@ -177,6 +196,71 @@ where
    T: ?Sized + Serialize,
 {
    let mut buffer = SecureBytes::new_with_capacity(capacity).map_err(EncodeError::Secure)?;
+
+   encoder::encode_into(&mut buffer, value)?;
+
+   Ok(buffer)
+}
+
+/// Encodes `value` into `buffer`, appending it after whatever `buffer` already
+/// holds.
+///
+/// For callers that keep the document in an ordinary `Vec<u8>` anyway: a codec
+/// tag (or anything else) can be written first and the document appended
+/// straight after it, with no [`SecureBytes`] allocated and nothing copied
+/// twice. See [`encode_to_vec`] for the same thing into a fresh buffer.
+///
+/// # Errors
+///
+/// Same as [`encode`]. A failure to allocate `buffer` itself is not one of
+/// them — `Vec` aborts on allocation failure rather than reporting it.
+///
+/// # Security
+///
+/// `buffer` is a plain `Vec<u8>`: it is not locked while unused, and neither
+/// dropping it nor growing it wipes anything. Growing in particular can leave a
+/// copy of the partial document in freed memory, because `Vec` reallocates
+/// without wiping — reserve enough capacity up front where that matters. The
+/// scratch buffers the encoder uses internally stay [`SecureBytes`]. Use
+/// [`encode`] when the document itself should live in locked, zeroizing memory.
+///
+/// A failed encoding erases what it appended and leaves `buffer` at its previous
+/// length, so nothing partial survives in a buffer this crate cannot wipe.
+pub fn encode_into_vec<T>(buffer: &mut Vec<u8>, value: &T) -> Result<(), EncodeError>
+where
+   T: ?Sized + Serialize,
+{
+   encoder::encode_into(buffer, value)
+}
+
+/// Encodes `value` into a fresh `Vec<u8>`.
+///
+/// Same as [`encode`], except the document is not held in locked memory. Prefer
+/// [`encode_to_vec_with_capacity`] when the payload size is known: a `Vec` does
+/// not wipe the allocation it grows out of, so sizing it up front avoids leaving
+/// a copy of the partial document on the heap.
+///
+/// # Errors
+///
+/// Same as [`encode`]. A failure to allocate the returned buffer is not one of
+/// them — `Vec` aborts on allocation failure rather than reporting it.
+pub fn encode_to_vec<T>(value: &T) -> Result<Vec<u8>, EncodeError>
+where
+   T: ?Sized + Serialize,
+{
+   encode_to_vec_with_capacity(value, DEFAULT_CAPACITY)
+}
+
+/// Same as [`encode_to_vec`], with an explicit initial buffer size.
+///
+/// # Errors
+///
+/// Same as [`encode_to_vec`].
+pub fn encode_to_vec_with_capacity<T>(value: &T, capacity: usize) -> Result<Vec<u8>, EncodeError>
+where
+   T: ?Sized + Serialize,
+{
+   let mut buffer = Vec::with_capacity(capacity);
 
    encoder::encode_into(&mut buffer, value)?;
 

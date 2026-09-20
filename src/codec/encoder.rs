@@ -1,9 +1,12 @@
 //! The [`serde::Serializer`] that writes the codec's wire format.
 //!
-//! Every byte goes through [`SecureBytes::extend_from_slice`], so the encoded
-//! document only ever exists in memory that is locked while unused and zeroized
-//! on drop. Growth is safe too: [`SecureVec::reserve`] wipes the old allocation
-//! after moving the elements out of it.
+//! Every byte goes through [`Buffer::append`], so where the document ends up is
+//! the buffer's business: [`encode`](crate::encode) writes into a
+//! [`SecureBytes`] — locked while unused, zeroized on drop, and with the previous
+//! allocation wiped on growth — while
+//! [`encode_into_vec`](crate::encode_into_vec) writes into a plain `Vec<u8>` the
+//! caller owns. The scratch buffers the encoder needs internally are always
+//! [`SecureBytes`], so no partial document is left in un-wiped memory either way.
 
 use core::fmt;
 
@@ -13,6 +16,7 @@ use alloc::vec::Vec;
 use serde::ser::{self, Serialize};
 use zeroize::Zeroize;
 
+use super::buffer::Buffer;
 use super::format::{EncodeError, FORMAT_VERSION, write_varint};
 use crate::SecureBytes;
 
@@ -23,9 +27,9 @@ const FIELD_FRAME_LEN: usize = 4;
 /// is not known up front.
 const SCRATCH_CAPACITY: usize = 64;
 
-/// Writes the codec wire format into a borrowed locked buffer.
-pub(crate) struct Encoder<'a> {
-   bytes: &'a mut SecureBytes,
+/// Writes the codec wire format into a borrowed buffer.
+pub(crate) struct Encoder<'a, B: Buffer> {
+   bytes: &'a mut B,
    /// One entry per struct field whose length frame is still open, innermost
    /// last. Entries below the current scope belong to enclosing structs and are
    /// left untouched until their own scope closes.
@@ -51,7 +55,7 @@ impl Zeroize for Frame {
    }
 }
 
-impl Drop for Encoder<'_> {
+impl<B: Buffer> Drop for Encoder<'_, B> {
    fn drop(&mut self) {
       // A frame records where a secret starts and how long it is. That is
       // metadata about the secret, so it is wiped rather than left in freed
@@ -64,28 +68,50 @@ impl Drop for Encoder<'_> {
 
 /// Encodes `value` into `buffer`, preceded by [`FORMAT_VERSION`].
 ///
-/// `buffer` is expected to be empty; the document is appended to whatever it
-/// already holds, which is what lets a caller size it for the payload up front.
+/// The document is appended to whatever `buffer` already holds, so a caller can
+/// size it for the payload up front, or put something ahead of the document —
+/// [`encode_into_vec`](crate::encode_into_vec) exists for the latter case.
 ///
 /// # Errors
 ///
 /// Fails if the locked buffer cannot grow, if a value does not fit the format,
 /// or if a container's `Serialize` impl writes a different number of elements
 /// than the length it declared.
-pub(crate) fn encode_into<T>(buffer: &mut SecureBytes, value: &T) -> Result<(), EncodeError>
+///
+/// A failure leaves nothing behind: whatever was appended before the error is
+/// erased by [`Buffer::rollback`], and `buffer` is left exactly as it was.
+pub(crate) fn encode_into<T, B>(buffer: &mut B, value: &T) -> Result<(), EncodeError>
 where
    T: ?Sized + Serialize,
+   B: Buffer,
+{
+   let start = buffer.len();
+
+   let result = encode_into_sink(buffer, value);
+
+   if result.is_err() {
+      buffer.rollback(start);
+   }
+
+   result
+}
+
+/// Writes the version byte and the document, without the rollback wrapper.
+fn encode_into_sink<T, B>(buffer: &mut B, value: &T) -> Result<(), EncodeError>
+where
+   T: ?Sized + Serialize,
+   B: Buffer,
 {
    buffer
-      .extend_from_slice(&[FORMAT_VERSION])
+      .append(&[FORMAT_VERSION])
       .map_err(EncodeError::Secure)?;
 
    let mut encoder = Encoder::new(buffer);
    value.serialize(&mut encoder)
 }
 
-impl<'a> Encoder<'a> {
-   fn new(bytes: &'a mut SecureBytes) -> Self {
+impl<'a, B: Buffer> Encoder<'a, B> {
+   fn new(bytes: &'a mut B) -> Self {
       Self {
          bytes,
          frames: Vec::new(),
@@ -94,10 +120,7 @@ impl<'a> Encoder<'a> {
 
    /// Appends raw bytes to the document.
    fn write_bytes(&mut self, bytes: &[u8]) -> Result<(), EncodeError> {
-      self
-         .bytes
-         .extend_from_slice(bytes)
-         .map_err(EncodeError::Secure)
+      self.bytes.append(bytes).map_err(EncodeError::Secure)
    }
 
    /// Appends `value` as an unsigned LEB128 varint.
@@ -180,17 +203,17 @@ impl<'a> Encoder<'a> {
    }
 }
 
-impl<'a, 'b> ser::Serializer for &'b mut Encoder<'a> {
+impl<'a, 'b, B: Buffer> ser::Serializer for &'b mut Encoder<'a, B> {
    type Ok = ();
    type Error = EncodeError;
 
-   type SerializeSeq = CompoundEncoder<'b, 'a>;
-   type SerializeTuple = CompoundEncoder<'b, 'a>;
-   type SerializeTupleStruct = CompoundEncoder<'b, 'a>;
-   type SerializeTupleVariant = CompoundEncoder<'b, 'a>;
-   type SerializeMap = CompoundEncoder<'b, 'a>;
-   type SerializeStruct = StructEncoder<'b, 'a>;
-   type SerializeStructVariant = StructEncoder<'b, 'a>;
+   type SerializeSeq = CompoundEncoder<'b, 'a, B>;
+   type SerializeTuple = CompoundEncoder<'b, 'a, B>;
+   type SerializeTupleStruct = CompoundEncoder<'b, 'a, B>;
+   type SerializeTupleVariant = CompoundEncoder<'b, 'a, B>;
+   type SerializeMap = CompoundEncoder<'b, 'a, B>;
+   type SerializeStruct = StructEncoder<'b, 'a, B>;
+   type SerializeStructVariant = StructEncoder<'b, 'a, B>;
 
    fn serialize_bool(self, value: bool) -> Result<Self::Ok, Self::Error> {
       self.write_bytes(&[u8::from(value)])
@@ -435,8 +458,8 @@ impl fmt::Write for DisplaySink<'_> {
 /// `pub(crate)` only because it appears as an associated type of the
 /// [`ser::Serializer`] impl, which forces it to be at least as visible as the
 /// impl being reachable.
-pub(crate) struct CompoundEncoder<'b, 'a> {
-   encoder: &'b mut Encoder<'a>,
+pub(crate) struct CompoundEncoder<'b, 'a, B: Buffer> {
+   encoder: &'b mut Encoder<'a, B>,
    mode: CompoundMode,
 }
 
@@ -458,9 +481,9 @@ enum CompoundMode {
    },
 }
 
-impl<'b, 'a> CompoundEncoder<'b, 'a> {
+impl<'b, 'a, B: Buffer> CompoundEncoder<'b, 'a, B> {
    fn from_optional_len(
-      encoder: &'b mut Encoder<'a>,
+      encoder: &'b mut Encoder<'a, B>,
       len: Option<usize>,
    ) -> Result<Self, EncodeError> {
       let mode = match len {
@@ -479,7 +502,7 @@ impl<'b, 'a> CompoundEncoder<'b, 'a> {
    }
 
    /// Opens a container whose length is fixed and known, writing the count.
-   fn from_len(encoder: &'b mut Encoder<'a>, len: usize) -> Result<Self, EncodeError> {
+   fn from_len(encoder: &'b mut Encoder<'a, B>, len: usize) -> Result<Self, EncodeError> {
       encoder.write_varint(len)?;
 
       Ok(Self {
@@ -539,7 +562,7 @@ impl<'b, 'a> CompoundEncoder<'b, 'a> {
    }
 }
 
-impl<'b, 'a> ser::SerializeSeq for CompoundEncoder<'b, 'a> {
+impl<'b, 'a, B: Buffer> ser::SerializeSeq for CompoundEncoder<'b, 'a, B> {
    type Ok = ();
    type Error = EncodeError;
 
@@ -556,7 +579,7 @@ impl<'b, 'a> ser::SerializeSeq for CompoundEncoder<'b, 'a> {
    }
 }
 
-impl<'b, 'a> ser::SerializeTuple for CompoundEncoder<'b, 'a> {
+impl<'b, 'a, B: Buffer> ser::SerializeTuple for CompoundEncoder<'b, 'a, B> {
    type Ok = ();
    type Error = EncodeError;
 
@@ -573,7 +596,7 @@ impl<'b, 'a> ser::SerializeTuple for CompoundEncoder<'b, 'a> {
    }
 }
 
-impl<'b, 'a> ser::SerializeTupleStruct for CompoundEncoder<'b, 'a> {
+impl<'b, 'a, B: Buffer> ser::SerializeTupleStruct for CompoundEncoder<'b, 'a, B> {
    type Ok = ();
    type Error = EncodeError;
 
@@ -590,7 +613,7 @@ impl<'b, 'a> ser::SerializeTupleStruct for CompoundEncoder<'b, 'a> {
    }
 }
 
-impl<'b, 'a> ser::SerializeTupleVariant for CompoundEncoder<'b, 'a> {
+impl<'b, 'a, B: Buffer> ser::SerializeTupleVariant for CompoundEncoder<'b, 'a, B> {
    type Ok = ();
    type Error = EncodeError;
 
@@ -607,7 +630,7 @@ impl<'b, 'a> ser::SerializeTupleVariant for CompoundEncoder<'b, 'a> {
    }
 }
 
-impl<'b, 'a> ser::SerializeMap for CompoundEncoder<'b, 'a> {
+impl<'b, 'a, B: Buffer> ser::SerializeMap for CompoundEncoder<'b, 'a, B> {
    type Ok = ();
    type Error = EncodeError;
 
@@ -637,16 +660,16 @@ impl<'b, 'a> ser::SerializeMap for CompoundEncoder<'b, 'a> {
 /// length frame per field.
 ///
 /// `pub(crate)` for the same reason as [`CompoundEncoder`].
-pub(crate) struct StructEncoder<'b, 'a> {
-   encoder: &'b mut Encoder<'a>,
+pub(crate) struct StructEncoder<'b, 'a, B: Buffer> {
+   encoder: &'b mut Encoder<'a, B>,
    /// Frame count when this struct was opened. Frames below it belong to
    /// enclosing structs and must be left open.
    scope: usize,
    remaining: usize,
 }
 
-impl<'b, 'a> StructEncoder<'b, 'a> {
-   fn new(encoder: &'b mut Encoder<'a>, len: usize) -> Self {
+impl<'b, 'a, B: Buffer> StructEncoder<'b, 'a, B> {
+   fn new(encoder: &'b mut Encoder<'a, B>, len: usize) -> Self {
       let scope = encoder.frames.len();
 
       Self {
@@ -670,7 +693,7 @@ impl<'b, 'a> StructEncoder<'b, 'a> {
    }
 }
 
-impl<'b, 'a> ser::SerializeStruct for StructEncoder<'b, 'a> {
+impl<'b, 'a, B: Buffer> ser::SerializeStruct for StructEncoder<'b, 'a, B> {
    type Ok = ();
    type Error = EncodeError;
 
@@ -690,7 +713,7 @@ impl<'b, 'a> ser::SerializeStruct for StructEncoder<'b, 'a> {
    }
 }
 
-impl<'b, 'a> ser::SerializeStructVariant for StructEncoder<'b, 'a> {
+impl<'b, 'a, B: Buffer> ser::SerializeStructVariant for StructEncoder<'b, 'a, B> {
    type Ok = ();
    type Error = EncodeError;
 
