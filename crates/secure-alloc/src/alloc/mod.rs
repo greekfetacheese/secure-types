@@ -11,7 +11,6 @@ use self::std::sync::Once;
 use core::mem;
 use core::ptr::{self, NonNull};
 use core::slice;
-use getrandom::getrandom;
 
 const GARBAGE_VALUE: u8 = 0xd0;
 const CANARY_SIZE: usize = 16;
@@ -43,7 +42,7 @@ unsafe fn alloc_init() {
     PAGE_MASK = PAGE_SIZE - 1;
 
     #[allow(static_mut_refs)]
-    getrandom(&mut CANARY).unwrap();
+    getrandom::fill(&mut CANARY).unwrap();
 }
 
 // -- aligned alloc / aligned free --
