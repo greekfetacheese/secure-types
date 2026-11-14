@@ -55,6 +55,13 @@ Deliberately few; anything not listed here is upstream 0.7.0 code.
   flag), and it is closed rather than leaked when `ftruncate` or `mmap` fails.
   Upstream: [memsec#22](https://github.com/quininer/memsec/issues/22).
 - `tests/memfd_secret_cloexec.rs` — new; regression test for the descriptor above.
+- `src/mlock.rs` — `madvise` is given the page-aligned range covering the caller's
+  bytes, and the page size is read once with `sysconf` and cached there. `mlock(2)`
+  accepts an unaligned address but `madvise(2)` rejects one with `EINVAL`, so an
+  unaligned `mlock` used to succeed while its dump exclusion silently did nothing.
+  Upstream: [memsec#19](https://github.com/quininer/memsec/pull/19). The page size no
+  longer comes from the allocator's statics, so `use_os` without `alloc` still builds.
+- `tests/mlock_dump_exclusion.rs` — new; regression test for the alignment above.
 
 ## API
 
@@ -168,6 +175,9 @@ plus `close` on free. They are only compiled on Linux: on any other target the
   example when `RLIMIT_MEMLOCK` is exhausted). Call `mlock` yourself, or check
   `/proc/self/status`'s `VmLck`, if the guarantee matters. The `memfd_secret` path
   does not lock memory at all — `secretmem` pages are already unswappable.
+  The dump exclusion (`MADV_DONTDUMP` / `MADV_NOCORE`) is best-effort as well: it
+  is applied to the page-aligned range covering the caller's bytes, and a failure
+  is not reported.
 - **Zeroization happens in `munlock`.** `free` never zeroes the buffer itself; it
   delegates to `munlock`, which `memzero`s the whole data region before unlocking.
   On stable Rust `memset` protects against dead-store elimination only by re-reading
