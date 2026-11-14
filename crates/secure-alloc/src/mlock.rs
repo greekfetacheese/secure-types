@@ -6,6 +6,12 @@
 ///
 /// * Unix `mlock`.
 /// * Windows `VirtualLock`.
+///
+/// # Safety
+///
+/// `addr..addr + len` must be a live, page-aligned mapping owned by the caller
+/// and stay mapped for the duration of the call. Nothing is dereferenced here,
+/// so an invalid range only fails the underlying call, reported as `false`.
 pub unsafe fn mlock(addr: *mut u8, len: usize) -> bool {
     #[cfg(unix)]
     {
@@ -28,6 +34,12 @@ pub unsafe fn mlock(addr: *mut u8, len: usize) -> bool {
 ///
 /// * Unix `munlock`.
 /// * Windows `VirtualUnlock`.
+///
+/// # Safety
+///
+/// `addr..addr + len` must be a live, writable, page-aligned mapping owned by
+/// the caller and stay valid for the duration of the call: the range is zeroed
+/// (`memzero`) before it is unlocked.
 pub unsafe fn munlock(addr: *mut u8, len: usize) -> bool {
     crate::memzero(addr, len);
 

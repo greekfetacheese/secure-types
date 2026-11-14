@@ -47,6 +47,9 @@ Deliberately few; anything not listed here is upstream 0.7.0 code.
   spelling of `getrandom()`, because the dependency moved to `getrandom` 0.4.
 - `Cargo.toml` — `getrandom` 0.4 and `windows-sys` 0.61 (were 0.2 and 0.45), and
   docs.rs builds with `alloc_ext` instead of `--all-features`.
+- `src/lib.rs`, `src/mlock.rs`, `src/alloc/mod.rs`, `src/alloc/allocext/linux.rs` —
+  every public `unsafe fn` documents its contract in a `# Safety` section, and the
+  crate-wide `#![allow(clippy::missing_safety_doc)]` is gone. Documentation only.
 
 ## API
 
