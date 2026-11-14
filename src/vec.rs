@@ -1061,6 +1061,9 @@ where
 /// vector, so a leaked iterator (`mem::forget`) leaves the vector locked rather than
 /// exposed. Leaking it still skips the drops of the elements left in the drained
 /// range and leaves the length at the drain start.
+///
+/// Elements that are never yielded are zeroized and then dropped when the iterator
+/// is dropped, exactly as `clear` and `Drop` discard an element.
 pub struct Drain<'a, T: Zeroize + 'a> {
    vec_ref: &'a mut SecureVec<T>,
    drain_start_index: usize,
@@ -1121,18 +1124,22 @@ impl<'a, T: Zeroize> Drain<'a, T> {
       let _guard = UnlockGuard::new(&*self.vec_ref);
 
       // SAFETY: the guard unprotects the live vector. Every index is within the
-      // original length; unyielded drain-range elements are dropped exactly once,
-      // the tail is moved (not copied) into the hole, and the leftover slots hold
-      // only moved-from / duplicate bit patterns — wiped as bytes, never
-      // reinterpreted as a `T`.
+      // original length; unyielded drain-range elements are zeroized and then
+      // dropped exactly once, the tail is moved (not copied) into the hole, and
+      // the leftover slots hold only moved-from / duplicate bit patterns — wiped
+      // as bytes, never reinterpreted as a `T`.
       unsafe {
-         // Drop drain-range elements that were never yielded. `next` already
+         // Discard drain-range elements that were never yielded. `next` already
          // `ptr::read` them out to the caller; dropping those again would
-         // double-free.
+         // double-free. Each unyielded element is zeroized before it is dropped,
+         // exactly as `clear` and `Drop` discard one: the byte wipe below only
+         // reaches the slot, so without it the memory a `T` owns (a `String`'s
+         // buffer) would be freed with its plaintext intact.
          if mem::needs_drop::<T>() {
             let mut current_ptr = base.add(self.current_drain_iter_index);
             let end_ptr = base.add(self.drain_end_index);
             while current_ptr < end_ptr {
+               (*current_ptr).zeroize();
                ptr::drop_in_place(current_ptr);
                current_ptr = current_ptr.add(1);
             }
@@ -1302,6 +1309,18 @@ mod tests {
       vec.push(Owned(0));
       drop(vec);
       assert_eq!(counts(), (1, 1), "reuse after clear");
+
+      // A drain dropped with elements still inside discards them too: only the
+      // yielded element moves out, so only its `Drop` runs here and the unyielded
+      // one must be zeroized before it is dropped.
+      reset_counts();
+      let mut vec = tracked_vec(3);
+      {
+         let mut drain = vec.drain(0..2);
+         drop(drain.next().expect("the drain yields its first element"));
+      }
+      assert_eq!(vec.len(), 1);
+      assert_eq!(counts(), (1, 2), "drain");
    }
 
    #[cfg(feature = "use_os")]
