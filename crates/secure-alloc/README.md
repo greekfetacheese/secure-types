@@ -27,17 +27,26 @@ secure-alloc = "0.7.0"
 
 - Forked from [`quininer/memsec`](https://github.com/quininer/memsec) by quininer kel.
 - Based on the published `memsec` 0.7.0 release, at upstream master commit
-  `b4de7b9a` (2025-01-21). The files under `src/` are byte-identical to that
-  commit except for one crate-level `#![doc = include_str!("../README.md")]`
-  attribute added at the top of `src/lib.rs`, so this README is the crate's front
-  page (and its examples are doctests). Beyond that one attribute, the code is
-  identical to the published 0.7.0 tarball except for four
-  `#[allow(static_mut_refs)]` attributes upstream added afterwards, each
-  directly above an expression taking `CANARY.as_ptr()`.
-  `LICENSE` is copied verbatim.
-- Upstream has been unmaintained since that release. This fork keeps the source as
-  it is and only renames the package, so fixes can still be shipped.
+  `b4de7b9a` (2025-01-21). Compared with that commit the code carries only the
+  changes listed under [Changes from upstream](#changes-from-upstream); the four
+  `#[allow(static_mut_refs)]` attributes in it are upstream's, added after 0.7.0
+  was published. `LICENSE` is copied verbatim.
+- Upstream has been unmaintained since that release. This fork keeps the source
+  close to upstream, so upstream fixes can still be carried over.
 - Licensed MIT, the same as upstream (see [LICENSE](https://github.com/greekfetacheese/secure-types/blob/master/crates/secure-alloc/LICENSE)).
+
+## Changes from upstream
+
+Deliberately few; anything not listed here is upstream 0.7.0 code.
+
+- `src/lib.rs` — `#![doc = include_str!("../README.md")]`, so this README is the
+  crate front page and its examples are doctests.
+- `src/alloc/mod.rs`, `src/alloc/allocext/linux.rs` — `::core::usize::MAX` is
+  written `usize::MAX`. Identical value; the deprecated spelling is gone.
+- `src/alloc/mod.rs` — the canary is filled with `getrandom::fill`, the 0.3+
+  spelling of `getrandom()`, because the dependency moved to `getrandom` 0.4.
+- `Cargo.toml` — `getrandom` 0.4 and `windows-sys` 0.61 (were 0.2 and 0.45), and
+  docs.rs builds with `alloc_ext` instead of `--all-features`.
 
 ## API
 
