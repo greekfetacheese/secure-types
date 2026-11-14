@@ -13,6 +13,25 @@ use core::ptr::{self, NonNull};
 
 const GARBAGE_VALUE: u8 = 0xd0;
 const CANARY_SIZE: usize = 16;
+
+/// Marks the metadata page of a `malloc`/`malloc_sized` allocation.
+const MALLOC_TAG: usize = 0x4D41_4C4C; // "MALL"
+/// Marks the metadata page of a `memfd_secret` allocation.
+const MEMFD_TAG: usize = 0x4D46_4453; // "MFDS"
+
+/// Value written to the `memfd_secret` tag slot of a `malloc` header.
+///
+/// Both layouts keep the data-region length at offset 0. A `malloc` allocation
+/// stores its tag in the next `usize`; a `memfd_secret` allocation stores its
+/// descriptor there, so its tag sits one `usize` further along. Writing a defined
+/// value into that further slot keeps both checks reading initialised metadata and
+/// makes the two tags exclusive.
+const NOT_MEMFD_TAG: usize = 0;
+
+/// Offsets of the allocator tags in the metadata page.
+const MALLOC_TAG_OFFSET: usize = mem::size_of::<usize>();
+const MEMFD_TAG_OFFSET: usize = MALLOC_TAG_OFFSET + mem::size_of::<usize>();
+
 static ALLOC_INIT: Once = Once::new();
 static mut PAGE_SIZE: usize = 0;
 static mut PAGE_MASK: usize = 0;
@@ -136,17 +155,29 @@ pub unsafe fn _mprotect(ptr: *mut u8, len: usize, prot: Prot::Ty) -> bool {
 ///
 /// # Safety
 ///
-/// `memptr` must be a live pointer returned by `malloc` or `malloc_sized` and
-/// not yet freed, and the caller must hold up whatever flags it installs: no
-/// access may violate them until they are changed again or the allocation is
-/// freed. A `false` return means the platform rejected the call; do not assume
-/// the requested flags are in place.
+/// `memptr` must be a live pointer returned by `malloc`, `malloc_sized`,
+/// `memfd_secret` or `memfd_secret_sized` and not yet freed, and the caller must
+/// hold up whatever flags it installs: no access may violate them until they are
+/// changed again or the allocation is freed. A pointer whose metadata page does
+/// not carry either allocator tag aborts rather than being re-protected. A
+/// `false` return means the platform rejected the call; do not assume the
+/// requested flags are in place.
 #[cfg(any(unix, windows))]
 pub unsafe fn mprotect<T: ?Sized>(memptr: NonNull<T>, prot: Prot::Ty) -> bool {
     let memptr = memptr.as_ptr() as *mut u8;
 
     let unprotected_ptr = unprotected_ptr_from_user_ptr(memptr);
     let base_ptr = unprotected_ptr.sub(PAGE_SIZE * 2);
+
+    // Check the allocator tag before trusting the length at offset 0. Either tag is
+    // accepted: `secure-types` re-protects `memfd_secret` allocations through this
+    // same entry point.
+    if ptr::read(base_ptr.add(MALLOC_TAG_OFFSET) as *const usize) != MALLOC_TAG
+        && ptr::read(base_ptr.add(MEMFD_TAG_OFFSET) as *const usize) != MEMFD_TAG
+    {
+        abort();
+    }
+
     let unprotected_size = ptr::read(base_ptr as *const usize);
     _mprotect(unprotected_ptr, unprotected_size, prot)
 }
@@ -196,6 +227,11 @@ unsafe fn _malloc(size: usize) -> Option<*mut u8> {
     #[allow(static_mut_refs)]
     ptr::copy_nonoverlapping(CANARY.as_ptr(), canary_ptr, CANARY_SIZE);
     ptr::write_unaligned(base_ptr as *mut usize, unprotected_size);
+    ptr::write_unaligned(base_ptr.add(MALLOC_TAG_OFFSET) as *mut usize, MALLOC_TAG);
+    // Define the spare tag slot as well, so neither `mprotect` nor
+    // `free_memfd_secret` reads uninitialised metadata or mistakes this header for
+    // a `memfd_secret` one.
+    ptr::write_unaligned(base_ptr.add(MEMFD_TAG_OFFSET) as *mut usize, NOT_MEMFD_TAG);
     _mprotect(base_ptr, PAGE_SIZE, Prot::ReadOnly);
 
     assert_eq!(unprotected_ptr_from_user_ptr(user_ptr), unprotected_ptr);
@@ -240,9 +276,10 @@ pub unsafe fn malloc_sized(size: usize) -> Option<NonNull<[u8]>> {
 /// `memptr` must be a live pointer returned by `malloc` or `malloc_sized` and
 /// not yet freed. The data-region length is read from the allocation's metadata
 /// page, so `T` only has to carry the address, not match the allocation's type;
-/// afterwards every pointer into the allocation is dangling. A pointer that does
-/// not come from this allocator aborts on the canary check, or faults while the
-/// metadata page is read.
+/// afterwards every pointer into the allocation is dangling. A pointer from
+/// `free_memfd_secret`, or any other foreign pointer, aborts on the allocator tag
+/// before its length is used rather than on the canary, so it never reaches
+/// `dealloc`; a pointer whose metadata page is unreadable also faults there.
 pub unsafe fn free<T: ?Sized>(memptr: NonNull<T>) {
     let memptr = memptr.as_ptr() as *mut u8;
 
@@ -250,6 +287,12 @@ pub unsafe fn free<T: ?Sized>(memptr: NonNull<T>) {
     let canary_ptr = memptr.sub(CANARY_SIZE);
     let unprotected_ptr = unprotected_ptr_from_user_ptr(memptr);
     let base_ptr = unprotected_ptr.sub(PAGE_SIZE * 2);
+
+    // Check the allocator tag before trusting the size.
+    if ptr::read(base_ptr.add(MALLOC_TAG_OFFSET) as *const usize) != MALLOC_TAG {
+        abort();
+    }
+
     let unprotected_size = ptr::read(base_ptr as *const usize);
 
     // check
@@ -265,4 +308,78 @@ pub unsafe fn free<T: ?Sized>(memptr: NonNull<T>) {
     crate::munlock(unprotected_ptr, unprotected_size);
 
     free_aligned(base_ptr, total_size);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn malloc_header_carries_the_allocator_tag() {
+        let mem = unsafe { malloc_sized(32) }.expect("allocation");
+        let base = unsafe { unprotected_ptr_from_user_ptr(mem.as_ptr() as *const u8) };
+        let tag =
+            unsafe { ptr::read(base.sub(PAGE_SIZE * 2).add(MALLOC_TAG_OFFSET) as *const usize) };
+
+        assert_eq!(tag, MALLOC_TAG);
+
+        unsafe { free(mem) };
+    }
+
+    /// The spare tag slot must be defined, so `free_memfd_secret` and `mprotect`
+    /// never read uninitialised metadata and cannot mistake this header for a
+    /// `memfd_secret` one.
+    #[test]
+    fn malloc_header_defines_the_memfd_tag_slot() {
+        let mem = unsafe { malloc_sized(32) }.expect("allocation");
+        let base = unsafe { unprotected_ptr_from_user_ptr(mem.as_ptr() as *const u8) };
+        let tag =
+            unsafe { ptr::read(base.sub(PAGE_SIZE * 2).add(MEMFD_TAG_OFFSET) as *const usize) };
+
+        assert_eq!(tag, NOT_MEMFD_TAG);
+
+        unsafe { free(mem) };
+    }
+
+    /// `mprotect` accepts a `malloc` allocation (its tag is `MALL`), and the
+    /// allocation is still freeable afterwards.
+    #[test]
+    fn mprotect_accepts_a_malloc_allocation() {
+        let mem = unsafe { malloc_sized(32) }.expect("allocation");
+
+        assert!(unsafe { mprotect(mem, Prot::ReadOnly) });
+        assert!(unsafe { mprotect(mem, Prot::ReadWrite) });
+
+        unsafe { free(mem) };
+    }
+
+    /// `mprotect` accepts a `memfd_secret` allocation too (its tag is `MFDS`);
+    /// `secure-types` protects these allocations through the same entry point.
+    #[cfg(all(feature = "alloc_ext", target_os = "linux"))]
+    #[test]
+    fn mprotect_accepts_a_memfd_secret_allocation() {
+        let Some(mem) = (unsafe { crate::memfd_secret_sized(32) }) else {
+            return;
+        };
+
+        assert!(unsafe { mprotect(mem, Prot::ReadOnly) });
+        assert!(unsafe { mprotect(mem, Prot::ReadWrite) });
+
+        unsafe { crate::free_memfd_secret(mem) };
+    }
+
+    #[cfg(all(feature = "alloc_ext", target_os = "linux"))]
+    #[test]
+    fn memfd_secret_header_carries_the_allocator_tag() {
+        let Some(mem) = (unsafe { crate::memfd_secret_sized(32) }) else {
+            return;
+        };
+        let base = unsafe { unprotected_ptr_from_user_ptr(mem.as_ptr() as *const u8) };
+        let tag =
+            unsafe { ptr::read(base.sub(PAGE_SIZE * 2).add(MEMFD_TAG_OFFSET) as *const usize) };
+
+        assert_eq!(tag, MEMFD_TAG);
+
+        unsafe { crate::free_memfd_secret(mem) };
+    }
 }

@@ -97,6 +97,7 @@ unsafe fn _memfd_secret(size: usize) -> Option<*mut u8> {
     ptr::copy_nonoverlapping(CANARY.as_ptr(), canary_ptr, CANARY_SIZE);
     ptr::write_unaligned(base_ptr as *mut usize, unprotected_size);
     ptr::write_unaligned(fd_ptr as *mut libc::c_int, fd);
+    ptr::write_unaligned(base_ptr.add(MEMFD_TAG_OFFSET) as *mut usize, MEMFD_TAG);
     _mprotect(base_ptr, PAGE_SIZE, Prot::ReadOnly);
 
     assert_eq!(unprotected_ptr_from_user_ptr(user_ptr), unprotected_ptr);
@@ -143,8 +144,10 @@ pub unsafe fn memfd_secret_sized(size: usize) -> Option<NonNull<[u8]>> {
 /// `memptr` must be a live pointer returned by `memfd_secret` or
 /// `memfd_secret_sized` and not yet freed. The range is zeroed, unmapped and its
 /// file descriptor closed, so every pointer into it is dangling afterwards. A
-/// pointer that does not come from this allocator aborts on the canary check, or
-/// faults while the metadata page is read.
+/// pointer from `free`, or any other foreign pointer, aborts on the allocator tag
+/// before the descriptor is read or the canary checked, so it cannot close an
+/// unrelated descriptor; a pointer whose metadata page is unreadable also faults
+/// there.
 pub unsafe fn free_memfd_secret<T: ?Sized>(memptr: NonNull<T>) {
     use libc::c_void;
 
@@ -154,6 +157,14 @@ pub unsafe fn free_memfd_secret<T: ?Sized>(memptr: NonNull<T>) {
     let canary_ptr = memptr.sub(CANARY_SIZE);
     let unprotected_ptr = unprotected_ptr_from_user_ptr(memptr);
     let base_ptr = unprotected_ptr.sub(PAGE_SIZE * 2);
+
+    // Check the allocator tag before the descriptor is read. A `malloc` header's
+    // spare slot is explicitly defined (see `NOT_MEMFD_TAG`), so this is never an
+    // uninitialised read.
+    if ptr::read(base_ptr.add(MEMFD_TAG_OFFSET) as *const usize) != MEMFD_TAG {
+        abort();
+    }
+
     let fd_ptr = base_ptr.add(size_of::<usize>()) as *mut libc::c_int;
     let unprotected_size = ptr::read(base_ptr as *const usize);
     let fd = ptr::read(fd_ptr);
