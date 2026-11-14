@@ -33,9 +33,9 @@ use core::ptr::NonNull;
 pub use zeroize::Zeroize;
 
 #[cfg(feature = "use_os")]
-pub use memsec;
+pub use secure_alloc;
 #[cfg(feature = "use_os")]
-use memsec::Prot;
+use secure_alloc::Prot;
 
 #[derive(Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
@@ -113,7 +113,7 @@ const fn get_header_offset<T>() -> usize {
 ///
 /// `memfd_secret` is Linux-only, so this is always `false` on every other
 /// target (including non-Linux Unix like macOS and FreeBSD), where the crate
-/// falls back to [`memsec::malloc_sized`].
+/// falls back to [`secure_alloc::malloc_sized`].
 #[cfg(all(feature = "use_os", unix))]
 pub fn supports_memfd_secret() -> bool {
    #[cfg(target_os = "linux")]
@@ -151,14 +151,14 @@ pub fn supports_memfd_secret() -> bool {
 
 /// Allocate memory
 ///
-/// For `Windows` it always uses [memsec::malloc_sized]
+/// For `Windows` it always uses [secure_alloc::malloc_sized]
 ///
-/// For `Linux` it uses [memsec::memfd_secret_sized] if `memfd_secret` is supported
+/// For `Linux` it uses [secure_alloc::memfd_secret_sized] if `memfd_secret` is supported
 ///
-/// For every other `Unix` (macOS, FreeBSD, …) it uses [memsec::malloc_sized]:
+/// For every other `Unix` (macOS, FreeBSD, …) it uses [secure_alloc::malloc_sized]:
 /// `memfd_secret` is Linux-only.
 ///
-/// If the allocation fails it fallbacks to [memsec::malloc_sized]
+/// If the allocation fails it fallbacks to [secure_alloc::malloc_sized]
 pub(crate) unsafe fn alloc<T>(size: usize) -> Result<NonNull<T>, Error> {
    #[cfg(feature = "use_os")]
    {
@@ -170,7 +170,7 @@ pub(crate) unsafe fn alloc<T>(size: usize) -> Result<NonNull<T>, Error> {
       // SAFETY: `size != 0` was checked above; `malloc_sized` returns either a
       // valid pointer to `size` bytes or `None`, and the pointer is re-checked.
       unsafe {
-         let allocated_ptr = memsec::malloc_sized(size);
+         let allocated_ptr = secure_alloc::malloc_sized(size);
          let non_null = allocated_ptr.ok_or(Error::AllocationFailed)?;
          let ptr = non_null.as_ptr() as *mut T;
          NonNull::new(ptr).ok_or(Error::NullAllocation)
@@ -203,9 +203,9 @@ pub(crate) unsafe fn alloc<T>(size: usize) -> Result<NonNull<T>, Error> {
          #[cfg(target_os = "linux")]
          {
             let ptr_opt = if supports_memfd_secret() {
-               // SAFETY: `memsec` allocation of the byte count computed above;
+               // SAFETY: `secure_alloc` allocation of the byte count computed above;
                // its result is checked for null before use.
-               unsafe { memsec::memfd_secret_sized(alloc_size) }
+               unsafe { secure_alloc::memfd_secret_sized(alloc_size) }
             } else {
                None
             };
@@ -218,7 +218,7 @@ pub(crate) unsafe fn alloc<T>(size: usize) -> Result<NonNull<T>, Error> {
                   "allocator returned a pointer not aligned for the usize header tag"
                );
 
-               // SAFETY: `raw_ptr` is `memsec`'s user pointer for a live
+               // SAFETY: `raw_ptr` is `secure_alloc`'s user pointer for a live
                // `alloc_size`-byte allocation, aligned for a `usize` (asserted
                // above). The tag goes at offset 0 and the user region starts at
                // `header_offset`, which `alloc_size` reserves — both in bounds.
@@ -231,11 +231,11 @@ pub(crate) unsafe fn alloc<T>(size: usize) -> Result<NonNull<T>, Error> {
             }
          }
 
-         // SAFETY: as in the memfd branch — `memsec`'s user pointer for an
+         // SAFETY: as in the memfd branch — `secure_alloc`'s user pointer for an
          // `alloc_size`-byte allocation, aligned for the `usize` tag, with the tag
          // at offset 0 and the user region at `header_offset`.
          unsafe {
-            let allocated_ptr = memsec::malloc_sized(alloc_size);
+            let allocated_ptr = secure_alloc::malloc_sized(alloc_size);
             let non_null = allocated_ptr.ok_or(Error::AllocationFailed)?;
 
             let raw_ptr = non_null.as_ptr() as *mut u8;
@@ -279,10 +279,10 @@ pub(crate) unsafe fn alloc<T>(size: usize) -> Result<NonNull<T>, Error> {
 #[cfg(feature = "use_os")]
 pub(crate) fn free<T>(ptr: NonNull<T>) {
    #[cfg(windows)]
-   // SAFETY: `ptr` was returned by `memsec::malloc_sized` in `alloc` and is freed
-   // exactly once here, so `memsec::free` receives the pointer it handed out.
+   // SAFETY: `ptr` was returned by `secure_alloc::malloc_sized` in `alloc` and is freed
+   // exactly once here, so `secure_alloc::free` receives the pointer it handed out.
    unsafe {
-      memsec::free(ptr);
+      secure_alloc::free(ptr);
    }
 
    #[cfg(unix)]
@@ -290,7 +290,7 @@ pub(crate) fn free<T>(ptr: NonNull<T>) {
       let header_offset = get_header_offset::<T>();
 
       // SAFETY: `ptr` is this allocation's user pointer, so `ptr - header_offset`
-      // is exactly the pointer `memsec` returned; `alloc` wrote the tag there, so
+      // is exactly the pointer `secure_alloc` returned; `alloc` wrote the tag there, so
       // reading it back and dispatching to the matching deallocator is sound. The
       // allocation is freed exactly once (this consumes the `NonNull`).
       unsafe {
@@ -306,15 +306,15 @@ pub(crate) fn free<T>(ptr: NonNull<T>) {
          match tag {
             #[cfg(target_os = "linux")]
             ALLOC_TAG_MEMFD => {
-               memsec::free_memfd_secret(non_null_raw);
+               secure_alloc::free_memfd_secret(non_null_raw);
             }
             ALLOC_TAG_MALLOC => {
-               memsec::free(non_null_raw);
+               secure_alloc::free(non_null_raw);
             }
             _ => {
                // Tag mismatch: double free or a corrupted header. Freeing through
                // the wrong allocator would be worse, and silently doing nothing
-               // leaks the allocation, so fail loudly in every profile — memsec
+               // leaks the allocation, so fail loudly in every profile — secure-alloc
                // itself aborts on a canary mismatch.
                panic!(
                   "SecureAllocator: Corrupt header tag found: {:x}",
@@ -332,19 +332,19 @@ pub(crate) fn mprotect<T>(ptr: NonNull<T>, prot: Prot::Ty) -> bool {
    {
       // We need to protect the whole block, including the header.
       let header_offset = get_header_offset::<T>();
-      // SAFETY: `ptr - header_offset` is the pointer `memsec` returned (see
-      // `alloc`), which is what `memsec::mprotect` expects, and `prot` is a valid
+      // SAFETY: `ptr - header_offset` is the pointer `secure_alloc` returned (see
+      // `alloc`), which is what `secure_alloc::mprotect` expects, and `prot` is a valid
       // `Prot` value. The block stays allocated while `ptr` is live.
       unsafe {
          let raw_ptr = (ptr.as_ptr() as *mut u8).sub(header_offset);
          let raw_non_null = NonNull::new_unchecked(raw_ptr as *mut T);
 
-         memsec::mprotect(raw_non_null, prot)
+         secure_alloc::mprotect(raw_non_null, prot)
       }
    }
    #[cfg(windows)]
    {
-      // SAFETY: `ptr` is a live `memsec` allocation and `prot` a valid `Prot`.
-      unsafe { memsec::mprotect(ptr, prot) }
+      // SAFETY: `ptr` is a live `secure_alloc` allocation and `prot` a valid `Prot`.
+      unsafe { secure_alloc::mprotect(ptr, prot) }
    }
 }

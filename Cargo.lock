@@ -38,17 +38,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "78ca9ab1a0babb1e7d5695e3530886289c18cf2f87ec19a575a0abdce112e3a3"
 
 [[package]]
-name = "memsec"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c797b9d6bb23aab2fc369c65f871be49214f5c759af65bde26ffaaa2b646b492"
-dependencies = [
- "getrandom",
- "libc",
- "windows-sys",
-]
-
-[[package]]
 name = "proc-macro2"
 version = "1.0.94"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -73,11 +62,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "28d3b2b1366ec20994f1fd18c3c594f05c5dd4bc44d8bb0c1c632c8d6829481f"
 
 [[package]]
+name = "secure-alloc"
+version = "0.7.0"
+dependencies = [
+ "getrandom",
+ "libc",
+ "windows-sys",
+]
+
+[[package]]
 name = "secure-types"
 version = "0.5.16"
 dependencies = [
  "libc",
- "memsec",
+ "secure-alloc",
  "serde",
  "serde_json",
  "zeroize",

@@ -23,7 +23,7 @@ use zeroize::{DefaultIsZeroes, Zeroize};
 #[cfg(feature = "use_os")]
 use super::free;
 #[cfg(feature = "use_os")]
-use memsec::Prot;
+use secure_alloc::Prot;
 
 pub type SecureBytes = SecureVec<u8>;
 
@@ -793,7 +793,7 @@ impl<T: Zeroize> Drop for SecureVec<T> {
       // SAFETY: `allocated_byte_size()` is the full allocation size, still owned
       // here and unprotected above; the `Layout` matches the one `alloc` used.
       // Byte-wiping it also removes anything a `clear()` left behind, which
-      // `use_os` gets from `memsec::free` instead.
+      // `use_os` gets from `secure_alloc::free` instead.
       unsafe {
          let byte_size = self.allocated_byte_size();
          let bytes = core::slice::from_raw_parts_mut(self.ptr.as_ptr() as *mut u8, byte_size);

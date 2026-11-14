@@ -21,10 +21,10 @@ Currently there are 3 types:
 ## How memory is locked
 
 - **Windows**: [VirtualProtect](https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualprotect) and [VirtualLock](https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtuallock).
-- **Linux**: [memfd_secret](https://man.archlinux.org/man/memfd_secret.2.en) when the kernel supports it. Otherwise [mlock](https://man.archlinux.org/man/mlock.2) and [madvise](https://man.archlinux.org/man/madvise.2) (`MADV_DONTDUMP`) on the malloc path. A `memfd_secret` allocation is not `mlock`ed and is not marked `MADV_DONTDUMP` by `memsec`. Every path still uses `mprotect(PROT_NONE)` between unlocks.
+- **Linux**: [memfd_secret](https://man.archlinux.org/man/memfd_secret.2.en) when the kernel supports it. Otherwise [mlock](https://man.archlinux.org/man/mlock.2) and [madvise](https://man.archlinux.org/man/madvise.2) (`MADV_DONTDUMP`) on the malloc path. A `memfd_secret` allocation is not `mlock`ed and is not marked `MADV_DONTDUMP` by `secure-alloc`. Every path still uses `mprotect(PROT_NONE)` between unlocks.
 - **Other Unix** (macOS, FreeBSD, …): [mlock](https://man.archlinux.org/man/mlock.2) plus `mprotect(PROT_NONE)`. FreeBSD/DragonFly also use `madvise(MADV_NOCORE)`. No `memfd_secret`.
 
-`mlock` is best-effort: `memsec` ignores its return value, so hitting `RLIMIT_MEMLOCK` still constructs. `mprotect` failure is `Error::LockFailed`. A failed re-lock after an `unlock*` scope panics in every profile.
+`mlock` is best-effort: `secure-alloc` ignores its return value, so hitting `RLIMIT_MEMLOCK` still constructs. `mprotect` failure is `Error::LockFailed`. A failed re-lock after an `unlock*` scope panics in every profile.
 
 ## Usage
 
@@ -172,4 +172,4 @@ Licensed under the [MIT license](LICENSE-MIT).
 
 ## Credits
 - [zeroize](https://github.com/RustCrypto/utils/tree/master/zeroize)
-- [memsec](https://github.com/quininer/memsec)
+- The memory layer is the vendored `secure-alloc` fork of [memsec](https://github.com/quininer/memsec) by quininer, maintained in this repository at `crates/secure-alloc`.
