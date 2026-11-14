@@ -120,6 +120,14 @@ pub unsafe fn _mprotect(ptr: *mut u8, len: usize, prot: Prot::Ty) -> bool {
 }
 
 /// Secure `mprotect`.
+///
+/// # Safety
+///
+/// `memptr` must be a live pointer returned by `malloc` or `malloc_sized` and
+/// not yet freed, and the caller must hold up whatever flags it installs: no
+/// access may violate them until they are changed again or the allocation is
+/// freed. A `false` return means the platform rejected the call; do not assume
+/// the requested flags are in place.
 #[cfg(any(unix, windows))]
 pub unsafe fn mprotect<T: ?Sized>(memptr: NonNull<T>, prot: Prot::Ty) -> bool {
     let memptr = memptr.as_ptr() as *mut u8;
@@ -183,6 +191,13 @@ unsafe fn _malloc(size: usize) -> Option<*mut u8> {
 }
 
 /// Secure `malloc`.
+///
+/// # Safety
+///
+/// The returned memory is filled with `0xd0`, which is not a valid `T` for most
+/// types; initialise it before reading it as one. Release the allocation exactly
+/// once with `free` — not `dealloc`, and not `free_memfd_secret` — and do not
+/// read or write outside the region it was allocated for.
 #[inline]
 pub unsafe fn malloc<T>() -> Option<NonNull<T>> {
     _malloc(mem::size_of::<T>()).map(|memptr| {
@@ -192,6 +207,11 @@ pub unsafe fn malloc<T>() -> Option<NonNull<T>> {
 }
 
 /// Secure `malloc_sized`.
+///
+/// # Safety
+///
+/// The returned bytes are filled with `0xd0`. Release the allocation exactly
+/// once with `free` — not `dealloc`, and not `free_memfd_secret`.
 #[inline]
 pub unsafe fn malloc_sized(size: usize) -> Option<NonNull<[u8]>> {
     _malloc(size).map(|memptr| {
@@ -201,6 +221,15 @@ pub unsafe fn malloc_sized(size: usize) -> Option<NonNull<[u8]>> {
 }
 
 /// Secure `free`.
+///
+/// # Safety
+///
+/// `memptr` must be a live pointer returned by `malloc` or `malloc_sized` and
+/// not yet freed. The data-region length is read from the allocation's metadata
+/// page, so `T` only has to carry the address, not match the allocation's type;
+/// afterwards every pointer into the allocation is dangling. A pointer that does
+/// not come from this allocator aborts on the canary check, or faults while the
+/// metadata page is read.
 pub unsafe fn free<T: ?Sized>(memptr: NonNull<T>) {
     let memptr = memptr.as_ptr() as *mut u8;
 

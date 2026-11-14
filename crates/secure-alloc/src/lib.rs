@@ -2,7 +2,6 @@
 #![no_std]
 #![cfg_attr(feature = "nightly", allow(internal_features))]
 #![cfg_attr(feature = "nightly", feature(core_intrinsics))]
-#![allow(clippy::missing_safety_doc)]
 
 mod alloc;
 mod mlock;
@@ -22,6 +21,12 @@ pub use alloc::allocext::{free_memfd_secret, memfd_secret, memfd_secret_sized};
 // -- memcmp --
 
 /// Secure `memeq`.
+///
+/// # Safety
+///
+/// `b1` and `b2` must each be valid for reads of `len` bytes for the duration
+/// of the call. Every byte is read, so a `len` past the end of either buffer is
+/// an out-of-bounds read.
 #[inline(never)]
 pub unsafe fn memeq(b1: *const u8, b2: *const u8, len: usize) -> bool {
     (0..len)
@@ -31,6 +36,12 @@ pub unsafe fn memeq(b1: *const u8, b2: *const u8, len: usize) -> bool {
 }
 
 /// Secure `memcmp`.
+///
+/// # Safety
+///
+/// `b1` and `b2` must each be valid for reads of `len` bytes for the duration
+/// of the call. Every byte is read, so a `len` past the end of either buffer is
+/// an out-of-bounds read.
 #[inline(never)]
 pub unsafe fn memcmp(b1: *const u8, b2: *const u8, len: usize) -> i32 {
     let mut res = 0;
@@ -45,6 +56,10 @@ pub unsafe fn memcmp(b1: *const u8, b2: *const u8, len: usize) -> i32 {
 // -- memset / memzero --
 
 /// General `memset`.
+///
+/// # Safety
+///
+/// `s` must be valid for writes of `n` bytes for the duration of the call.
 #[inline(never)]
 pub unsafe fn memset(s: *mut u8, c: u8, n: usize) {
     #[cfg(feature = "nightly")]
@@ -67,6 +82,10 @@ pub unsafe fn memset(s: *mut u8, c: u8, n: usize) {
 }
 
 /// General `memzero`.
+///
+/// # Safety
+///
+/// `dest` must be valid for writes of `n` bytes for the duration of the call.
 #[inline]
 pub unsafe fn memzero(dest: *mut u8, n: usize) {
     memset(dest, 0, n);

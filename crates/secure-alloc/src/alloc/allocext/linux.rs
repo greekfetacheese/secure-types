@@ -79,6 +79,13 @@ unsafe fn _memfd_secret(size: usize) -> Option<*mut u8> {
 }
 
 /// Linux specific `memfd_secret` backed allocation
+///
+/// # Safety
+///
+/// The returned memory is filled with `0xd0`, which is not a valid `T` for most
+/// types; initialise it before reading it as one. Release the allocation exactly
+/// once with `free_memfd_secret` — not `free` — and do not read or write outside
+/// the region it was allocated for.
 #[inline]
 pub unsafe fn memfd_secret<T>() -> Option<NonNull<T>> {
     _memfd_secret(mem::size_of::<T>()).map(|memptr| {
@@ -88,6 +95,11 @@ pub unsafe fn memfd_secret<T>() -> Option<NonNull<T>> {
 }
 
 /// Linux specific `memfd_secret` backed `sized` allocation
+///
+/// # Safety
+///
+/// The returned bytes are filled with `0xd0`. Release the allocation exactly
+/// once with `free_memfd_secret` — not `free`.
 #[inline]
 pub unsafe fn memfd_secret_sized(size: usize) -> Option<NonNull<[u8]>> {
     _memfd_secret(size).map(|memptr| {
@@ -99,6 +111,14 @@ pub unsafe fn memfd_secret_sized(size: usize) -> Option<NonNull<[u8]>> {
 /// Secure `free` for memfd_secret allocations,
 /// i.e. provides read write access back to mprotect guard pages
 /// and unmaps mmaped secrets
+///
+/// # Safety
+///
+/// `memptr` must be a live pointer returned by `memfd_secret` or
+/// `memfd_secret_sized` and not yet freed. The range is zeroed, unmapped and its
+/// file descriptor closed, so every pointer into it is dangling afterwards. A
+/// pointer that does not come from this allocator aborts on the canary check, or
+/// faults while the metadata page is read.
 pub unsafe fn free_memfd_secret<T: ?Sized>(memptr: NonNull<T>) {
     use libc::c_void;
 
