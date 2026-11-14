@@ -9,8 +9,8 @@ republished as `secure-alloc` so it can evolve on its own release cadence. It pr
 - volatile-ish memory fill and zeroing (`memset`, `memzero`);
 - a cross-platform `mlock` / `munlock` wrapper (`mlock(2)` / `VirtualLock`), with
   `MADV_DONTDUMP` (Linux) or `MADV_NOCORE` (FreeBSD, DragonFly) applied on lock;
-- guard-paged allocations with a random canary checked on free
-  (`malloc`, `malloc_sized`, `free`, `mprotect`, `Prot`);
+- guard-paged allocations with an allocator tag and a random canary checked on
+  free (`malloc`, `malloc_sized`, `free`, `mprotect`, `Prot`);
 - Linux-only allocations backed by `memfd_secret` (`memfd_secret`,
   `memfd_secret_sized`, `free_memfd_secret`).
 
@@ -62,6 +62,12 @@ Deliberately few; anything not listed here is upstream 0.7.0 code.
   Upstream: [memsec#19](https://github.com/quininer/memsec/pull/19). The page size no
   longer comes from the allocator's statics, so `use_os` without `alloc` still builds.
 - `tests/mlock_dump_exclusion.rs` — new; regression test for the alignment above.
+- `src/alloc/mod.rs`, `src/alloc/allocext/linux.rs` — each allocation's metadata
+  page carries an allocator tag (`MALL` for `malloc`/`malloc_sized`, `MFDS` for
+  `memfd_secret`), checked by `free`, `free_memfd_secret` and `mprotect`. Releasing
+  an allocation through the other allocator aborts instead of closing an arbitrary
+  descriptor or handing `secretmem` memory to `dealloc`. `tests/wrong_free_aborts.rs`
+  and header-tag unit tests cover it.
 
 ## API
 
@@ -112,8 +118,8 @@ unsafe {
 | --- | --- | --- |
 | `malloc` | `unsafe fn malloc<T>() -> Option<NonNull<T>>` | Allocates one `T`, fills it with `0xd0`, returns `None` on allocation failure. |
 | `malloc_sized` | `unsafe fn malloc_sized(size: usize) -> Option<NonNull<[u8]>>` | Same for a byte slice of `size` bytes. |
-| `free` | `unsafe fn free<T: ?Sized>(memptr: NonNull<T>)` | Checks the canary, restores read/write protection, zeroes through `munlock`, and releases the mapping. Accepts the pointer from `malloc` or `malloc_sized`. |
-| `mprotect` | `unsafe fn mprotect<T: ?Sized>(memptr: NonNull<T>, prot: Prot::Ty) -> bool` | Re-protects the whole allocation's data region. |
+| `free` | `unsafe fn free<T: ?Sized>(memptr: NonNull<T>)` | Checks the allocator tag and the canary, restores read/write protection, zeroes through `munlock`, and releases the mapping. Accepts the pointer from `malloc` or `malloc_sized`; a pointer from `free_memfd_secret` aborts on the tag. |
+| `mprotect` | `unsafe fn mprotect<T: ?Sized>(memptr: NonNull<T>, prot: Prot::Ty) -> bool` | Re-protects the whole allocation's data region. Aborts on a foreign pointer: the tag is checked before the length is read, and either allocator's tag is accepted. |
 | `Prot` | module of constants | Unix: `NoAccess`, `ReadOnly`, `WriteOnly`, `ReadWrite`, `Execute`, `ReadExec`, `WriteExec`, `ReadWriteExec` (raw `libc::c_int`). Windows: `NoAccess`, `ReadOnly`, `ReadWrite`, `WriteCopy`, `Execute`, `ReadExec`, `ReadWriteExec`, `WriteCopyExec`, `Guard`, `NoCache`, `WriteCombine`, and the `PAGE_TARGETS_*` flags (`PAGE_PROTECTION_FLAGS`). |
 
 ```rust
@@ -140,7 +146,9 @@ free_memfd_secret(memptr: NonNull<T>)
 
 These are backed by file descriptors from `memfd_secret(2)` (Linux 5.14+, and the
 kernel must not be booted with `secretmem_enable=off`) and are unmapped with `munmap`
-plus `close` on free. They are only compiled on Linux: on any other target the
+plus `close` on free. `free_memfd_secret` checks the allocator tag before it reads the
+descriptor, so a `malloc`/`malloc_sized` pointer aborts instead of closing an
+unrelated descriptor. They are only compiled on Linux: on any other target the
 `alloc_ext` feature adds nothing.
 
 ## Feature flags
@@ -165,11 +173,17 @@ plus `close` on free. They are only compiled on Linux: on any other target the
   the data region, immediately below the returned pointer, and the caller's bytes run
   to the page boundary; an overrun therefore faults on the trailing guard page instead
   of silently corrupting adjacent memory, and an underrun hits the canary.
-- **Canary.** The canary is `getrandom` bytes, generated once per process on the first
-  allocation (`Once`). `free` and `free_memfd_secret` compare it with the constant-time
-  `memeq` and call `abort()` on a mismatch; a pointer whose page-aligned base is not a
-  plausible allocation also aborts. A corrupted or foreign pointer therefore kills the
-  process, it does not return an error.
+- **Canary and allocator tag.** The metadata page holds the data-region length at
+  offset 0 and, next to it, an allocator tag: `MALL` for `malloc`/`malloc_sized`, and
+  `MFDS` one `usize` further along for `memfd_secret` (that slot holds its descriptor).
+  `free`, `free_memfd_secret` and `mprotect` check the tag first and `abort()` on a
+  mismatch, so a pointer released through the wrong allocator never reaches `dealloc`,
+  `munmap` or `close`; `mprotect` accepts either tag. The canary is `getrandom` bytes,
+  generated once per process on the first allocation (`Once`). `free` and
+  `free_memfd_secret` compare it with the constant-time `memeq` and call `abort()` on a
+  mismatch; a pointer whose page-aligned base is not a plausible allocation also
+  aborts. A corrupted or foreign pointer therefore kills the process, it does not
+  return an error.
 - **`mlock` failure is ignored.** `malloc`/`malloc_sized` call `mlock` and discard its
   return value: the allocation succeeds even when the page could not be locked (for
   example when `RLIMIT_MEMLOCK` is exhausted). Call `mlock` yourself, or check
