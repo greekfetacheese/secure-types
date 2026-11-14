@@ -111,13 +111,15 @@ where
 {
    /// Creates an empty (but allocated) SecureArray.
    ///
-   /// The memory is allocated but not initialized, and it's the caller's responsibility to fill it.
+   /// The memory is allocated but not initialized, and it's the caller's
+   /// responsibility to fill it with [`from_fn`](Self::from_fn).
    ///
    /// Only elements that are actually written are tracked as initialized: `drop`
    /// and `erase` zeroize just those, so dropping an array that was never filled is
    /// sound. The remaining slots still hold the allocator's poison bytes and must
-   /// never be read as a `T`. Initialize the whole array (for example through
-   /// [`unlock_mut`](Self::unlock_mut)) before accessing it.
+   /// never be read as a `T`. [`unlock_mut`](Self::unlock_mut) refuses an array
+   /// that is not fully initialized, so build the array with
+   /// [`from_fn`](Self::from_fn) instead of filling it through `unlock_mut`.
    pub fn empty() -> Result<Self, Error> {
       let size = LENGTH
          .checked_mul(mem::size_of::<T>())
@@ -212,6 +214,71 @@ where
       Ok(secure_array)
    }
 
+   /// Builds a fully-initialized array, using `f` as the source of each element.
+   ///
+   /// `f(i)` produces the value of slot `i`, and every value is written straight
+   /// into the secure allocation — it never touches the stack. If `f` panics, the
+   /// slots written so far are zeroized and dropped before the memory is re-locked,
+   /// so a failed build leaves no partial value behind. This is the supported way
+   /// to build an array without a source slice: it replaces filling an
+   /// [`empty`](Self::empty) array through [`unlock_mut`](Self::unlock_mut),
+   /// which refuses an array that is not fully initialized.
+   pub fn from_fn<F>(mut f: F) -> Result<Self, Error>
+   where
+      F: FnMut(usize) -> T,
+   {
+      let mut array = Self::empty()?;
+
+      {
+         let _unlock = UnlockGuard::new(&array);
+
+         // Zeroizes and drops the prefix written so far if `f` panics. Declared
+         // after `_unlock`, so it is dropped first, while the memory is still
+         // unlocked.
+         struct InitGuard<T: Zeroize> {
+            ptr: *mut T,
+            written: usize,
+         }
+
+         impl<T: Zeroize> Drop for InitGuard<T> {
+            fn drop(&mut self) {
+               // SAFETY: `written` counts exactly the slots `from_fn` filled with
+               // `ptr::write`, and this guard is dropped before the enclosing
+               // `UnlockGuard` re-locks the region.
+               unsafe {
+                  for i in 0..self.written {
+                     let slot = self.ptr.add(i);
+                     (*slot).zeroize();
+                     core::ptr::drop_in_place(slot);
+                  }
+               }
+            }
+         }
+
+         let mut guard = InitGuard::<T> {
+            ptr: array.ptr.as_ptr(),
+            written: 0,
+         };
+
+         for i in 0..LENGTH {
+            let value = f(i);
+            // SAFETY: `i < LENGTH`, so `dst.add(i)` is in bounds of the live
+            // allocation, the guard unprotects it, and `ptr::write` never reads
+            // the uninitialized destination.
+            unsafe {
+               core::ptr::write(array.ptr.as_ptr().add(i), value);
+            }
+            guard.written = i + 1;
+         }
+
+         core::mem::forget(guard);
+      }
+
+      array.initialized = LENGTH;
+
+      Ok(array)
+   }
+
    pub fn len(&self) -> usize {
       LENGTH
    }
@@ -291,19 +358,31 @@ where
 
    /// Mutable access to the array's data as a `&mut [T]`
    ///
-   /// Exposing the whole array as a `&mut [T]` treats every slot as initialized
-   /// storage, so a later `drop` / `erase` zeroizes all `LENGTH` elements.
+   /// The array must be fully initialized first; this refuses a partially
+   /// initialized one rather than exposing slots that still hold poison bytes.
+   ///
+   /// # Panics
+   ///
+   /// Panics if any slot was never written. An [`empty`](Self::empty) array that
+   /// was not filled, or one left partial by a panic during construction, still
+   /// holds the allocator's poison bytes in those slots. Exposing them as
+   /// `&mut [T]` would make `drop` and [`erase`](Self::erase) zeroize those bytes
+   /// as a `T`, which is undefined behaviour. Build the array with
+   /// [`from_slice`](Self::from_slice), [`from_slice_mut`](Self::from_slice_mut),
+   /// [`from_fn`](Self::from_fn), `Clone` or `TryFrom` instead.
    pub fn unlock_mut<F, R>(&mut self, f: F) -> R
    where
       F: FnOnce(&mut [T]) -> R,
    {
-      self.initialized = LENGTH;
+      assert_eq!(
+         self.initialized, LENGTH,
+         "SecureArray::unlock_mut: {} of {LENGTH} slots are initialized; build the array with from_slice, from_slice_mut, from_fn, Clone or TryFrom",
+         self.initialized,
+      );
 
       let _guard = UnlockGuard::new(self);
-      // SAFETY: the guard unprotects the live allocation. Exposing all `LENGTH`
-      // slots as `&mut [T]` is `unlock_mut`'s documented contract — it treats
-      // every slot as initialized storage, which is why `initialized` is set to
-      // `LENGTH` above.
+      // SAFETY: the assertion above proves every slot holds a written `T`, so the
+      // whole allocation is initialized storage, and the guard unprotects it.
       let slice = unsafe { core::slice::from_raw_parts_mut(self.ptr.as_ptr(), LENGTH) };
       f(slice)
    }
@@ -643,6 +722,7 @@ where
 mod tests {
    use super::*;
    use std::process::{Command, Stdio};
+   use std::sync::atomic::{AtomicUsize, Ordering};
 
    #[test]
    fn lock_unlock() {
@@ -656,21 +736,91 @@ mod tests {
       assert!(locked);
    }
 
-   /// Pins the invariant that only written elements are considered initialized.
+   /// Pins the invariant that only written elements are considered initialized:
+   /// a fresh `empty` array starts at zero, and a built one covers every slot.
    #[test]
    fn test_initialized_count_tracking() {
-      let mut array: SecureArray<u8, 3> = SecureArray::empty().unwrap();
-      assert_eq!(array.initialized, 0);
+      let empty: SecureArray<u8, 3> = SecureArray::empty().unwrap();
+      assert_eq!(empty.initialized, 0);
 
-      array.unlock_mut(|slice| {
-         slice[0] = 1;
-         slice[1] = 2;
-         slice[2] = 3;
-      });
+      let array: SecureArray<u8, 3> = SecureArray::from_fn(|i| i as u8 + 1).unwrap();
       assert_eq!(array.initialized, 3);
 
       let from_slice: SecureArray<u8, 3> = SecureArray::from_slice(&[1, 2, 3]).unwrap();
       assert_eq!(from_slice.initialized, 3);
+   }
+
+   /// An array that was never filled still holds the allocator's poison bytes in
+   /// its slots, so `unlock_mut` must refuse it instead of exposing them as a
+   /// `&mut [T]` that `drop` would zeroize as a `T`.
+   #[test]
+   #[should_panic(expected = "slots are initialized")]
+   fn test_unlock_mut_requires_a_fully_initialized_array() {
+      let mut array = SecureArray::<u8, 2>::empty().unwrap();
+      array.unlock_mut(|_| {});
+   }
+
+   #[test]
+   fn test_from_fn_fills_every_slot() {
+      let array: SecureArray<u8, 4> = SecureArray::from_fn(|i| i as u8).unwrap();
+
+      array.unlock(|slice| {
+         assert_eq!(slice, &[0, 1, 2, 3]);
+      });
+   }
+
+   #[test]
+   fn test_from_fn_rejects_zero_sized_array() {
+      let result: Result<SecureArray<u8, 0>, Error> = SecureArray::from_fn(|_| 0);
+
+      assert!(matches!(result, Err(Error::LengthCannotBeZero)));
+   }
+
+   /// A `T` whose zeroization and drop are observable, so the panic path is
+   /// asserted through the counters rather than from inside `Drop` (an assert
+   /// there would abort the process instead of failing the test).
+   ///
+   /// It carries one byte of payload because `SecureArray` rejects a zero-sized
+   /// allocation, and because the prefix that is cleaned up must hold real values.
+   struct Tracked(u8);
+
+   static ZEROIZED: AtomicUsize = AtomicUsize::new(0);
+
+   static DROPPED: AtomicUsize = AtomicUsize::new(0);
+
+   impl Zeroize for Tracked {
+      fn zeroize(&mut self) {
+         self.0.zeroize();
+         ZEROIZED.fetch_add(1, Ordering::SeqCst);
+      }
+   }
+
+   impl Drop for Tracked {
+      fn drop(&mut self) {
+         DROPPED.fetch_add(1, Ordering::SeqCst);
+      }
+   }
+
+   /// A panic in the closure zeroizes and drops exactly the prefix that was
+   /// already written, and nothing else.
+   #[test]
+   fn test_from_fn_panic_zeroizes_written_prefix() {
+      ZEROIZED.store(0, Ordering::SeqCst);
+      DROPPED.store(0, Ordering::SeqCst);
+
+      let result = std::panic::catch_unwind(|| {
+         SecureArray::<Tracked, 3>::from_fn(|i| {
+            if i == 1 {
+               panic!("x");
+            }
+
+            Tracked(1)
+         })
+      });
+
+      assert!(result.is_err());
+      assert_eq!(ZEROIZED.load(Ordering::SeqCst), 1);
+      assert_eq!(DROPPED.load(Ordering::SeqCst), 1);
    }
 
    #[test]
