@@ -43,7 +43,7 @@ unsafe fn _memfd_secret(size: usize) -> Option<*mut u8> {
     //Assert size of unprotected_size (usize) and fd (i32) is less than PAGE_SIZE before allocating memory
     assert!(size_of::<usize>() + size_of::<i32>() <= PAGE_SIZE);
 
-    if size >= ::core::usize::MAX - PAGE_SIZE * 4 {
+    if size >= usize::MAX - PAGE_SIZE * 4 {
         return None;
     }
 
