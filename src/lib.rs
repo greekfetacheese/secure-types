@@ -25,8 +25,8 @@ pub use vec::SeqElement;
 
 #[cfg(feature = "codec")]
 pub use codec::{
-   DecodeError, EncodeError, FORMAT_VERSION, decode, decode_slice, encode, encode_into_vec, encode_to_vec,
-   encode_to_vec_with_capacity, encode_with_capacity, encoded_len,
+   DecodeError, EncodeError, FORMAT_VERSION, decode, decode_slice, encode, encode_into_vec,
+   encode_to_vec, encode_to_vec_with_capacity, encode_with_capacity, encoded_len,
 };
 
 use core::ptr::NonNull;
@@ -48,6 +48,9 @@ pub enum Error {
    UnlockFailed,
    LengthMismatch,
    InvalidUtf8,
+   /// The requested alignment cannot be satisfied: with `use_os`, the type's
+   /// alignment is stronger than the platform page size that `secure-alloc` can
+   /// guarantee; without it, the `Layout` for the allocation is invalid.
    AlignmentFailed,
 }
 
@@ -164,6 +167,13 @@ pub(crate) unsafe fn alloc<T>(size: usize) -> Result<NonNull<T>, Error> {
    {
       if size == 0 {
          return Err(Error::SizeCannotBeZero);
+      }
+
+      // `secure-alloc` lays its regions out on page boundaries and returns a pointer
+      // inside a page-rounded region, so it can only promise the page size as
+      // alignment. A stronger alignment would be written through a misaligned pointer.
+      if core::mem::align_of::<T>() > secure_alloc::page_size() {
+         return Err(Error::AlignmentFailed);
       }
 
       #[cfg(windows)]

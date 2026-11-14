@@ -62,6 +62,9 @@ Deliberately few; anything not listed here is upstream 0.7.0 code.
   Upstream: [memsec#19](https://github.com/quininer/memsec/pull/19). The page size no
   longer comes from the allocator's statics, so `use_os` without `alloc` still builds.
 - `tests/mlock_dump_exclusion.rs` — new; regression test for the alignment above.
+- `src/alloc/mod.rs`, `src/lib.rs` — new safe `page_size()` accessor, re-exported as
+  `secure_alloc::page_size`: the page size the guard-paged allocations are laid out with,
+  and therefore the strongest alignment they can promise.
 
 ## API
 
@@ -114,6 +117,7 @@ unsafe {
 | `malloc_sized` | `unsafe fn malloc_sized(size: usize) -> Option<NonNull<[u8]>>` | Same for a byte slice of `size` bytes. |
 | `free` | `unsafe fn free<T: ?Sized>(memptr: NonNull<T>)` | Checks the canary, restores read/write protection, zeroes through `munlock`, and releases the mapping. Accepts the pointer from `malloc` or `malloc_sized`. |
 | `mprotect` | `unsafe fn mprotect<T: ?Sized>(memptr: NonNull<T>, prot: Prot::Ty) -> bool` | Re-protects the whole allocation's data region. |
+| `page_size` | `fn page_size() -> usize` | Safe. The page size the regions above are laid out with, and so the strongest alignment an allocation from this crate can promise. The first call initialises the allocator's page size and canary. |
 | `Prot` | module of constants | Unix: `NoAccess`, `ReadOnly`, `WriteOnly`, `ReadWrite`, `Execute`, `ReadExec`, `WriteExec`, `ReadWriteExec` (raw `libc::c_int`). Windows: `NoAccess`, `ReadOnly`, `ReadWrite`, `WriteCopy`, `Execute`, `ReadExec`, `ReadWriteExec`, `WriteCopyExec`, `Guard`, `NoCache`, `WriteCombine`, and the `PAGE_TARGETS_*` flags (`PAGE_PROTECTION_FLAGS`). |
 
 ```rust
