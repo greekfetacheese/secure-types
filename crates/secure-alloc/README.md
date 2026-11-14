@@ -50,6 +50,11 @@ Deliberately few; anything not listed here is upstream 0.7.0 code.
 - `src/lib.rs`, `src/mlock.rs`, `src/alloc/mod.rs`, `src/alloc/allocext/linux.rs` —
   every public `unsafe fn` documents its contract in a `# Safety` section, and the
   crate-wide `#![allow(clippy::missing_safety_doc)]` is gone. Documentation only.
+- `src/alloc/allocext/linux.rs` — the `memfd_secret` backing descriptor is opened
+  close-on-exec (`MFD_CLOEXEC`, falling back to `fcntl` on kernels that reject the
+  flag), and it is closed rather than leaked when `ftruncate` or `mmap` fails.
+  Upstream: [memsec#22](https://github.com/quininer/memsec/issues/22).
+- `tests/memfd_secret_cloexec.rs` — new; regression test for the descriptor above.
 
 ## API
 
@@ -179,6 +184,10 @@ plus `close` on free. They are only compiled on Linux: on any other target the
 - **`mprotect` is a sharp tool.** Dropping `Prot::NoAccess` on a live allocation and
   touching it faults the process; the protection is restored before the memory is
   released, so a misuse is not recoverable.
+- **The `memfd_secret` descriptor is close-on-exec, but not fork-safe.** A child
+  started with `exec` does not inherit the backing descriptor; a `fork` child still
+  does, although it already shares the mapping, so `fork` is not a containment
+  boundary for these allocations.
 
 ## License
 

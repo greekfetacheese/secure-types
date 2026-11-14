@@ -11,14 +11,40 @@ mod memfd_secret_alloc {
     use super::*;
     use core::convert::TryInto;
 
+    /// Create the backing descriptor, close-on-exec.
+    ///
+    /// `MFD_CLOEXEC` sets that atomically, but not every kernel accepts the flag
+    /// for `memfd_secret` and answers `EINVAL`; those fall back to setting it
+    /// immediately after creation, which narrows the window to these two calls.
     #[inline]
-    pub unsafe fn alloc_memfd_secret(size: usize) -> Option<(NonNull<u8>, libc::c_int)> {
-        let fd: Result<libc::c_int, _> = libc::syscall(libc::SYS_memfd_secret, 0).try_into();
+    unsafe fn secretmem_fd() -> Option<libc::c_int> {
+        let fd: Result<libc::c_int, _> =
+            libc::syscall(libc::SYS_memfd_secret, libc::MFD_CLOEXEC).try_into();
 
+        if let Some(fd) = fd.ok().filter(|&fd| fd >= 0) {
+            return Some(fd);
+        }
+
+        let fd: Result<libc::c_int, _> = libc::syscall(libc::SYS_memfd_secret, 0).try_into();
         let fd = fd.ok().filter(|&fd| fd >= 0)?;
 
+        if libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) < 0 {
+            libc::close(fd);
+            return None;
+        }
+
+        Some(fd)
+    }
+
+    #[inline]
+    pub unsafe fn alloc_memfd_secret(size: usize) -> Option<(NonNull<u8>, libc::c_int)> {
+        let fd = secretmem_fd()?;
+
         // File size is set using ftruncate
-        let _ = libc::ftruncate(fd, size as libc::off_t);
+        if libc::ftruncate(fd, size as libc::off_t) < 0 {
+            libc::close(fd);
+            return None;
+        }
 
         let ptr = libc::mmap(
             ptr::null_mut(),
@@ -30,6 +56,7 @@ mod memfd_secret_alloc {
         );
 
         if ptr == libc::MAP_FAILED {
+            libc::close(fd);
             return None;
         }
 
