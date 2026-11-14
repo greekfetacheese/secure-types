@@ -172,12 +172,7 @@ fn test_length_cannot_be_zero() {
 
 #[test]
 fn test_clone() {
-   let mut array1: SecureArray<u8, 3> = SecureArray::empty().unwrap();
-   array1.unlock_mut(|slice| {
-      slice[0] = 1;
-      slice[1] = 2;
-      slice[2] = 3;
-   });
+   let array1: SecureArray<u8, 3> = SecureArray::from_fn(|i| i as u8 + 1).unwrap();
 
    let array2 = array1.clone();
 

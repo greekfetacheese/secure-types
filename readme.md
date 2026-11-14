@@ -139,6 +139,8 @@ assert_eq!(payload[0], 0x07);
 
 **Not supported.** No type tags, so `deserialize_any` is unimplemented. `#[serde(flatten)]`, `#[serde(untagged)]`, and `Value`-shaped fields fail with `DecodeError::Unsupported`. Untagged enums can still serialize; they cannot be read back.
 
+**Nesting depth.** A recursive type is bounded at 128 levels: a document nested deeper is refused with `DecodeError::DepthLimit` rather than overflowing the stack.
+
 ## See also the [examples](/examples/).
 
 
@@ -152,6 +154,7 @@ assert_eq!(payload[0], 0x07);
 
 ## Security notes
 
+- **Alignment is capped at the page size.** `secure-alloc` backs these types with page-aligned regions, so a `T` whose `align_of` exceeds the platform page size is rejected with `Error::AlignmentFailed`.
 - **Serialization writes plaintext.** `serde_json::to_string`/`to_vec` leave the document in an ordinary `String`/`Vec` that nothing wipes. Zeroize that buffer yourself, write through `SecureBytesWriter`, or use the [binary codec](#binary-codec).
 - **Deserialization reads a buffer you own.** `serde_json::from_str`/`from_slice` take a plain `&str`/`&[u8]`. Parse from inside locked memory (`locked.unlock_slice(|json| serde_json::from_slice::<Vault>(json))`) so the input is unlocked only for the parse. Escaped JSON strings still land in `serde_json`'s own scratch buffer, which this crate cannot wipe. The codec decoder has no such scratch.
 

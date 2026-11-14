@@ -353,6 +353,8 @@ where
 /// document that decodes with bytes left over means the reader and the writer
 /// disagree about the layout.
 ///
+/// Recursive types are bounded at 128 levels and return [`DecodeError::DepthLimit`].
+///
 /// # Errors
 ///
 /// Same as [`decode`].

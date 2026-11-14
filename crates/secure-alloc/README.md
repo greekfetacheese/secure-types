@@ -62,6 +62,9 @@ Deliberately few; anything not listed here is upstream 0.7.0 code.
   Upstream: [memsec#19](https://github.com/quininer/memsec/pull/19). The page size no
   longer comes from the allocator's statics, so `use_os` without `alloc` still builds.
 - `tests/mlock_dump_exclusion.rs` — new; regression test for the alignment above.
+- `src/alloc/mod.rs`, `src/lib.rs` — new safe `page_size()` accessor, re-exported as
+  `secure_alloc::page_size`: the page size the guard-paged allocations are laid out with,
+  and therefore the strongest alignment they can promise.
 - `src/alloc/mod.rs`, `src/alloc/allocext/linux.rs` — each allocation's metadata
   page carries an allocator tag (`MALL` for `malloc`/`malloc_sized`, `MFDS` for
   `memfd_secret`), checked by `free`, `free_memfd_secret` and `mprotect`. Releasing
@@ -119,7 +122,8 @@ unsafe {
 | `malloc` | `unsafe fn malloc<T>() -> Option<NonNull<T>>` | Allocates one `T`, fills it with `0xd0`, returns `None` on allocation failure. |
 | `malloc_sized` | `unsafe fn malloc_sized(size: usize) -> Option<NonNull<[u8]>>` | Same for a byte slice of `size` bytes. |
 | `free` | `unsafe fn free<T: ?Sized>(memptr: NonNull<T>)` | Checks the allocator tag and the canary, restores read/write protection, zeroes through `munlock`, and releases the mapping. Accepts the pointer from `malloc` or `malloc_sized`; a pointer from `free_memfd_secret` aborts on the tag. |
-| `mprotect` | `unsafe fn mprotect<T: ?Sized>(memptr: NonNull<T>, prot: Prot::Ty) -> bool` | Re-protects the whole allocation's data region. Aborts on a foreign pointer: the tag is checked before the length is read, and either allocator's tag is accepted. |
+| `mprotect` | `unsafe fn mprotect<T: ?Sized>(memptr: NonNull<T>, prot: Prot::Ty) -> bool` | Re-protects the whole allocation's data region. Aborts unless the metadata page carries an allocator tag: it is checked before the length is read, and both `malloc` and `memfd_secret` allocations are accepted. |
+| `page_size` | `fn page_size() -> usize` | Safe. The page size the regions above are laid out with, and so the strongest alignment an allocation from this crate can promise. The first call initialises the allocator's page size and canary. |
 | `Prot` | module of constants | Unix: `NoAccess`, `ReadOnly`, `WriteOnly`, `ReadWrite`, `Execute`, `ReadExec`, `WriteExec`, `ReadWriteExec` (raw `libc::c_int`). Windows: `NoAccess`, `ReadOnly`, `ReadWrite`, `WriteCopy`, `Execute`, `ReadExec`, `ReadWriteExec`, `WriteCopyExec`, `Guard`, `NoCache`, `WriteCombine`, and the `PAGE_TARGETS_*` flags (`PAGE_PROTECTION_FLAGS`). |
 
 ```rust
@@ -176,14 +180,15 @@ unrelated descriptor. They are only compiled on Linux: on any other target the
 - **Canary and allocator tag.** The metadata page holds the data-region length at
   offset 0 and, next to it, an allocator tag: `MALL` for `malloc`/`malloc_sized`, and
   `MFDS` one `usize` further along for `memfd_secret` (that slot holds its descriptor).
-  `free`, `free_memfd_secret` and `mprotect` check the tag first and `abort()` on a
-  mismatch, so a pointer released through the wrong allocator never reaches `dealloc`,
-  `munmap` or `close`; `mprotect` accepts either tag. The canary is `getrandom` bytes,
-  generated once per process on the first allocation (`Once`). `free` and
-  `free_memfd_secret` compare it with the constant-time `memeq` and call `abort()` on a
-  mismatch; a pointer whose page-aligned base is not a plausible allocation also
-  aborts. A corrupted or foreign pointer therefore kills the process, it does not
-  return an error.
+  A `malloc` header's spare tag slot is written with a defined non-`MFDS` value, so
+  neither check ever reads uninitialised metadata. `free`, `free_memfd_secret` and
+  `mprotect` check the tag first and `abort()` on a mismatch, so a pointer released
+  through the wrong allocator never reaches `dealloc`, `munmap` or `close`; `mprotect`
+  accepts either tag. The canary is `getrandom` bytes, generated once per process on
+  the first allocation (`Once`). `free` and `free_memfd_secret` compare it with the
+  constant-time `memeq` and call `abort()` on a mismatch; a pointer whose page-aligned
+  base is not a plausible allocation also aborts. A corrupted or foreign pointer
+  therefore kills the process, it does not return an error.
 - **`mlock` failure is ignored.** `malloc`/`malloc_sized` call `mlock` and discard its
   return value: the allocation succeeds even when the page could not be locked (for
   example when `RLIMIT_MEMLOCK` is exhausted). Call `mlock` yourself, or check

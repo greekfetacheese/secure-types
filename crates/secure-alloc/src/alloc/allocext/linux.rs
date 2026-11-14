@@ -97,7 +97,7 @@ unsafe fn _memfd_secret(size: usize) -> Option<*mut u8> {
     ptr::copy_nonoverlapping(CANARY.as_ptr(), canary_ptr, CANARY_SIZE);
     ptr::write_unaligned(base_ptr as *mut usize, unprotected_size);
     ptr::write_unaligned(fd_ptr as *mut libc::c_int, fd);
-    ptr::write_unaligned(fd_ptr.add(mem::size_of::<usize>()) as *mut usize, MEMFD_TAG);
+    ptr::write_unaligned(base_ptr.add(MEMFD_TAG_OFFSET) as *mut usize, MEMFD_TAG);
     _mprotect(base_ptr, PAGE_SIZE, Prot::ReadOnly);
 
     assert_eq!(unprotected_ptr_from_user_ptr(user_ptr), unprotected_ptr);
@@ -131,7 +131,7 @@ pub unsafe fn memfd_secret<T>() -> Option<NonNull<T>> {
 pub unsafe fn memfd_secret_sized(size: usize) -> Option<NonNull<[u8]>> {
     _memfd_secret(size).map(|memptr| {
         ptr::write_bytes(memptr, GARBAGE_VALUE, size);
-        NonNull::new_unchecked(ptr::slice_from_raw_parts_mut(memptr, size))
+        NonNull::new_unchecked(core::ptr::slice_from_raw_parts_mut(memptr, size))
     })
 }
 
@@ -158,7 +158,9 @@ pub unsafe fn free_memfd_secret<T: ?Sized>(memptr: NonNull<T>) {
     let unprotected_ptr = unprotected_ptr_from_user_ptr(memptr);
     let base_ptr = unprotected_ptr.sub(PAGE_SIZE * 2);
 
-    // check the allocator tag before the descriptor is read
+    // Check the allocator tag before the descriptor is read. A `malloc` header's
+    // spare slot is explicitly defined (see `NOT_MEMFD_TAG`), so this is never an
+    // uninitialised read.
     if ptr::read(base_ptr.add(MEMFD_TAG_OFFSET) as *const usize) != MEMFD_TAG {
         abort();
     }

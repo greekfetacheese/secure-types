@@ -14,6 +14,9 @@ pub use mlock::{mlock, munlock};
 #[cfg(feature = "alloc")]
 pub use alloc::{free, malloc, malloc_sized, mprotect, Prot};
 
+#[cfg(feature = "alloc")]
+pub use alloc::page_size;
+
 #[cfg(feature = "alloc_ext")]
 #[cfg(target_os = "linux")]
 pub use alloc::allocext::{free_memfd_secret, memfd_secret, memfd_secret_sized};
