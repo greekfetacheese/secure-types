@@ -191,6 +191,12 @@ pub enum DecodeError {
    InvalidOptionTag,
    /// A `char` was not a Unicode scalar value.
    InvalidChar,
+   /// The value was nested deeper than the decoder's limit.
+   ///
+   /// A recursive type fed a crafted document would otherwise recurse until the
+   /// stack overflows, which aborts instead of returning an error. The document
+   /// is refused instead, and nothing about it is carried.
+   DepthLimit,
    /// The input carries a format version this build does not understand.
    UnsupportedVersion(u8),
    /// Bytes remained after the top-level value was decoded.
@@ -230,6 +236,7 @@ impl fmt::Display for DecodeError {
          Self::InvalidBool => write!(f, "Invalid bool tag"),
          Self::InvalidOptionTag => write!(f, "Invalid Option tag"),
          Self::InvalidChar => write!(f, "Value is not a Unicode scalar value"),
+         Self::DepthLimit => write!(f, "Value is nested too deeply"),
          Self::UnsupportedVersion(version) => {
             write!(f, "Unsupported format version: {version}")
          }
