@@ -56,9 +56,14 @@ impl<'a, T: Zeroize> Drop for UnlockGuard<'a, T> {
 /// ## Security Model
 ///
 /// When compiled with the `use_os` feature (the default), it provides several layers of protection:
-/// - **Zeroization on Drop**: The memory is zeroized when the vector is dropped.
-/// - **Memory Locking**: The underlying memory pages are locked using `mlock` & `madvise` for (Unix) or
-///   `VirtualLock` & `VirtualProtect` for (Windows) to prevent the OS from memory-dump/swap to disk or other processes accessing the memory.
+/// - **Zeroization on Drop**: The memory is zeroized and every element is dropped when the vector
+///   is dropped.
+/// - **Memory Locking**: the allocation is `mprotect`ed `PROT_NONE` outside an `unlock*` scope,
+///   which stops accidental reads — including from this process — but is not a defence against
+///   `ptrace` or a debugger. On the malloc path it is also `mlock`ed (Windows: `VirtualLock`)
+///   and, where the OS supports it, excluded from core dumps (`MADV_DONTDUMP` on Linux,
+///   `MADV_NOCORE` on FreeBSD/DragonFly). Linux uses `memfd_secret` when the kernel supports it;
+///   that backing is neither `mlock`ed nor marked `MADV_DONTDUMP`.
 ///
 /// In a `no_std` environment, it falls back to providing only the **zeroization-on-drop** guarantee.
 ///
@@ -460,30 +465,44 @@ impl<T: Zeroize> SecureVec<T> {
 
    /// Erase the underlying data and clears the vector
    ///
-   /// The memory is locked again and the capacity is preserved for reuse
+   /// Same as [`clear`](Self::clear): every live element is zeroized and dropped, and the
+   /// capacity is preserved for reuse.
    pub fn erase(&mut self) {
-      {
-         let _guard = UnlockGuard::new(self);
-
-         // SAFETY: the guard unprotects the live allocation; only the `len`
-         // initialized elements are exposed, so uninitialised capacity is never
-         // read as a `T`.
-         unsafe {
-            let slice = core::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len);
-            for elem in slice.iter_mut() {
-               elem.zeroize();
-            }
-         }
-      }
-
       self.clear();
    }
 
-   /// Clear the vector
+   /// Clears the vector, zeroizing and dropping every element.
    ///
-   /// This just sets the vector's len to zero it does not erase the underlying data
+   /// The drop is the part that matters for a `T` that owns heap memory (a `String`, a
+   /// `Vec<u8>`, a struct of them): zeroizing wipes what the element points at, and dropping
+   /// releases that allocation. Zeroizing alone would leave both the allocation and — for a
+   /// container that abandoned the element without a wipe — the plaintext behind.
+   ///
+   /// The capacity is preserved for reuse and the memory is re-locked afterwards.
    pub fn clear(&mut self) {
+      let len = self.len;
+      if len == 0 {
+         return;
+      }
+
+      // The length is reset *before* any destructor runs: a panicking `T::drop` must not
+      // leave the vector claiming an element this loop has already dropped, or the vector's
+      // own `Drop` would drop it a second time.
       self.len = 0;
+
+      let _guard = UnlockGuard::new(self);
+
+      // SAFETY: the guard unprotects the live allocation; the `len` slots were initialized
+      // and are now outside the vector's length, so each is zeroized and dropped exactly once
+      // here. Dropping from the back keeps the loop correct regardless of order.
+      unsafe {
+         let ptr = self.ptr.as_ptr();
+         for i in (0..len).rev() {
+            let slot = ptr.add(i);
+            (*slot).zeroize();
+            core::ptr::drop_in_place(slot);
+         }
+      }
    }
 
    pub fn push(&mut self, value: T) {
@@ -775,14 +794,18 @@ impl<T: Zeroize> Drop for SecureVec<T> {
    fn drop(&mut self) {
       // SAFETY: `drop` has exclusive ownership; `unlock_memory` restores access.
       // Only the `len` initialized elements are touched — zeroizing the
-      // uninitialised capacity would interpret poison bytes as a `T`.
+      // uninitialised capacity would interpret poison bytes as a `T`. Each
+      // element is zeroized and then dropped exactly once: zeroizing wipes what it
+      // owns (a `String`'s buffer) and the drop releases that allocation.
       unsafe {
          let ok = self.unlock_memory();
          debug_assert!(ok, "SecureVec::drop: unlock_memory failed");
 
-         let slice = core::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len);
-         for elem in slice.iter_mut() {
-            elem.zeroize();
+         let ptr = self.ptr.as_ptr();
+         for i in 0..self.len {
+            let slot = ptr.add(i);
+            (*slot).zeroize();
+            core::ptr::drop_in_place(slot);
          }
       }
 
@@ -1197,6 +1220,89 @@ mod tests {
 
    #[cfg(feature = "use_os")]
    use std::process::{Command, Stdio};
+   #[cfg(feature = "use_os")]
+   use std::sync::atomic::{AtomicUsize, Ordering};
+
+   /// A `T` that records both halves of the element lifecycle, so a leak is
+   /// observable without reading freed memory.
+   #[cfg(feature = "use_os")]
+   struct Owned(u8);
+
+   #[cfg(feature = "use_os")]
+   static ZEROIZED: AtomicUsize = AtomicUsize::new(0);
+   #[cfg(feature = "use_os")]
+   static DROPPED: AtomicUsize = AtomicUsize::new(0);
+
+   #[cfg(feature = "use_os")]
+   impl Zeroize for Owned {
+      fn zeroize(&mut self) {
+         self.0.zeroize();
+         ZEROIZED.fetch_add(1, Ordering::SeqCst);
+      }
+   }
+
+   #[cfg(feature = "use_os")]
+   impl Drop for Owned {
+      fn drop(&mut self) {
+         DROPPED.fetch_add(1, Ordering::SeqCst);
+      }
+   }
+
+   #[cfg(feature = "use_os")]
+   fn tracked_vec(len: usize) -> SecureVec<Owned> {
+      let mut vec = SecureVec::new_with_capacity(len).unwrap();
+
+      for i in 0..len {
+         vec.push(Owned(i as u8));
+      }
+
+      vec
+   }
+
+   #[cfg(feature = "use_os")]
+   fn counts() -> (usize, usize) {
+      (
+         ZEROIZED.load(Ordering::SeqCst),
+         DROPPED.load(Ordering::SeqCst),
+      )
+   }
+
+   #[cfg(feature = "use_os")]
+   fn reset_counts() {
+      ZEROIZED.store(0, Ordering::SeqCst);
+      DROPPED.store(0, Ordering::SeqCst);
+   }
+
+   /// Every path that discards elements must zeroize *and drop* them: zeroizing
+   /// alone wipes their bytes but leaks the allocation they own, and `clear` used
+   /// to abandon them without even that.
+   #[cfg(feature = "use_os")]
+   #[test]
+   fn test_discarding_elements_zeroizes_and_drops_them() {
+      reset_counts();
+      drop(tracked_vec(3));
+      assert_eq!(counts(), (3, 3), "Drop");
+
+      reset_counts();
+      let mut vec = tracked_vec(3);
+      vec.clear();
+      assert_eq!(vec.len(), 0);
+      assert_eq!(counts(), (3, 3), "clear");
+
+      reset_counts();
+      let mut vec = tracked_vec(2);
+      vec.erase();
+      assert_eq!(vec.len(), 0);
+      assert_eq!(counts(), (2, 2), "erase");
+
+      // The capacity survives a clear and is reused by the next push.
+      let mut vec = tracked_vec(1);
+      vec.clear();
+      reset_counts();
+      vec.push(Owned(0));
+      drop(vec);
+      assert_eq!(counts(), (1, 1), "reuse after clear");
+   }
 
    #[cfg(feature = "use_os")]
    #[test]

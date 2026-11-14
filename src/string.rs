@@ -12,7 +12,7 @@ use alloc::string::String;
 
 /// A securely allocated, growable UTF-8 string, just like `std::string::String`.
 ///
-/// It is a wrapper around [SecureVec<u8>] and inherits all of its security guarantees.
+/// It is a wrapper around [`SecureVec<u8>`](SecureVec) and inherits all of its security guarantees.
 ///
 /// Access to the string contents is provided through scoped methods like `unlock_str`,
 /// which ensure the memory is only unlocked for the briefest possible time.
