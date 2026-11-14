@@ -3,7 +3,6 @@ use self::std::process::abort;
 use crate::{alloc::*, Prot};
 use core::mem::{self, size_of};
 use core::ptr::{self, NonNull};
-use core::slice;
 
 use self::memfd_secret_alloc::*;
 
@@ -131,7 +130,7 @@ pub unsafe fn memfd_secret<T>() -> Option<NonNull<T>> {
 pub unsafe fn memfd_secret_sized(size: usize) -> Option<NonNull<[u8]>> {
     _memfd_secret(size).map(|memptr| {
         ptr::write_bytes(memptr, GARBAGE_VALUE, size);
-        NonNull::new_unchecked(slice::from_raw_parts_mut(memptr, size))
+        NonNull::new_unchecked(core::ptr::slice_from_raw_parts_mut(memptr, size))
     })
 }
 

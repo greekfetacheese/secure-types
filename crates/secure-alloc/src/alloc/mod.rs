@@ -10,7 +10,6 @@ use self::std::process::abort;
 use self::std::sync::Once;
 use core::mem;
 use core::ptr::{self, NonNull};
-use core::slice;
 
 const GARBAGE_VALUE: u8 = 0xd0;
 const CANARY_SIZE: usize = 16;
@@ -43,6 +42,20 @@ unsafe fn alloc_init() {
 
     #[allow(static_mut_refs)]
     getrandom::fill(&mut CANARY).unwrap();
+}
+
+/// The page size this allocator lays its regions out with.
+///
+/// `malloc`, `malloc_sized` and the `memfd_secret` family return memory aligned to
+/// this, and `mprotect` plus the guard pages are page-granular, so it is also the
+/// strongest alignment an allocation from this crate can promise.
+#[inline]
+pub fn page_size() -> usize {
+    ALLOC_INIT.call_once(|| unsafe { alloc_init() });
+
+    // SAFETY: `alloc_init` ran above and wrote `PAGE_SIZE` before this read; the
+    // `Once` is the happens-before edge for every caller.
+    unsafe { PAGE_SIZE }
 }
 
 // -- aligned alloc / aligned free --
@@ -216,7 +229,7 @@ pub unsafe fn malloc<T>() -> Option<NonNull<T>> {
 pub unsafe fn malloc_sized(size: usize) -> Option<NonNull<[u8]>> {
     _malloc(size).map(|memptr| {
         ptr::write_bytes(memptr, GARBAGE_VALUE, size);
-        NonNull::new_unchecked(slice::from_raw_parts_mut(memptr, size))
+        NonNull::new_unchecked(core::ptr::slice_from_raw_parts_mut(memptr, size))
     })
 }
 
