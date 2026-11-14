@@ -11,6 +11,13 @@ use serde::de::{self, DeserializeOwned, DeserializeSeed, Visitor};
 
 use super::format::{DecodeError, FORMAT_VERSION, read_varint};
 
+/// Deepest value nesting the decoder accepts.
+///
+/// A recursive type fed a crafted document would otherwise recurse until the
+/// stack overflows, which aborts instead of returning an error. The limit is the
+/// same order of magnitude as serde_json's default.
+const MAX_DEPTH: usize = 128;
+
 /// Reads the codec wire format from a borrowed, already-unlocked buffer.
 pub(crate) struct Decoder<'de> {
    buf: &'de [u8],
@@ -23,6 +30,8 @@ pub(crate) struct Decoder<'de> {
    /// has no type for. It is also what lets a field body be checked for being
    /// consumed exactly.
    framed: bool,
+   /// Current value-nesting depth, bounded by [`MAX_DEPTH`].
+   depth: usize,
 }
 
 /// Decodes a whole document from `bytes`.
@@ -63,6 +72,7 @@ impl<'de> Decoder<'de> {
          buf,
          pos: 0,
          framed: false,
+         depth: 0,
       }
    }
 
@@ -123,6 +133,21 @@ impl<'de> Decoder<'de> {
       }
 
       Ok(count)
+   }
+
+   /// Counts one more nesting level, refusing past [`MAX_DEPTH`].
+   fn enter(&mut self) -> Result<(), DecodeError> {
+      if self.depth >= MAX_DEPTH {
+         return Err(DecodeError::DepthLimit);
+      }
+
+      self.depth += 1;
+      Ok(())
+   }
+
+   /// Balances [`enter`](Self::enter) once the nested value has been decoded.
+   fn leave(&mut self) {
+      self.depth -= 1;
    }
 }
 
@@ -304,7 +329,13 @@ impl<'de> de::Deserializer<'de> for &mut Decoder<'de> {
    {
       match self.read_u8()? {
          0x00 => visitor.visit_none(),
-         0x01 => visitor.visit_some(self),
+         0x01 => {
+            self.enter()?;
+            let value = visitor.visit_some(&mut *self);
+            self.leave();
+
+            value
+         }
          _ => Err(DecodeError::InvalidOptionTag),
       }
    }
@@ -335,7 +366,11 @@ impl<'de> de::Deserializer<'de> for &mut Decoder<'de> {
    where
       V: Visitor<'de>,
    {
-      visitor.visit_newtype_struct(self)
+      self.enter()?;
+      let value = visitor.visit_newtype_struct(&mut *self);
+      self.leave();
+
+      value
    }
 
    fn deserialize_seq<V>(self, visitor: V) -> Result<V::Value, DecodeError>
@@ -454,7 +489,11 @@ impl<'de> de::SeqAccess<'de> for SeqAccess<'de, '_> {
       }
       self.remaining -= 1;
 
-      seed.deserialize(&mut *self.decoder).map(Some)
+      self.decoder.enter()?;
+      let value = seed.deserialize(&mut *self.decoder);
+      self.decoder.leave();
+
+      value.map(Some)
    }
 
    /// Safe to trust: [`Decoder::read_count`] already rejected a count larger
@@ -491,14 +530,22 @@ impl<'de> de::MapAccess<'de> for MapAccess<'de, '_> {
       }
       self.remaining -= 1;
 
-      seed.deserialize(&mut *self.decoder).map(Some)
+      self.decoder.enter()?;
+      let value = seed.deserialize(&mut *self.decoder);
+      self.decoder.leave();
+
+      value.map(Some)
    }
 
    fn next_value_seed<V>(&mut self, seed: V) -> Result<V::Value, DecodeError>
    where
       V: DeserializeSeed<'de>,
    {
-      seed.deserialize(&mut *self.decoder)
+      self.decoder.enter()?;
+      let value = seed.deserialize(&mut *self.decoder);
+      self.decoder.leave();
+
+      value
    }
 
    fn size_hint(&self) -> Option<usize> {
@@ -581,9 +628,13 @@ impl<'de> de::MapAccess<'de> for StructMapAccess<'de, '_> {
          buf: frame,
          pos: 0,
          framed: true,
+         depth: self.decoder.depth,
       };
 
-      let value = seed.deserialize(&mut framed)?;
+      framed.enter()?;
+      let value = seed.deserialize(&mut framed);
+      framed.leave();
+      let value = value?;
 
       if framed.pos != framed.buf.len() {
          return Err(DecodeError::FrameMismatch {
@@ -644,7 +695,11 @@ impl<'de> de::VariantAccess<'de> for VariantAccess<'de, '_> {
    where
       T: DeserializeSeed<'de>,
    {
-      seed.deserialize(&mut *self.decoder)
+      self.decoder.enter()?;
+      let value = seed.deserialize(&mut *self.decoder);
+      self.decoder.leave();
+
+      value
    }
 
    fn tuple_variant<V>(self, len: usize, visitor: V) -> Result<V::Value, DecodeError>
