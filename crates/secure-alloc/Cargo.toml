@@ -1,0 +1,40 @@
+[package]
+name = "secure-alloc"
+version = "0.7.0"
+authors = ["quininer kel <quininer@live.com>", "Michalis Molfetas"]
+description = "Locked, guard-paged and canary-checked secure memory allocation with constant-time comparison and zeroing."
+documentation = "https://docs.rs/secure-alloc/"
+repository = "https://github.com/greekfetacheese/secure-types/tree/master/crates/secure-alloc"
+readme = "README.md"
+license = "MIT"
+keywords = ["protection", "memory", "secure", "mlock"]
+categories = ["no-std", "memory-management"]
+edition = "2018"
+
+[dependencies]
+getrandom = { version = "0.2", optional = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = { version = "0.2", optional = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.45", default-features = false, features = [
+    "Win32_System_SystemInformation",
+    "Win32_System_Memory",
+    "Win32_Foundation",
+    "Win32_System_Diagnostics_Debug",
+], optional = true }
+
+[features]
+default = ["use_os", "alloc"]
+nightly = []
+use_os = ["libc", "windows-sys"]
+alloc = ["getrandom", "use_os"]
+alloc_ext = ["alloc"]
+
+# Not `all-features`: the `nightly` feature exists only to swap memset's body for
+# `core::intrinsics::volatile_set_memory` and would make the docs build depend on an
+# unstable intrinsic. `alloc_ext` is the only feature that adds API (the memfd_secret
+# family), so documenting with defaults + alloc_ext covers the whole surface.
+[package.metadata.docs.rs]
+features = ["alloc_ext"]

@@ -10,7 +10,11 @@ keywords = ["security", "secure", "memory", "zeroize", "no_std"]
 categories = ["memory-management", "no-std", "security"]
 license = "MIT"
 
-[dependencies.memsec]
+[workspace]
+members = ["crates/secure-alloc"]
+
+[dependencies.secure-alloc]
+path = "crates/secure-alloc"
 version = "0.7.0"
 features = ["alloc_ext"]
 optional = true
@@ -36,7 +40,7 @@ features = ["derive"]
 
 [features]
 default = ["use_os"]
-use_os = ["memsec", "dep:libc"]
+use_os = ["dep:secure-alloc", "dep:libc"]
 serde = ["dep:serde"]
 
 # `codec`: a binary vault format implemented as `serde::Serializer` /

@@ -6,14 +6,14 @@
 #[cfg(all(target_os = "linux", feature = "use_os"))]
 #[test]
 fn test_supports_memfd_secret() {
-   use secure_types::{memsec, supports_memfd_secret};
+   use secure_types::{secure_alloc, supports_memfd_secret};
 
    let supports = supports_memfd_secret();
 
    if supports {
       print!("memfd_secret is supported");
       let size = std::mem::size_of::<u8>();
-      let ptr = unsafe { memsec::memfd_secret_sized(size) };
+      let ptr = unsafe { secure_alloc::memfd_secret_sized(size) };
       assert!(ptr.is_some());
    } else {
       print!("memfd_secret is not supported");

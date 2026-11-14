@@ -13,7 +13,7 @@ use zeroize::Zeroize;
 #[cfg(feature = "use_os")]
 use super::free;
 #[cfg(feature = "use_os")]
-use memsec::Prot;
+use secure_alloc::Prot;
 
 /// Unlocks the array's memory on construction and re-locks it on drop —
 /// including when the drop happens because the fn closure panicked.
