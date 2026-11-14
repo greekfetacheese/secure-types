@@ -184,9 +184,13 @@ pub unsafe fn mprotect<T: ?Sized>(memptr: NonNull<T>, prot: Prot::Ty) -> bool {
 
 // -- malloc / free --
 
+/// Rounds `size` up to the next multiple of the page size.
+///
+/// Returns `None` when the rounding itself would overflow, so a caller can reject an
+/// impossible size instead of wrapping it to a small one.
 #[inline]
-unsafe fn page_round(size: usize) -> usize {
-    (size + PAGE_MASK) & !PAGE_MASK
+unsafe fn page_round(size: usize) -> Option<usize> {
+    size.checked_add(PAGE_MASK).map(|size| size & !PAGE_MASK)
 }
 
 #[inline]
@@ -202,14 +206,20 @@ unsafe fn unprotected_ptr_from_user_ptr(memptr: *const u8) -> *mut u8 {
 unsafe fn _malloc(size: usize) -> Option<*mut u8> {
     ALLOC_INIT.call_once(|| alloc_init());
 
-    if size >= usize::MAX - PAGE_SIZE * 4 {
+    // Every step that can overflow is checked. A size in the last few dozen values
+    // before `usize::MAX` used to wrap the page-rounded total to zero, and the guard
+    // pages, canary and user pointer were then addressed from the unwrapped length.
+    let size_with_canary = CANARY_SIZE.checked_add(size)?;
+    let unprotected_size = page_round(size_with_canary)?;
+    let total_size = PAGE_SIZE.checked_mul(3)?.checked_add(unprotected_size)?;
+
+    // A `Layout` must fit in `isize`; anything larger is an allocation failure, not
+    // an invalid layout to hand to the global allocator.
+    if total_size > isize::MAX as usize {
         return None;
     }
 
     // aligned alloc ptr
-    let size_with_canary = CANARY_SIZE + size;
-    let unprotected_size = page_round(size_with_canary);
-    let total_size = PAGE_SIZE + PAGE_SIZE + unprotected_size + PAGE_SIZE;
     let base_ptr = alloc_aligned(total_size)?.as_ptr();
     let unprotected_ptr = base_ptr.add(PAGE_SIZE * 2);
 
@@ -313,6 +323,26 @@ pub unsafe fn free<T: ?Sized>(memptr: NonNull<T>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Sizes in the window that used to overflow the region total are rejected
+    /// instead of wrapping into a tiny allocation.
+    #[test]
+    fn oversized_region_size_is_rejected() {
+        let guard = page_size() * 4;
+
+        for offset in (guard - 32)..(guard + 32) {
+            let size = usize::MAX - offset;
+            // The crate is edition 2018, where a panic message only formats its
+            // arguments when they are passed explicitly.
+            assert!(
+                unsafe { malloc_sized(size) }.is_none(),
+                "usize::MAX - {} should be rejected",
+                offset
+            );
+        }
+
+        assert!(unsafe { malloc_sized(usize::MAX) }.is_none());
+    }
 
     #[test]
     fn malloc_header_carries_the_allocator_tag() {

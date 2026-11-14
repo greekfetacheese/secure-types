@@ -69,14 +69,20 @@ unsafe fn _memfd_secret(size: usize) -> Option<*mut u8> {
     //Assert size of unprotected_size (usize) and fd (i32) is less than PAGE_SIZE before allocating memory
     assert!(size_of::<usize>() + size_of::<i32>() <= PAGE_SIZE);
 
-    if size >= usize::MAX - PAGE_SIZE * 4 {
+    // Every step that can overflow is checked. A size in the last few dozen values
+    // before `usize::MAX` used to wrap the page-rounded total to zero, and the guard
+    // pages, canary and user pointer were then addressed from the unwrapped length.
+    let size_with_canary = CANARY_SIZE.checked_add(size)?;
+    let unprotected_size = page_round(size_with_canary)?;
+    let total_size = PAGE_SIZE.checked_mul(3)?.checked_add(unprotected_size)?;
+
+    // A `Layout` must fit in `isize`; anything larger is an allocation failure, not
+    // an invalid layout to hand to `mmap`.
+    if total_size > isize::MAX as usize {
         return None;
     }
 
     // aligned alloc ptr
-    let size_with_canary = CANARY_SIZE + size;
-    let unprotected_size = page_round(size_with_canary);
-    let total_size = PAGE_SIZE + PAGE_SIZE + unprotected_size + PAGE_SIZE;
     let (base_ptr, fd) = alloc_memfd_secret(total_size)?;
     let base_ptr = base_ptr.as_ptr();
     let fd_ptr = base_ptr.add(size_of::<usize>());

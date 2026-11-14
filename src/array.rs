@@ -43,9 +43,14 @@ impl<'a, T: Zeroize, const LENGTH: usize> Drop for UnlockGuard<'a, T, LENGTH> {
 /// ## Security Model
 ///
 /// When compiled with the `use_os` feature (the default), it provides several layers of protection:
-/// - **Zeroization on Drop**: The memory is zeroized when the array is dropped.
-/// - **Memory Locking**: The underlying memory pages are locked using `mlock` & `madvise` for (Unix) or
-///   `VirtualLock` & `VirtualProtect` for (Windows) to prevent the OS from memory-dump/swap to disk or other processes accessing the memory.
+/// - **Zeroization on Drop**: The memory is zeroized and every element is dropped when the array
+///   is dropped.
+/// - **Memory Locking**: the allocation is `mprotect`ed `PROT_NONE` outside an `unlock*` scope,
+///   which stops accidental reads — including from this process — but is not a defence against
+///   `ptrace` or a debugger. On the malloc path it is also `mlock`ed (Windows: `VirtualLock`)
+///   and, where the OS supports it, excluded from core dumps (`MADV_DONTDUMP` on Linux,
+///   `MADV_NOCORE` on FreeBSD/DragonFly). Linux uses `memfd_secret` when the kernel supports it;
+///   that backing is neither `mlock`ed nor marked `MADV_DONTDUMP`.
 ///
 /// In a `no_std` environment, it falls back to providing only the **zeroization-on-drop** guarantee.
 ///
@@ -434,16 +439,21 @@ impl<T: Zeroize, const LENGTH: usize> Drop for SecureArray<T, LENGTH> {
       let ok = self.unlock_memory();
       debug_assert!(ok, "SecureArray::drop: unlock_memory failed");
 
-      // Only the initialized elements are zeroized. A partially-initialized
-      // array (a panic during `from_slice*` / `init_from_clone`, or an `empty()`
-      // array that was never filled) still holds the allocator's poison bytes in
-      // the remaining slots, and interpreting those as a `T` would dereference
-      // garbage.
-      // SAFETY: the memory was unprotected above; the slice covers only the
-      // `initialized` written slots.
-      let slice = unsafe { core::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.initialized) };
-      for element in slice.iter_mut() {
-         element.zeroize();
+      // Only the initialized elements are zeroized and dropped. A
+      // partially-initialized array (a panic during `from_slice*` /
+      // `init_from_clone`, or an `empty()` array that was never filled) still
+      // holds the allocator's poison bytes in the remaining slots, and
+      // interpreting those as a `T` would dereference garbage. Zeroizing wipes
+      // what an element owns; the drop releases that allocation.
+      // SAFETY: the memory was unprotected above; the raw loop covers only the
+      // `initialized` written slots, and each is zeroized then dropped once.
+      unsafe {
+         let ptr = self.ptr.as_ptr();
+         for i in 0..self.initialized {
+            let slot = ptr.add(i);
+            (*slot).zeroize();
+            core::ptr::drop_in_place(slot);
+         }
       }
 
       let size = LENGTH.checked_mul(mem::size_of::<T>()).unwrap_or(0);
@@ -821,6 +831,39 @@ mod tests {
       assert!(result.is_err());
       assert_eq!(ZEROIZED.load(Ordering::SeqCst), 1);
       assert_eq!(DROPPED.load(Ordering::SeqCst), 1);
+   }
+
+   /// Owns a drop half of the lifecycle with counters of its own, so the drop-path
+   /// test does not race the panic-path test above.
+   struct DropTracked(u8);
+
+   static DROP_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+   impl Zeroize for DropTracked {
+      fn zeroize(&mut self) {
+         self.0.zeroize();
+      }
+   }
+
+   impl Drop for DropTracked {
+      fn drop(&mut self) {
+         DROP_COUNT.fetch_add(1, Ordering::SeqCst);
+      }
+   }
+
+   /// An initialized element must be zeroized *and dropped* when the array goes
+   /// away: zeroizing alone wipes its bytes but leaks the allocation it owns.
+   #[test]
+   fn test_drop_zeroizes_and_drops_initialized_elements() {
+      DROP_COUNT.store(0, Ordering::SeqCst);
+
+      {
+         let array: SecureArray<DropTracked, 3> =
+            SecureArray::from_fn(|i| DropTracked(i as u8)).unwrap();
+         drop(array);
+      }
+
+      assert_eq!(DROP_COUNT.load(Ordering::SeqCst), 3);
    }
 
    #[test]
