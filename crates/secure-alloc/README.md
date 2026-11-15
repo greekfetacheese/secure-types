@@ -23,55 +23,6 @@ free-standing memory helpers remain, with no dependencies at all.
 secure-alloc = "0.7.0"
 ```
 
-## Provenance
-
-- Forked from [`quininer/memsec`](https://github.com/quininer/memsec) by quininer kel.
-- Based on the published `memsec` 0.7.0 release, at upstream master commit
-  `b4de7b9a` (2025-01-21). Compared with that commit the code carries only the
-  changes listed under [Changes from upstream](#changes-from-upstream); the four
-  `#[allow(static_mut_refs)]` attributes in it are upstream's, added after 0.7.0
-  was published. `LICENSE` is copied verbatim.
-- Upstream has been unmaintained since that release. This fork keeps the source
-  close to upstream, so upstream fixes can still be carried over.
-- Licensed MIT, the same as upstream (see [LICENSE](https://github.com/greekfetacheese/secure-types/blob/master/crates/secure-alloc/LICENSE)).
-
-## Changes from upstream
-
-Deliberately few; anything not listed here is upstream 0.7.0 code.
-
-- `src/lib.rs` — `#![doc = include_str!("../README.md")]`, so this README is the
-  crate front page and its examples are doctests.
-- `src/alloc/mod.rs`, `src/alloc/allocext/linux.rs` — `::core::usize::MAX` is
-  written `usize::MAX`. Identical value; the deprecated spelling is gone.
-- `src/alloc/mod.rs` — the canary is filled with `getrandom::fill`, the 0.3+
-  spelling of `getrandom()`, because the dependency moved to `getrandom` 0.4.
-- `Cargo.toml` — `getrandom` 0.4 and `windows-sys` 0.61 (were 0.2 and 0.45), and
-  docs.rs builds with `alloc_ext` instead of `--all-features`.
-- `src/lib.rs`, `src/mlock.rs`, `src/alloc/mod.rs`, `src/alloc/allocext/linux.rs` —
-  every public `unsafe fn` documents its contract in a `# Safety` section, and the
-  crate-wide `#![allow(clippy::missing_safety_doc)]` is gone. Documentation only.
-- `src/alloc/allocext/linux.rs` — the `memfd_secret` backing descriptor is opened
-  close-on-exec (`MFD_CLOEXEC`, falling back to `fcntl` on kernels that reject the
-  flag), and it is closed rather than leaked when `ftruncate` or `mmap` fails.
-  Upstream: [memsec#22](https://github.com/quininer/memsec/issues/22).
-- `tests/memfd_secret_cloexec.rs` — new; regression test for the descriptor above.
-- `src/mlock.rs` — `madvise` is given the page-aligned range covering the caller's
-  bytes, and the page size is read once with `sysconf` and cached there. `mlock(2)`
-  accepts an unaligned address but `madvise(2)` rejects one with `EINVAL`, so an
-  unaligned `mlock` used to succeed while its dump exclusion silently did nothing.
-  Upstream: [memsec#19](https://github.com/quininer/memsec/pull/19). The page size no
-  longer comes from the allocator's statics, so `use_os` without `alloc` still builds.
-- `tests/mlock_dump_exclusion.rs` — new; regression test for the alignment above.
-- `src/alloc/mod.rs`, `src/lib.rs` — new safe `page_size()` accessor, re-exported as
-  `secure_alloc::page_size`: the page size the guard-paged allocations are laid out with,
-  and therefore the strongest alignment they can promise.
-- `src/alloc/mod.rs`, `src/alloc/allocext/linux.rs` — each allocation's metadata
-  page carries an allocator tag (`MALL` for `malloc`/`malloc_sized`, `MFDS` for
-  `memfd_secret`), checked by `free`, `free_memfd_secret` and `mprotect`. Releasing
-  an allocation through the other allocator aborts instead of closing an arbitrary
-  descriptor or handing `secretmem` memory to `dealloc`. `tests/wrong_free_aborts.rs`
-  and header-tag unit tests cover it.
-
 ## API
 
 All functions are `unsafe` unless noted. "Gate" is the cargo feature (or platform)
@@ -225,6 +176,4 @@ unrelated descriptor. They are only compiled on Linux: on any other target the
 
 ## License
 
-MIT — see [LICENSE](https://github.com/greekfetacheese/secure-types/blob/master/crates/secure-alloc/LICENSE). The license text is upstream's, copied verbatim
-from `quininer/memsec` 0.7.0 (see [Provenance](#provenance)); the MIT copyright
-notice is "Copyright (c) 2016 quininer@live.com".
+MIT
