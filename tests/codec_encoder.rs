@@ -885,6 +885,42 @@ fn test_encode_into_vec_erases_its_partial_document_on_failure() {
    );
 }
 
+/// A panicking Serialize impl must roll back too, not just one that returns
+/// Err: the unwind used to skip the rollback and leave the version byte,
+/// the declared count and every field written so far in the caller's buffer.
+#[test]
+fn test_encode_into_vec_erases_its_partial_document_when_a_serialize_impl_panics() {
+   const PREFIX: &[u8] = b"tag";
+
+   struct PanicsAfterWriting;
+
+   impl Serialize for PanicsAfterWriting {
+      fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+      where
+         S: ser::Serializer,
+      {
+         let mut seq = serializer.serialize_seq(Some(2))?;
+         seq.serialize_element("SECRET")?;
+         panic!("serialize impl panics");
+      }
+   }
+
+   let mut buffer = PREFIX.to_vec();
+
+   let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+      secure_types::encode_into_vec(&mut buffer, &PanicsAfterWriting)
+   }));
+
+   assert!(
+      result.is_err(),
+      "the Serialize impl was supposed to panic"
+   );
+   assert_eq!(
+      buffer, PREFIX,
+      "a panicking Serialize impl left a partial document in the caller's buffer"
+   );
+}
+
 /// `encoded_len` must equal the document `encode` writes, whatever the shape.
 ///
 /// The length is measured by the same serializer that produces the document, so
