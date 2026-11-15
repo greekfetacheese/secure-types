@@ -6,6 +6,8 @@ use alloc::alloc::Layout;
 #[cfg(not(feature = "use_os"))]
 use alloc::vec::Vec;
 
+#[cfg(not(feature = "use_os"))]
+use super::zero_bytes;
 use super::{Error, SecureVec, alloc};
 use core::{marker::PhantomData, mem, ptr::NonNull};
 use zeroize::Zeroize;
@@ -314,10 +316,21 @@ where
       Ok(array)
    }
 
+   /// The array's fixed length, `LENGTH`.
+   ///
+   /// This is the number of slots the allocation holds, not the number that have
+   /// been written. An [`empty`](Self::empty) array that was never filled reports
+   /// `LENGTH` here while [`unlock`](Self::unlock) yields nothing, because the
+   /// remaining slots still hold the allocator's poison bytes, and a `Clone` of
+   /// it behaves the same way, since `Clone` carries the source's state. Every
+   /// other constructor fills all `LENGTH` slots, so `len()` and `unlock` agree
+   /// there.
    pub fn len(&self) -> usize {
       LENGTH
    }
 
+   /// Always `false`: [`empty`](Self::empty) rejects a zero length, so no
+   /// `SecureArray` can have `len() == 0`.
    pub fn is_empty(&self) -> bool {
       self.len() == 0
    }
@@ -505,8 +518,7 @@ impl<T: Zeroize, const LENGTH: usize> Drop for SecureArray<T, LENGTH> {
       // the region was unprotected above and is still owned here, and the
       // `Layout` below matches the one `alloc` used.
       unsafe {
-         let bytes = core::slice::from_raw_parts_mut(self.ptr.as_ptr() as *mut u8, size);
-         bytes.zeroize();
+         zero_bytes(self.ptr.as_ptr() as *mut u8, size);
 
          let layout = Layout::from_size_align_unchecked(size, mem::align_of::<T>());
          alloc::alloc::dealloc(self.ptr.as_ptr() as *mut u8, layout);

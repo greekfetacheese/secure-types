@@ -11,7 +11,7 @@ use std::vec::Vec;
 #[cfg(all(feature = "serde", not(feature = "use_os")))]
 use alloc::vec::Vec;
 
-use super::{Error, SecureArray, alloc};
+use super::{Error, SecureArray, alloc, zero_bytes};
 use core::{
    marker::PhantomData,
    mem,
@@ -261,12 +261,13 @@ impl<T: Zeroize> SecureVec<T> {
       unsafe {
          vec.set_len(0);
       }
-      if old_byte_size > 0 {
-         // SAFETY: after set_len(0) the allocation bytes are still valid,
-         // we own them exclusively, and no Ts will be dropped by the Vec.
-         let bytes =
-            unsafe { core::slice::from_raw_parts_mut(vec.as_mut_ptr() as *mut u8, old_byte_size) };
-         bytes.zeroize();
+      // Wiped as bytes: the slots past `len` were never written, so they are only
+      // reachable as bytes, not as a `&mut [T]`.
+      //
+      // SAFETY: after `set_len(0)` the allocation is still owned here and is valid
+      // for writes of `old_byte_size` bytes; no `T` will be dropped by the `Vec`.
+      unsafe {
+         zero_bytes(vec.as_mut_ptr() as *mut u8, old_byte_size);
       }
 
       let secure = SecureVec {
@@ -513,6 +514,13 @@ impl<T: Zeroize> SecureVec<T> {
       }
    }
 
+   /// Appends `value` to the back.
+   ///
+   /// # Panics
+   ///
+   /// Panics if the vector has to grow and the new capacity overflows `usize` or
+   /// the allocation fails — the contract of [`reserve`](Self::reserve), which this
+   /// calls first.
    pub fn push(&mut self, value: T) {
       self.reserve(1);
 
@@ -636,12 +644,10 @@ impl<T: Zeroize> SecureVec<T> {
             core::ptr::write(new_ptr.as_ptr().add(i), val);
          }
 
-         // Erase old buffer bytes (after move-out)
-         if self.capacity > 0 {
-            let old_bytes = self.capacity * mem::size_of::<T>();
-            let bytes = core::slice::from_raw_parts_mut(self.ptr.as_ptr() as *mut u8, old_bytes);
-            bytes.zeroize();
-         }
+         // Erase old buffer bytes (after move-out). The whole capacity is wiped,
+         // the slots past `len` that were never written included.
+         let old_bytes = self.capacity * mem::size_of::<T>();
+         zero_bytes(self.ptr.as_ptr() as *mut u8, old_bytes);
 
          #[cfg(feature = "use_os")]
          free(self.ptr);
@@ -827,8 +833,7 @@ impl<T: Zeroize> Drop for SecureVec<T> {
       // `use_os` gets from `secure_alloc::free` instead.
       unsafe {
          let byte_size = self.allocated_byte_size();
-         let bytes = core::slice::from_raw_parts_mut(self.ptr.as_ptr() as *mut u8, byte_size);
-         bytes.zeroize();
+         zero_bytes(self.ptr.as_ptr() as *mut u8, byte_size);
 
          let layout = Layout::from_size_align_unchecked(byte_size, mem::align_of::<T>());
          alloc::alloc::dealloc(self.ptr.as_ptr() as *mut u8, layout);
@@ -1168,11 +1173,7 @@ impl<'a, T: Zeroize> Drain<'a, T> {
          // values (and the kept tail). Wipe as bytes.
          let leftover_elems = self.original_vec_len.saturating_sub(new_len);
          let leftover_bytes = leftover_elems.saturating_mul(mem::size_of::<T>());
-         if leftover_bytes > 0 {
-            let bytes =
-               core::slice::from_raw_parts_mut(base.add(new_len) as *mut u8, leftover_bytes);
-            bytes.zeroize();
-         }
+         zero_bytes(base.add(new_len) as *mut u8, leftover_bytes);
 
          new_len
       }

@@ -152,6 +152,31 @@ pub fn supports_memfd_secret() -> bool {
    }
 }
 
+/// Writes `len` zeros at `ptr`, without interpreting the range as initialised bytes.
+///
+/// Some of the ranges this crate wipes cover memory that was never written: a
+/// `Vec`'s spare capacity, or the slots of a `SecureArray` that a constructor never
+/// filled. A `&mut [u8]` over uninitialised memory is undefined behaviour even
+/// when it is only written through, so the wipe goes through a `MaybeUninit<u8>`
+/// view: that type has no initialization requirement, and zeroize's
+/// `impl Zeroize for [MaybeUninit<Z>]` is the API intended for exactly this. It
+/// still performs the volatile stores and the compiler barrier, so a wipe that
+/// runs immediately before the memory is freed is not dropped as a dead store.
+///
+/// # Safety
+///
+/// `ptr` must be non-null and valid for writes of `len` bytes for the duration of
+/// the call.
+pub(crate) unsafe fn zero_bytes(ptr: *mut u8, len: usize) {
+   // SAFETY: the caller guarantees `ptr` is non-null and valid for writes of `len`
+   // bytes, and `MaybeUninit<u8>` has no initialization requirement, so the slice
+   // is valid over memory that was never written. `u8` has alignment 1, so viewing
+   // the range as `MaybeUninit<u8>` adds no alignment precondition.
+   let bytes =
+      unsafe { core::slice::from_raw_parts_mut(ptr.cast::<core::mem::MaybeUninit<u8>>(), len) };
+   bytes.zeroize();
+}
+
 /// Allocate memory
 ///
 /// For `Windows` it always uses [secure_alloc::malloc_sized]
