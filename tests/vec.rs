@@ -1038,3 +1038,58 @@ fn test_drain_discards_the_rest_when_a_destructor_panics() {
       "every unyielded element must be dropped, including the ones the panic skipped"
    );
 }
+
+static DROP_ZEROIZED: AtomicUsize = AtomicUsize::new(0);
+static DROP_DROPPED: AtomicUsize = AtomicUsize::new(0);
+
+/// A T that records both halves of the discard lifecycle and panics once.
+struct DropBomb {
+   index: usize,
+}
+
+impl Zeroize for DropBomb {
+   fn zeroize(&mut self) {
+      DROP_ZEROIZED.fetch_add(1, Ordering::SeqCst);
+   }
+}
+
+impl Drop for DropBomb {
+   fn drop(&mut self) {
+      DROP_DROPPED.fetch_add(1, Ordering::SeqCst);
+
+      if self.index == 1 {
+         panic!("element destructor panics");
+      }
+   }
+}
+
+/// Drop must discard the elements it has not reached when a destructor panics.
+///
+/// The forward loop used to stop at the panicking element: every later slot was
+/// neither zeroized nor dropped, so a String/Vec it owned was freed with its
+/// plaintext still in it. The free guard only released the secure region.
+#[test]
+fn test_drop_discards_the_rest_when_a_destructor_panics() {
+   DROP_ZEROIZED.store(0, Ordering::SeqCst);
+   DROP_DROPPED.store(0, Ordering::SeqCst);
+
+   let mut vec: SecureVec<DropBomb> = SecureVec::new_with_capacity(3).unwrap();
+
+   for index in 0..3 {
+      vec.push(DropBomb { index });
+   }
+
+   let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(vec))).is_err();
+
+   assert!(panicked, "the destructor was supposed to panic");
+   assert_eq!(
+      DROP_ZEROIZED.load(Ordering::SeqCst),
+      3,
+      "every element must be zeroized, including the ones the panic skipped"
+   );
+   assert_eq!(
+      DROP_DROPPED.load(Ordering::SeqCst),
+      3,
+      "every element must be dropped, including the ones the panic skipped"
+   );
+}

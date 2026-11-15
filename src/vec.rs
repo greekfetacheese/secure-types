@@ -958,11 +958,23 @@ impl<T: Zeroize> Drop for SecureVec<T> {
          debug_assert!(ok, "SecureVec::drop: unlock_memory failed");
 
          let ptr = self.ptr.as_ptr();
-         for i in 0..self.len {
-            let slot = ptr.add(i);
-            (*slot).zeroize();
-            core::ptr::drop_in_place(slot);
+
+         // The loop runs backwards so the live set is a prefix of the guard's base:
+         // a destructor that panics leaves exactly the un-reached slots to the guard,
+         // which zeroizes and drops them while the pages are still open.
+         let mut discard = InitGuard::<T>::new(ptr);
+         discard.set_written(self.len);
+
+         for i in (0..self.len).rev() {
+            // Zeroize can panic too, so the slot stays the guard's until the drop
+            // below takes ownership of it.
+            discard.set_written(i + 1);
+            (*ptr.add(i)).zeroize();
+            discard.set_written(i);
+            core::ptr::drop_in_place(ptr.add(i));
          }
+
+         discard.commit();
       }
       // `_free` releases the region here on the normal path, and during the unwind
       // when an element destructor panics.
