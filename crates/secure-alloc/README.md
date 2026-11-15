@@ -74,10 +74,12 @@ unsafe {
 | `malloc_sized` | `unsafe fn malloc_sized(size: usize) -> Option<NonNull<[u8]>>` | Same for a byte slice of `size` bytes. |
 | `free` | `unsafe fn free<T: ?Sized>(memptr: NonNull<T>)` | Checks the allocator tag, restores read/write protection, checks the canary, zeroes through `munlock`, and releases the allocation (`dealloc`; the block returns to the global allocator, which decides whether the pages go back to the OS). Accepts the pointer from `malloc` or `malloc_sized`; a pointer from `free_memfd_secret` aborts on the tag. |
 | `mprotect` | `unsafe fn mprotect<T: ?Sized>(memptr: NonNull<T>, prot: Prot::Ty) -> bool` | Re-protects the whole allocation's data region. Aborts unless the metadata page carries an allocator tag: it is checked before the length is read, and both `malloc` and `memfd_secret` allocations are accepted. |
-| `page_size` | `fn page_size() -> usize` | Safe. The page size the regions above are laid out with: guard-page and `mprotect` granularity, and the unit the data region is rounded up to. It is not the alignment of the returned pointer (see *Layout* under [Security notes](#security-notes)). The first call initialises the allocator's page size and canary. |
+| `page_size` | `fn page_size() -> usize` | Safe. The page size the regions above are laid out with: guard-page and `mprotect` granularity, and the unit the data region is rounded up to. It is not a guarantee of the returned pointer's alignment (see *Layout* under [Security notes](#security-notes)). The first call initialises the allocator's page size and canary. |
 | `Prot` | module of constants | Unix: `NoAccess`, `ReadOnly`, `WriteOnly`, `ReadWrite`, `Execute`, `ReadExec`, `WriteExec`, `ReadWriteExec` (raw `libc::c_int`). Windows: `NoAccess`, `ReadOnly`, `ReadWrite`, `WriteCopy`, `Execute`, `ReadExec`, `ReadWriteExec`, `WriteCopyExec`, `Guard`, `NoCache`, `WriteCombine`, and the `PAGE_TARGETS_*` flags (`PAGE_PROTECTION_FLAGS`). |
 
 ```rust
+# #[cfg(feature = "alloc")]
+# {
 use secure_alloc::{free, malloc};
 
 unsafe {
@@ -89,6 +91,7 @@ unsafe {
 
     free(mem);
 }
+# }
 ```
 
 ### Linux `memfd_secret` allocation — gates `alloc_ext` **and** `target_os = "linux"`
@@ -131,14 +134,15 @@ unrelated descriptor. They are only compiled on Linux: on any other target the
   trailing guard page instead of silently corrupting adjacent memory. An underrun
   reaches the canary only for its first 16 bytes: below the canary the region has up to
   a page of writable slack, so a deeper underrun passes the canary undetected until it
-  leaves the region. The regions are page-aligned, but the **returned pointer is not**:
+  leaves the region. The regions are page-aligned, but the **returned pointer is not necessarily**:
   it sits `size` bytes below the end of the data region, so only a page-multiple
   `size` lands on a page boundary. `malloc::<T>` is aligned for `T` while
   `align_of::<T>() <= page_size()`, because its size is `size_of::<T>()`, a multiple of
   `align_of::<T>()` — and the offset above is a multiple of the alignment only when the
-  alignment divides the page. An over-aligned `T` lands at that page remainder, so
-  `malloc_sized`'s result carries no alignment guarantee beyond a byte buffer's, and
-  neither does a strengthened `T`.
+  alignment divides the page. An over-aligned `T` is still page-aligned (its size is
+  a page multiple) but not promised its own alignment, so `malloc_sized`'s result
+  carries no alignment guarantee beyond a byte buffer's, and a strengthened `T`
+  carries no guarantee of `T`'s alignment.
 - **Canary and allocator tag.** The metadata page holds the data-region length at
   offset 0 and, next to it, an allocator tag: `MALL` for `malloc`/`malloc_sized`, and
   `MFDS` one `usize` further along for `memfd_secret` (that slot holds its descriptor).

@@ -15,8 +15,8 @@
 //!
 //! None of those are serde's trait layer — they belong to `serde_json`. A
 //! format we own needs no escaping pass and no `Value`: it builds every error from
-//! a length, an index or a `&'static str`, and the only buffers it writes through
-//! are locked `SecureBytes` scratch buffers (`collect_str`, and containers whose
+//! a length, an index or a `&'static str`, and the only scratch buffers it
+//! allocates are locked `SecureBytes` (`collect_str`, and containers whose
 //! length is not known up front), which are zeroized on drop. The one
 //! message an impl can influence is discarded rather than rendered in both
 //! directions — serde's own `unknown_variant` / `unknown_field` helpers format
