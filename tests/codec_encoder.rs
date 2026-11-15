@@ -450,6 +450,48 @@ fn test_element_count_mismatches_are_rejected() {
    ));
 }
 
+/// A length prefix that lies must be reported, never turned into an allocation.
+///
+/// The struct sink reserved one frame entry per *declared* field before it wrote any of
+/// them, so `usize::MAX` panicked with `capacity overflow` and a merely huge value
+/// aborted the process on a failed allocation — neither is catchable as an encode
+/// error, and both contradict the `ElementCountMismatch` contract.
+#[test]
+fn test_a_declared_struct_length_is_not_trusted_with_an_allocation() {
+   struct DeclaresAnImpossibleNumber(usize);
+
+   impl Serialize for DeclaresAnImpossibleNumber {
+      fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+      where
+         S: ser::Serializer,
+      {
+         let structure = serializer.serialize_struct("Lie", self.0)?;
+         structure.end()
+      }
+   }
+
+   for declared in [usize::MAX, 1 << 40, 3] {
+      assert!(
+         matches!(
+            secure_types::encode(&DeclaresAnImpossibleNumber(declared)),
+            Err(EncodeError::ElementCountMismatch)
+         ),
+         "a declared length of {declared} must be reported as a mismatch, not allocated"
+      );
+
+      assert!(
+         matches!(
+            secure_types::encode_into_vec(
+               &mut Vec::new(),
+               &DeclaresAnImpossibleNumber(declared)
+            ),
+            Err(EncodeError::ElementCountMismatch)
+         ),
+         "the Vec sink must reject a declared length of {declared} the same way"
+      );
+   }
+}
+
 /// `serde`'s default `collect_str` would build this string in a plain
 /// `String`; ours streams it into locked memory and encodes it as a `str`.
 #[test]
