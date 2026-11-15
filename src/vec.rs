@@ -37,7 +37,7 @@ pub(crate) struct UnlockGuard<'a, T: Zeroize> {
 impl<'a, T: Zeroize> UnlockGuard<'a, T> {
    pub(crate) fn new(vec: &'a SecureVec<T>) -> Self {
       let ok = vec.unlock_memory();
-      debug_assert!(ok, "UnlockGuard::new: unlock_memory failed");
+      crate::abort_if_protected(ok, "SecureVec::unlock");
 
       UnlockGuard { vec }
    }
@@ -48,7 +48,7 @@ impl<'a, T: Zeroize> Drop for UnlockGuard<'a, T> {
       let ok = self.vec.lock_memory();
       // Failing to re-lock means the protection is silently gone while the value is
       // still alive, so this is a hard error in every profile.
-      assert!(ok, "UnlockGuard::drop: lock_memory failed");
+      crate::abort_if_protected(ok, "SecureVec::lock");
    }
 }
 
@@ -757,7 +757,7 @@ impl<T: Zeroize> SecureVec<T> {
       // updated only after this block.
       unsafe {
          let ok = self.unlock_memory();
-         debug_assert!(ok, "SecureVec::try_reserve: unlock_memory failed");
+         crate::abort_if_protected(ok, "SecureVec::try_reserve");
 
          // Move (not copy) elements to new buffer to support non-Copy T correctly.
          // Using read+write transfers ownership of e.g. Strings.
@@ -880,9 +880,9 @@ impl SecureVec<u8> {
    ///
    /// # Panics
    ///
-   /// Panics if `offset + src.len()` exceeds the current length, or if the
-   /// memory cannot be re-locked afterwards. A patch never grows the vector —
-   /// use [`extend_from_slice`](Self::extend_from_slice) for that.
+   /// Panics if `offset + src.len()` exceeds the current length. Aborts with a
+   /// diagnostic if the memory cannot be re-locked afterwards. A patch never
+   /// grows the vector — use [`extend_from_slice`](Self::extend_from_slice) for that.
    #[cfg(feature = "codec")]
    pub(crate) fn patch_at(&mut self, offset: usize, src: &[u8]) {
       let end = offset
@@ -955,7 +955,7 @@ impl<T: Zeroize> Drop for SecureVec<T> {
       // owns (a `String`'s buffer) and the drop releases that allocation.
       unsafe {
          let ok = self.unlock_memory();
-         debug_assert!(ok, "SecureVec::drop: unlock_memory failed");
+         crate::abort_if_protected(ok, "SecureVec::drop");
 
          let ptr = self.ptr.as_ptr();
          for i in 0..self.len {

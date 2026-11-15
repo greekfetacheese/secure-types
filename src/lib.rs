@@ -387,3 +387,54 @@ pub(crate) fn mprotect<T>(ptr: NonNull<T>, prot: Prot::Ty) -> bool {
       unsafe { secure_alloc::mprotect(ptr, prot) }
    }
 }
+
+/// Aborts when a page-protection change failed.
+///
+/// `Drop` and the guard types cannot report an error, and the pages are in an
+/// unknown protection state: writing through them can fault halfway through the
+/// drop, after the allocator has already been touched. Aborting with a diagnostic
+/// is deterministic and leaves no silently unprotected value behind.
+#[cfg(feature = "use_os")]
+pub(crate) fn abort_if_protected(ok: bool, what: &str) {
+   if ok {
+      return;
+   }
+
+   eprintln!(
+      "secure-types: {what}: a memory-protection call failed; aborting rather than touching memory in an unknown protection state"
+   );
+   std::process::abort();
+}
+
+#[cfg(not(feature = "use_os"))]
+pub(crate) fn abort_if_protected(_ok: bool, _what: &str) {}
+
+/// The abort path itself cannot run in the test process, so the test re-executes
+/// the test binary and checks the child died by `SIGABRT` rather than panicking.
+#[cfg(all(test, feature = "use_os", unix))]
+mod abort_tests {
+   use std::os::unix::process::ExitStatusExt;
+
+   #[test]
+   fn abort_if_protected_aborts_the_process() {
+      const CHILD: &str = "ST_ABORT_IF_PROTECTED_CHILD";
+
+      if std::env::args().any(|arg| arg == CHILD) {
+         crate::abort_if_protected(false, "test");
+         unreachable!("abort_if_protected returned after a failed protection call");
+      }
+
+      let status = std::process::Command::new(std::env::current_exe().unwrap())
+         .arg("abort_if_protected_aborts_the_process")
+         .arg(CHILD)
+         .arg("--nocapture")
+         .status()
+         .expect("failed to spawn the child test binary");
+
+      assert_eq!(
+         status.signal(),
+         Some(libc::SIGABRT),
+         "the child must abort with SIGABRT, not panic or exit cleanly: {status:?}"
+      );
+   }
+}
