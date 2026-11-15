@@ -6,6 +6,7 @@
 mod common;
 
 use std::fmt::Debug;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use secure_types::{SecureArray, SecureVec, Zeroize};
@@ -707,4 +708,121 @@ fn test_vec_generic_basics<T: Zeroize + Clone + PartialEq + Debug>(initial: &[T]
    from_vec_secure.unlock_slice(|slice| {
       assert_eq!(slice, initial);
    });
+}
+
+/// Counts every `Tracked::clone` call, so the clone bomb can fire mid-loop.
+static CLONES: AtomicUsize = AtomicUsize::new(0);
+
+/// Counts every `Tracked::zeroize` call.
+static ZEROIZED: AtomicUsize = AtomicUsize::new(0);
+
+/// Counts every `Tracked::drop` call.
+static DROPPED: AtomicUsize = AtomicUsize::new(0);
+
+/// Owns a `String` like a real secret does, but panics on its second clone.
+#[derive(Debug)]
+struct Tracked(String);
+
+impl Tracked {
+   fn new(data: impl Into<String>) -> Self {
+      Tracked(data.into())
+   }
+}
+
+impl Clone for Tracked {
+   fn clone(&self) -> Self {
+      if CLONES.fetch_add(1, Ordering::SeqCst) == 1 {
+         panic!("clone bomb");
+      }
+
+      Tracked::new(self.0.clone())
+   }
+}
+
+impl Zeroize for Tracked {
+   fn zeroize(&mut self) {
+      ZEROIZED.fetch_add(1, Ordering::SeqCst);
+      self.0.zeroize();
+   }
+}
+
+impl Drop for Tracked {
+   fn drop(&mut self) {
+      DROPPED.fetch_add(1, Ordering::SeqCst);
+   }
+}
+
+fn reset_clone_counters() {
+   CLONES.store(0, Ordering::SeqCst);
+   ZEROIZED.store(0, Ordering::SeqCst);
+   DROPPED.store(0, Ordering::SeqCst);
+}
+
+/// A panic from `T::clone` mid-loop must zeroize and drop the elements already
+/// written instead of leaking them: their heap payloads (a `String`'s buffer)
+/// would otherwise outlive the container un-zeroized.
+///
+/// The bomb fires on the second clone, so exactly one element reached a slot.
+#[test]
+fn test_init_from_clone_panic_zeroizes_written_prefix() {
+   reset_clone_counters();
+
+   let source = vec![Tracked::new("a"), Tracked::new("b"), Tracked::new("c")];
+   let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+      SecureVec::<Tracked>::from_slice(&source)
+   }));
+
+   assert!(
+      result.is_err(),
+      "the clone bomb must make `SecureVec::from_slice` unwind"
+   );
+   assert_eq!(
+      ZEROIZED.load(Ordering::SeqCst),
+      1,
+      "the element written before the panic must be zeroized"
+   );
+   assert_eq!(
+      DROPPED.load(Ordering::SeqCst),
+      1,
+      "the element written before the panic must be dropped"
+   );
+}
+
+/// `from_slice_mut` promises to zeroize the caller's slice, so its wipe cannot sit
+/// after the copy loop: a `T::clone` that panics unwinds straight past it.
+///
+/// The bound is `T: Clone + DefaultIsZeroes`, i.e. `Copy`, so a hand-written
+/// panicking `Clone` is the only way into this path — and it is exactly the path
+/// that used to leave the caller's buffer untouched.
+#[test]
+fn test_from_slice_mut_wipes_the_source_when_a_clone_panics() {
+   #[derive(Copy, Debug, Default, PartialEq)]
+   struct CopyBomb(u8);
+
+   // Intentionally non-canonical: a `Copy` type whose `Clone` panics is the only
+   // way to reach this path without an owning element type.
+   #[allow(clippy::non_canonical_clone_impl)]
+   impl Clone for CopyBomb {
+      fn clone(&self) -> Self {
+         panic!("clone bomb");
+      }
+   }
+
+   impl zeroize::DefaultIsZeroes for CopyBomb {}
+
+   let mut source = [CopyBomb(17), CopyBomb(34)];
+
+   let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+      SecureVec::<CopyBomb>::from_slice_mut(&mut source)
+   }));
+
+   assert!(
+      result.is_err(),
+      "the clone bomb must make `SecureVec::from_slice_mut` unwind"
+   );
+   assert_eq!(
+      source,
+      [CopyBomb(0), CopyBomb(0)],
+      "the source buffer must be wiped even when `T::clone` panics"
+   );
 }

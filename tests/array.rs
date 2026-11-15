@@ -106,18 +106,20 @@ fn test_drop_without_initialization_is_sound() {
    );
 }
 
-/// Regression test: a panic while filling the array must not crash. `drop` must
+/// Regression test: a panic while filling the array must not crash, and the
+/// elements cloned before the panic must be zeroized and dropped. `drop` must
 /// never interpret the unwritten slots as a `T`.
 ///
-/// Note what is *not* asserted here: because `initialized` is committed only
-/// after the whole loop, the elements cloned before the panic are leaked rather
-/// than dropped or zeroized (the same trade-off `SecureVec` documents). This
-/// pins the soundness (no SIGSEGV/SIGABRT), not the wipe.
+/// The clone bomb fires on its second clone, so exactly one element had reached
+/// a slot when the panic started: the initialization guard has to wipe and drop
+/// that prefix, because `initialized` is committed only after the whole loop.
 #[test]
 fn test_panic_during_partial_init_is_sound() {
    let arg = "CRASH_TEST_ARRAY_PANIC_INIT";
 
    if std::env::args().any(|a| a == arg) {
+      ZEROIZED.store(0, Ordering::SeqCst);
+
       let panicked = std::panic::catch_unwind(|| {
          let content: [PanicOnClone; 3] = [
             PanicOnClone::new("a"),
@@ -128,7 +130,13 @@ fn test_panic_during_partial_init_is_sound() {
       })
       .is_err();
 
-      std::process::exit(if panicked { 0 } else { 1 });
+      std::process::exit(
+         if panicked && ZEROIZED.load(Ordering::SeqCst) == 1 {
+            0
+         } else {
+            1
+         },
+      );
    }
 
    let child = Command::new(std::env::current_exe().unwrap())
@@ -456,6 +464,10 @@ fn create_test_person(id: usize) -> Person {
 /// an initialization loop.
 static CLONE_BOMB: AtomicUsize = AtomicUsize::new(0);
 
+/// Counts every `zeroize` call, so the partial-init test can prove that the
+/// element written before the panic was wiped instead of leaked.
+static ZEROIZED: AtomicUsize = AtomicUsize::new(0);
+
 /// Owns a `String` like `Person` does, but panics on its second clone.
 #[derive(Debug)]
 struct PanicOnClone {
@@ -480,6 +492,7 @@ impl Clone for PanicOnClone {
 
 impl Zeroize for PanicOnClone {
    fn zeroize(&mut self) {
+      ZEROIZED.fetch_add(1, Ordering::SeqCst);
       self.data.zeroize();
    }
 }
