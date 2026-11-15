@@ -175,6 +175,21 @@ fn test_deserialize_from_owned_string() {
    secure.unlock_str(|str| assert_eq!(str, "hunter2"));
 }
 
+#[cfg(feature = "serde")]
+#[test]
+fn test_deserialize_from_owned_byte_buf() {
+   use common::OwnedBytes;
+   use serde::Deserialize;
+
+   // A format that routes a string through the byte hooks hands over an owned
+   // buffer. Copy it into locked memory, then wipe the buffer it gave us.
+   let secure = SecureString::deserialize(OwnedBytes(b"hunter2".to_vec())).unwrap();
+   secure.unlock_str(|str| assert_eq!(str, "hunter2"));
+
+   // Invalid UTF-8 must be rejected rather than accepted or passed through.
+   assert!(SecureString::deserialize(OwnedBytes(vec![0xFF, 0xFE])).is_err());
+}
+
 #[test]
 fn test_unlock_str() {
    let hello_word = "Hello, world!";

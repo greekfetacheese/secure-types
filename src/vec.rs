@@ -19,6 +19,8 @@ use core::{
    ops::{Bound, RangeBounds},
    ptr::{self, NonNull},
 };
+#[cfg(feature = "serde")]
+use zeroize::Zeroizing;
 use zeroize::{DefaultIsZeroes, Zeroize};
 
 #[cfg(feature = "use_os")]
@@ -1055,15 +1057,15 @@ impl<'de> serde::Deserialize<'de> for SecureVec<u8> {
             SecureVec::from_slice(v).map_err(serde::de::Error::custom)
          }
 
-         /// Mirrors `SecureString`'s `visit_string`: wipe the owned buffer the format
-         /// handed over, instead of letting it drop with the plaintext inside.
-         fn visit_byte_buf<E>(self, mut v: Vec<u8>) -> Result<Self::Value, E>
+         /// Wipe the owned buffer the format handed over, including when the copy
+         /// panics: a plain `v.zeroize()` after the call runs only on the success and
+         /// error arms, not on the unwind that a failed re-lock can start.
+         fn visit_byte_buf<E>(self, v: Vec<u8>) -> Result<Self::Value, E>
          where
             E: serde::de::Error,
          {
-            let vec = self.visit_bytes(&v);
-            v.zeroize();
-            vec
+            let v = Zeroizing::new(v);
+            self.visit_bytes(v.as_slice())
          }
       }
 
