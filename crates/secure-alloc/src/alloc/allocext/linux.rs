@@ -12,13 +12,16 @@ mod memfd_secret_alloc {
 
     /// Create the backing descriptor, close-on-exec.
     ///
-    /// `MFD_CLOEXEC` sets that atomically, but not every kernel accepts the flag
-    /// for `memfd_secret` and answers `EINVAL`; those fall back to setting it
-    /// immediately after creation, which narrows the window to these two calls.
+    /// `memfd_secret` takes `O_CLOEXEC` itself, which makes the descriptor
+    /// close-on-exec at creation. It is not `memfd_create`'s `MFD_CLOEXEC`: the
+    /// kernel rejects that value with `EINVAL` (measured on 7.0), so passing it
+    /// would silently send every allocation through the fallback below and leave the
+    /// descriptor inheritable until the `fcntl` lands. The fallback stays for kernels
+    /// that refuse the flag outright, and narrows the window to these two calls.
     #[inline]
     unsafe fn secretmem_fd() -> Option<libc::c_int> {
         let fd: Result<libc::c_int, _> =
-            libc::syscall(libc::SYS_memfd_secret, libc::MFD_CLOEXEC).try_into();
+            libc::syscall(libc::SYS_memfd_secret, libc::O_CLOEXEC).try_into();
 
         if let Some(fd) = fd.ok().filter(|&fd| fd >= 0) {
             return Some(fd);
