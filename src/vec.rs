@@ -195,7 +195,14 @@ impl<T: Zeroize> SecureVec<T> {
    #[cfg(feature = "use_os")]
    /// Create a new `SecureVec` from a `Vec`
    ///
-   /// The `Vec` is zeroized afterwards
+   /// The `Vec` is zeroized afterwards — on the error paths too.
+   ///
+   /// # Errors
+   ///
+   /// Returns [`Error::AllocationFailed`] for any failure to allocate, including
+   /// an over-aligned `T` that the other constructors report as
+   /// [`Error::AlignmentFailed`], and [`Error::LockFailed`] if the new region
+   /// cannot be locked.
    pub fn from_vec(mut vec: Vec<T>) -> Result<Self, Error> {
       if vec.capacity() == 0 {
          vec.reserve(1);
@@ -317,8 +324,9 @@ impl<T: Zeroize> SecureVec<T> {
 
    /// The number of elements the locked allocation can hold before it grows.
    ///
-   /// The allocation is re-`mprotect`ed on every growth, so this is also the number of
-   /// elements that can be pushed before another unlock/lock cycle.
+   /// Growth reallocates the region and re-locks it, so this bounds how many
+   /// elements can be appended between two reallocations. It is not a bound on
+   /// unlock/lock cycles: [`push`](Self::push) unlocks and re-locks per element.
    pub fn capacity(&self) -> usize {
       self.capacity
    }

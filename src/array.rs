@@ -408,12 +408,18 @@ where
    }
 
    /// Same as `SecureVec::init_from_clone`, for the fixed-size buffer.
-   /// `src.len()` must equal `LENGTH`.
+   ///
+   /// `src.len()` must not exceed `LENGTH`: the slots it fills become the
+   /// initialized prefix, so a short `src` — a clone of an `empty` or partially
+   /// filled array — leaves the remaining slots untouched and uninitialized.
    pub(crate) fn init_from_clone(&mut self, src: &[T])
    where
       T: Clone,
    {
-      debug_assert_eq!(src.len(), LENGTH);
+      debug_assert!(
+         src.len() <= LENGTH,
+         "init_from_clone: more elements than the array can hold"
+      );
 
       {
          let _guard = UnlockGuard::new(self);
@@ -479,6 +485,10 @@ impl<T: Zeroize, const LENGTH: usize> Drop for SecureArray<T, LENGTH> {
 }
 
 impl<T: Clone + Zeroize, const LENGTH: usize> Clone for SecureArray<T, LENGTH> {
+   /// The clone carries the source's initialization state: an
+   /// [`empty`](Self::empty) array clones to an empty one, not to a fully
+   /// populated array of poison bytes.
+   ///
    /// # Panics
    ///
    /// Panics if the clone's secure allocation cannot be made or locked.

@@ -185,6 +185,26 @@ fn test_clone() {
    });
 }
 
+/// Regression test: `Clone` carries the source's `initialized` count instead of
+/// assuming the array is full. Cloning a never-filled array used to trip
+/// `init_from_clone`'s `debug_assert_eq!(src.len(), LENGTH)` in every debug build,
+/// and in release it silently produced a clone whose `unlock` slice was empty while
+/// `len()` still reported `LENGTH`.
+#[test]
+fn test_clone_of_an_unfilled_array() {
+   let empty: SecureArray<u8, 4> = SecureArray::empty().unwrap();
+   let cloned = empty.clone();
+
+   assert_eq!(cloned.len(), 4);
+   cloned.unlock(|slice| assert!(slice.is_empty()));
+
+   // A fully initialized array still clones every element.
+   let full: SecureArray<u8, 4> = SecureArray::from_fn(|i| i as u8).unwrap();
+   let cloned = full.clone();
+
+   cloned.unlock(|slice| assert_eq!(slice, &[0, 1, 2, 3]));
+}
+
 #[test]
 fn test_thread_safety() {
    let exposed: &mut [u8; 3] = &mut [1, 2, 3];
