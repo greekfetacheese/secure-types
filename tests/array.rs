@@ -574,3 +574,101 @@ fn test_array_aligned() {
    ];
    test_array_generic_basics(&data);
 }
+
+/// Counts the `/secretmem` mappings the process holds.
+///
+/// A `memfd_secret` region is the only thing a leaked secure allocation leaves behind
+/// (the malloc fallback is ordinary heap), so the count is the observable.
+#[cfg(target_os = "linux")]
+fn secretmem_mappings() -> usize {
+   std::fs::read_to_string("/proc/self/maps")
+      .map(|maps| {
+         maps
+            .lines()
+            .filter(|line| line.contains("secretmem"))
+            .count()
+      })
+      .unwrap_or(0)
+}
+
+/// A `T` whose destructor panics, holding a payload that must not outlive the array.
+struct PanicOnDrop {
+   payload: String,
+   boom: bool,
+}
+
+impl Zeroize for PanicOnDrop {
+   fn zeroize(&mut self) {
+      self.payload.zeroize();
+   }
+}
+
+impl Drop for PanicOnDrop {
+   fn drop(&mut self) {
+      if self.boom {
+         panic!("element destructor panics");
+      }
+   }
+}
+
+/// A panicking element destructor must still release the region.
+///
+/// `Drop` used to release the allocation *after* the element loop, so the unwind
+/// skipped it: the `memfd_secret` region stayed mapped — `rw-s`, outside any
+/// `unlock*` scope — with the plaintext of the elements the loop never reached still
+/// readable.
+#[cfg(target_os = "linux")]
+#[test]
+fn test_a_panicking_destructor_still_frees_the_region() {
+   const CHILD: &str = "ST_ARRAY_PANICKING_DESTRUCTOR_REGION";
+
+   if std::env::args().any(|arg| arg == CHILD) {
+      if !secure_types::supports_memfd_secret() {
+         std::process::exit(77);
+      }
+
+      // The destructor's panic is this test's input, not a failure.
+      std::panic::set_hook(Box::new(|_| {}));
+
+      let before = secretmem_mappings();
+
+      let array: SecureArray<PanicOnDrop, 2> = SecureArray::from_fn(|index| PanicOnDrop {
+         payload: if index == 0 {
+            "SECRET-ONE"
+         } else {
+            "SECRET-TWO"
+         }
+         .to_owned(),
+         boom: index == 0,
+      })
+      .unwrap();
+
+      let panicked =
+         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(array))).is_err();
+      let after = secretmem_mappings();
+
+      std::process::exit(if panicked && after <= before { 0 } else { 3 });
+   }
+
+   let child = Command::new(std::env::current_exe().unwrap())
+      .arg("test_a_panicking_destructor_still_frees_the_region")
+      .arg(CHILD)
+      .arg("--nocapture")
+      .stdout(Stdio::piped())
+      .stderr(Stdio::piped())
+      .spawn()
+      .expect("Failed to spawn child process");
+
+   let output = child.wait_with_output().expect("Failed to wait on child");
+
+   if output.status.code() == Some(77) {
+      eprintln!("skipping: memfd_secret is unavailable on this kernel");
+      return;
+   }
+
+   assert!(
+      output.status.success(),
+      "a panicking element destructor must still release the region, but the child exited with {:?}",
+      output.status
+   );
+}

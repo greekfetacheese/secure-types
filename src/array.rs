@@ -1,20 +1,12 @@
-// No_std: we only need `Layout` for computing allocation sizes.
-// We call `alloc::alloc::dealloc` via fully-qualified path to avoid
-// shadowing the crate-level `alloc::<T>()` helper.
-#[cfg(not(feature = "use_os"))]
-use alloc::alloc::Layout;
+// No_std: `Vec` is only needed by `TryFrom<Vec<T>>`.
 #[cfg(not(feature = "use_os"))]
 use alloc::vec::Vec;
 
-#[cfg(not(feature = "use_os"))]
-use super::zero_bytes;
 use super::{Error, SecureVec, alloc};
-use crate::vec::InitGuard;
+use crate::vec::{FreeGuard, InitGuard};
 use core::{marker::PhantomData, mem, ptr::NonNull};
 use zeroize::Zeroize;
 
-#[cfg(feature = "use_os")]
-use super::free;
 #[cfg(feature = "use_os")]
 use secure_alloc::Prot;
 
@@ -80,12 +72,15 @@ impl<T: Zeroize> Drop for SourceWipe<'_, T> {
 /// When compiled with the `use_os` feature (the default), it provides several layers of protection:
 /// - **Zeroization on Drop**: The memory is zeroized and every element is dropped when the array
 ///   is dropped.
-/// - **Memory Locking**: the allocation is `mprotect`ed `PROT_NONE` outside an `unlock*` scope,
-///   which stops accidental reads — including from this process — but is not a defence against
-///   `ptrace` or a debugger. On the malloc path it is also `mlock`ed (Windows: `VirtualLock`)
-///   and, where the OS supports it, excluded from core dumps (`MADV_DONTDUMP` on Linux,
-///   `MADV_NOCORE` on FreeBSD/DragonFly). Linux uses `memfd_secret` when the kernel supports it;
-///   that backing is neither `mlock`ed nor marked `MADV_DONTDUMP`.
+/// - **Memory Locking**: the allocation is `mprotect`ed `PROT_NONE` outside an access scope —
+///   an `unlock*` call, or one of this type's own mutating methods (`erase`, `unlock_mut`, and
+///   `Drop`) — which stops accidental reads, this process's included, but is not a defence
+///   against `ptrace` or a debugger. On the malloc path it is also `mlock`ed on a best-effort
+///   basis (the call's result is discarded, so hitting `RLIMIT_MEMLOCK` still constructs;
+///   Windows: `VirtualLock`) and, where the OS supports it, excluded from core dumps
+///   (`MADV_DONTDUMP` on Linux, `MADV_NOCORE` on FreeBSD/DragonFly). Linux uses `memfd_secret`
+///   when the kernel supports it; that backing is neither `mlock`ed nor marked
+///   `MADV_DONTDUMP`.
 ///
 /// In a `no_std` environment, it falls back to providing only the **zeroization-on-drop** guarantee.
 ///
@@ -151,15 +146,17 @@ where
 {
    /// Creates an empty (but allocated) SecureArray.
    ///
-   /// The memory is allocated but not initialized, and it's the caller's
-   /// responsibility to fill it with [`from_fn`](Self::from_fn).
+   /// The allocation is made and locked, but no slot is initialized. There is no way
+   /// to fill it in place: [`unlock_mut`](Self::unlock_mut) refuses an array that is
+   /// not fully initialized, and [`from_fn`](Self::from_fn) builds its own. Treat
+   /// this as a reservation, and build a usable array with
+   /// [`from_slice`](Self::from_slice), [`from_slice_mut`](Self::from_slice_mut),
+   /// [`from_fn`](Self::from_fn), `Clone` or `TryFrom`.
    ///
    /// Only elements that are actually written are tracked as initialized: `drop`
    /// and `erase` zeroize just those, so dropping an array that was never filled is
    /// sound. The remaining slots still hold the allocator's poison bytes and must
-   /// never be read as a `T`. [`unlock_mut`](Self::unlock_mut) refuses an array
-   /// that is not fully initialized, so build the array with
-   /// [`from_fn`](Self::from_fn) instead of filling it through `unlock_mut`.
+   /// never be read as a `T`.
    pub fn empty() -> Result<Self, Error> {
       let size = LENGTH
          .checked_mul(mem::size_of::<T>())
@@ -275,8 +272,10 @@ where
 
    /// Builds a fully-initialized array, using `f` as the source of each element.
    ///
-   /// `f(i)` produces the value of slot `i`, and every value is written straight
-   /// into the secure allocation — it never touches the stack. If `f` panics, the
+   /// `f(i)` produces the value of slot `i`, and that value is written into the
+   /// secure allocation. The move still goes through a stack temporary — the value
+   /// `f` returned — which nothing wipes; only the copy the container owns is
+   /// zeroized and dropped. If `f` panics, the
    /// slots written so far are zeroized and dropped before the memory is re-locked,
    /// so a failed build leaves no partial value behind. This is the supported way
    /// to build an array without a source slice: it replaces filling an
@@ -499,6 +498,16 @@ where
 
 impl<T: Zeroize, const LENGTH: usize> Drop for SecureArray<T, LENGTH> {
    fn drop(&mut self) {
+      let size = LENGTH.checked_mul(mem::size_of::<T>()).unwrap_or(0);
+      if size == 0 {
+         return;
+      }
+
+      // The guard owns the free, so an element destructor that panics in the loop
+      // below cannot skip it: the region would otherwise stay mapped and unprotected
+      // with the plaintext still in it (see `FreeGuard`).
+      let _free = unsafe { FreeGuard::new(self.ptr, size) };
+
       let ok = self.unlock_memory();
       debug_assert!(ok, "SecureArray::drop: unlock_memory failed");
 
@@ -519,24 +528,8 @@ impl<T: Zeroize, const LENGTH: usize> Drop for SecureArray<T, LENGTH> {
          }
       }
 
-      let size = LENGTH.checked_mul(mem::size_of::<T>()).unwrap_or(0);
-      if size == 0 {
-         return;
-      }
-
-      #[cfg(feature = "use_os")]
-      free(self.ptr);
-
-      #[cfg(not(feature = "use_os"))]
-      // SAFETY: `size` is the full allocation size (`LENGTH * size_of::<T>()`),
-      // the region was unprotected above and is still owned here, and the
-      // `Layout` below matches the one `alloc` used.
-      unsafe {
-         zero_bytes(self.ptr.as_ptr() as *mut u8, size);
-
-         let layout = Layout::from_size_align_unchecked(size, mem::align_of::<T>());
-         alloc::alloc::dealloc(self.ptr.as_ptr() as *mut u8, layout);
-      }
+      // `_free` releases the region here, or during the unwind if a destructor
+      // panics.
    }
 }
 
@@ -707,6 +700,11 @@ impl<'de, const LENGTH: usize> serde::Deserialize<'de> for SecureArray<u8, LENGT
 ///
 /// `SecureArray<u8, LENGTH>` takes the byte-buffer impl above instead; the bound here is
 /// what keeps the two disjoint.
+///
+/// Only the initialized slots are written, while the tuple still declares `LENGTH`
+/// elements: an [`empty`](SecureArray::empty) array that was never filled serializes as
+/// an empty tuple, and the crate's binary codec rejects that document with
+/// `EncodeError::ElementCountMismatch`.
 #[cfg(feature = "serde")]
 impl<const LENGTH: usize, T> serde::Serialize for SecureArray<T, LENGTH>
 where

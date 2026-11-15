@@ -6,6 +6,8 @@
 mod common;
 
 use std::fmt::Debug;
+#[cfg(target_os = "linux")]
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -824,5 +826,215 @@ fn test_from_slice_mut_wipes_the_source_when_a_clone_panics() {
       source,
       [CopyBomb(0), CopyBomb(0)],
       "the source buffer must be wiped even when `T::clone` panics"
+   );
+}
+
+/// Counts the `/secretmem` mappings the process holds.
+///
+/// A `memfd_secret` region is the only thing a leaked secure allocation leaves behind
+/// (the malloc fallback is ordinary heap), so the count is the observable.
+#[cfg(target_os = "linux")]
+fn secretmem_mappings() -> usize {
+   std::fs::read_to_string("/proc/self/maps")
+      .map(|maps| {
+         maps
+            .lines()
+            .filter(|line| line.contains("secretmem"))
+            .count()
+      })
+      .unwrap_or(0)
+}
+
+/// A `T` whose destructor panics, holding a payload that must not outlive the vector.
+struct PanicOnDrop {
+   payload: String,
+   boom: bool,
+}
+
+impl Zeroize for PanicOnDrop {
+   fn zeroize(&mut self) {
+      self.payload.zeroize();
+   }
+}
+
+impl Drop for PanicOnDrop {
+   fn drop(&mut self) {
+      if self.boom {
+         panic!("element destructor panics");
+      }
+   }
+}
+
+/// A panicking element destructor must still release the region.
+///
+/// `Drop` used to release the allocation *after* the element loop, so the unwind
+/// skipped it: the `memfd_secret` region stayed mapped — `rw-s`, outside any
+/// `unlock*` scope — with the plaintext of the elements the loop never reached still
+/// readable. A child process is the repro because a leaked region is observable only
+/// as a mapping-count difference, and because reading the plaintext back is exactly
+/// what must no longer be possible.
+#[cfg(target_os = "linux")]
+#[test]
+fn test_a_panicking_destructor_still_frees_the_region() {
+   const CHILD: &str = "ST_PANICKING_DESTRUCTOR_REGION";
+
+   if std::env::args().any(|arg| arg == CHILD) {
+      if !secure_types::supports_memfd_secret() {
+         std::process::exit(77);
+      }
+
+      // The destructor's panic is this test's input, not a failure.
+      std::panic::set_hook(Box::new(|_| {}));
+
+      let before = secretmem_mappings();
+
+      let mut vec: SecureVec<PanicOnDrop> = SecureVec::new_with_capacity(2).unwrap();
+      vec.push(PanicOnDrop {
+         payload: "SECRET-ONE".to_owned(),
+         boom: true,
+      });
+      vec.push(PanicOnDrop {
+         payload: "SECRET-TWO".to_owned(),
+         boom: false,
+      });
+
+      let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(vec))).is_err();
+      let after = secretmem_mappings();
+
+      std::process::exit(if panicked && after <= before { 0 } else { 3 });
+   }
+
+   let child = Command::new(std::env::current_exe().unwrap())
+      .arg("test_a_panicking_destructor_still_frees_the_region")
+      .arg(CHILD)
+      .arg("--nocapture")
+      .stdout(Stdio::piped())
+      .stderr(Stdio::piped())
+      .spawn()
+      .expect("Failed to spawn child process");
+
+   let output = child.wait_with_output().expect("Failed to wait on child");
+
+   if output.status.code() == Some(77) {
+      eprintln!("skipping: memfd_secret is unavailable on this kernel");
+      return;
+   }
+
+   assert!(
+      output.status.success(),
+      "a panicking element destructor must still release the region, but the child exited with {:?}",
+      output.status
+   );
+}
+
+static CLEAR_ZEROIZED: AtomicUsize = AtomicUsize::new(0);
+static CLEAR_DROPPED: AtomicUsize = AtomicUsize::new(0);
+
+/// A `T` that records both halves of the discard lifecycle and panics once.
+struct ClearBomb {
+   index: usize,
+}
+
+impl Zeroize for ClearBomb {
+   fn zeroize(&mut self) {
+      CLEAR_ZEROIZED.fetch_add(1, Ordering::SeqCst);
+   }
+}
+
+impl Drop for ClearBomb {
+   fn drop(&mut self) {
+      CLEAR_DROPPED.fetch_add(1, Ordering::SeqCst);
+
+      if self.index == 1 {
+         panic!("element destructor panics");
+      }
+   }
+}
+
+/// `clear` must discard the elements it has not reached yet when a destructor panics.
+///
+/// The length is reset before the loop, so an unwound `clear` leaves the vector
+/// claiming nothing. Without a guard the untouched elements would be neither zeroized
+/// nor dropped, and the buffers they own would keep their plaintext forever.
+#[test]
+fn test_clear_discards_the_rest_when_a_destructor_panics() {
+   CLEAR_ZEROIZED.store(0, Ordering::SeqCst);
+   CLEAR_DROPPED.store(0, Ordering::SeqCst);
+
+   let mut vec: SecureVec<ClearBomb> = SecureVec::new_with_capacity(3).unwrap();
+
+   for index in 0..3 {
+      vec.push(ClearBomb { index });
+   }
+
+   let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vec.clear())).is_err();
+
+   assert!(panicked, "the destructor was supposed to panic");
+   assert_eq!(
+      CLEAR_ZEROIZED.load(Ordering::SeqCst),
+      3,
+      "every element must be zeroized, including the ones the panic skipped"
+   );
+   assert_eq!(
+      CLEAR_DROPPED.load(Ordering::SeqCst),
+      3,
+      "every element must be dropped, including the ones the panic skipped"
+   );
+}
+
+static DRAIN_ZEROIZED: AtomicUsize = AtomicUsize::new(0);
+static DRAIN_DROPPED: AtomicUsize = AtomicUsize::new(0);
+
+/// A `T` that records both halves of the discard lifecycle and panics once.
+struct DrainBomb {
+   index: usize,
+}
+
+impl Zeroize for DrainBomb {
+   fn zeroize(&mut self) {
+      DRAIN_ZEROIZED.fetch_add(1, Ordering::SeqCst);
+   }
+}
+
+impl Drop for DrainBomb {
+   fn drop(&mut self) {
+      DRAIN_DROPPED.fetch_add(1, Ordering::SeqCst);
+
+      if self.index == 1 {
+         panic!("element destructor panics");
+      }
+   }
+}
+
+/// `Drain::compact` must discard the unyielded elements a panic skips.
+///
+/// `drain` lowers the length before anything is compacted, so an unwound `Drop` leaves
+/// those elements outside it: nothing else would ever zeroize or drop them.
+#[test]
+fn test_drain_discards_the_rest_when_a_destructor_panics() {
+   DRAIN_ZEROIZED.store(0, Ordering::SeqCst);
+   DRAIN_DROPPED.store(0, Ordering::SeqCst);
+
+   let mut vec: SecureVec<DrainBomb> = SecureVec::new_with_capacity(3).unwrap();
+
+   for index in 0..3 {
+      vec.push(DrainBomb { index });
+   }
+
+   let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+      drop(vec.drain(0..3));
+   }))
+   .is_err();
+
+   assert!(panicked, "the destructor was supposed to panic");
+   assert_eq!(
+      DRAIN_ZEROIZED.load(Ordering::SeqCst),
+      3,
+      "every unyielded element must be zeroized, including the ones the panic skipped"
+   );
+   assert_eq!(
+      DRAIN_DROPPED.load(Ordering::SeqCst),
+      3,
+      "every unyielded element must be dropped, including the ones the panic skipped"
    );
 }

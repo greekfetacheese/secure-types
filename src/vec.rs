@@ -52,13 +52,14 @@ impl<'a, T: Zeroize> Drop for UnlockGuard<'a, T> {
    }
 }
 
-/// Zeroizes and drops the elements written so far if a clone loop unwinds.
+/// Zeroizes and drops the slots a loop has filled but not committed.
 ///
 /// The owning container commits `len` / `initialized` only after the whole loop, so
 /// a panic from `T::clone` leaves the already-written values in the secure
 /// allocation. Without this guard they would be neither dropped nor zeroized: their
 /// heap payloads (a `String`'s buffer, a `Vec`'s allocation) would outlive the
-/// container.
+/// container. `clear` and `Drain::compact` use it for the same reason: the slots
+/// they have not discarded yet still hold live values.
 pub(crate) struct InitGuard<T: Zeroize> {
    ptr: *mut T,
    written: usize,
@@ -77,7 +78,16 @@ impl<T: Zeroize> InitGuard<T> {
 
    /// Records that the slot at `index` now holds a live `T`.
    pub(crate) fn wrote(&mut self, index: usize) {
-      self.written = index + 1;
+      self.set_written(index + 1);
+   }
+
+   /// Records how many slots currently hold a live `T`.
+   ///
+   /// `wrote` is the fill-loop spelling, where the count only grows. A discard loop
+   /// has to lower it after each element, and a slot stays live until its
+   /// `drop_in_place` runs — `zeroize` alone can panic.
+   pub(crate) fn set_written(&mut self, written: usize) {
+      self.written = written;
    }
 
    /// Hands the written prefix back to the container, which now tracks it.
@@ -103,6 +113,47 @@ impl<T: Zeroize> Drop for InitGuard<T> {
    }
 }
 
+/// Frees a container's allocation when it goes out of scope.
+///
+/// A container's `Drop` runs element destructors before it releases the region, and a
+/// destructor that panics unwinds straight past the release: the region then stays mapped
+/// — on the `memfd_secret` path `rw-s`, outside any `unlock*` scope — with the plaintext
+/// still in it. Owning the free in a guard declared before the loop makes it run on every
+/// exit path, the unwind included.
+pub(crate) struct FreeGuard<T> {
+   ptr: NonNull<T>,
+   #[cfg_attr(feature = "use_os", allow(dead_code))]
+   byte_size: usize,
+}
+
+impl<T> FreeGuard<T> {
+   /// # Safety
+   ///
+   /// `ptr` must be the container's live allocation and `byte_size` its full byte count;
+   /// the allocation is freed exactly once, when this guard drops.
+   pub(crate) unsafe fn new(ptr: NonNull<T>, byte_size: usize) -> Self {
+      FreeGuard { ptr, byte_size }
+   }
+}
+
+impl<T> Drop for FreeGuard<T> {
+   fn drop(&mut self) {
+      #[cfg(feature = "use_os")]
+      free(self.ptr);
+
+      #[cfg(not(feature = "use_os"))]
+      // SAFETY: `byte_size` is the full allocation size, still owned here; the `Layout`
+      // matches the one `alloc` used. Byte-wiping it also removes anything a `clear()`
+      // left behind, which `use_os` gets from `secure_alloc::free` instead.
+      unsafe {
+         zero_bytes(self.ptr.as_ptr() as *mut u8, self.byte_size);
+
+         let layout = Layout::from_size_align_unchecked(self.byte_size, mem::align_of::<T>());
+         alloc::alloc::dealloc(self.ptr.as_ptr() as *mut u8, layout);
+      }
+   }
+}
+
 /// A securely allocated, growable vector, just like `std::vec::Vec`.
 ///
 /// ## Security Model
@@ -110,12 +161,15 @@ impl<T: Zeroize> Drop for InitGuard<T> {
 /// When compiled with the `use_os` feature (the default), it provides several layers of protection:
 /// - **Zeroization on Drop**: The memory is zeroized and every element is dropped when the vector
 ///   is dropped.
-/// - **Memory Locking**: the allocation is `mprotect`ed `PROT_NONE` outside an `unlock*` scope,
-///   which stops accidental reads — including from this process — but is not a defence against
-///   `ptrace` or a debugger. On the malloc path it is also `mlock`ed (Windows: `VirtualLock`)
-///   and, where the OS supports it, excluded from core dumps (`MADV_DONTDUMP` on Linux,
-///   `MADV_NOCORE` on FreeBSD/DragonFly). Linux uses `memfd_secret` when the kernel supports it;
-///   that backing is neither `mlock`ed nor marked `MADV_DONTDUMP`.
+/// - **Memory Locking**: the allocation is `mprotect`ed `PROT_NONE` outside an access scope —
+///   an `unlock*` call, or one of this type's own mutating methods (`push`, `clear`/`erase`,
+///   `drain`, `reserve`, and `Drop`) — which stops accidental reads, this process's included,
+///   but is not a defence against `ptrace` or a debugger. On the malloc path it is also
+///   `mlock`ed on a best-effort basis (the call's result is discarded, so hitting
+///   `RLIMIT_MEMLOCK` still constructs; Windows: `VirtualLock`) and, where the OS supports it,
+///   excluded from core dumps (`MADV_DONTDUMP` on Linux, `MADV_NOCORE` on FreeBSD/DragonFly).
+///   Linux uses `memfd_secret` when the kernel supports it; that backing is neither `mlock`ed
+///   nor marked `MADV_DONTDUMP`.
 ///
 /// In a `no_std` environment, it falls back to providing only the **zeroization-on-drop** guarantee.
 ///
@@ -404,12 +458,6 @@ impl<T: Zeroize> SecureVec<T> {
       self.ptr
    }
 
-   /// Returns the total number of bytes currently allocated for this vector.
-   #[cfg(not(feature = "use_os"))]
-   pub(crate) fn allocated_byte_size(&self) -> usize {
-      self.capacity * mem::size_of::<T>()
-   }
-
    pub(crate) fn as_mut_ptr(&mut self) -> *mut u8 {
       self.ptr.as_ptr() as *mut u8
    }
@@ -555,14 +603,28 @@ impl<T: Zeroize> SecureVec<T> {
 
       // SAFETY: the guard unprotects the live allocation; the `len` slots were initialized
       // and are now outside the vector's length, so each is zeroized and dropped exactly once
-      // here. Dropping from the back keeps the loop correct regardless of order.
+      // here. Dropping from the back keeps the loop correct regardless of order. The
+      // `InitGuard` covers the slots the loop has not reached yet, so a destructor that
+      // panics discards them instead of orphaning them — an orphaned element's owned buffer
+      // is freed by nobody and keeps its plaintext.
       unsafe {
          let ptr = self.ptr.as_ptr();
+
+         // `written` counts the live prefix from `ptr`. Slots above `i` are already
+         // discarded; `i` itself stays live until its `drop_in_place` runs.
+         let mut discard = InitGuard::<T>::new(ptr);
+         discard.set_written(len);
+
          for i in (0..len).rev() {
-            let slot = ptr.add(i);
-            (*slot).zeroize();
-            core::ptr::drop_in_place(slot);
+            // `zeroize` can panic too, so the slot is still the guard's until the drop
+            // below takes ownership of it.
+            discard.set_written(i + 1);
+            (*ptr.add(i)).zeroize();
+            discard.set_written(i);
+            core::ptr::drop_in_place(ptr.add(i));
          }
+
+         discard.commit();
       }
    }
 
@@ -734,7 +796,9 @@ impl<T: Zeroize> SecureVec<T> {
    ///
    /// Note: the memory is only unlocked while an item is read and while the iterator
    /// is dropped, so it is left locked once the iterator is gone even if the
-   /// iterator is leaked with `mem::forget`.
+   /// iterator is leaked with `mem::forget`. Leaking it also skips the compaction, so
+   /// the elements in and after the drained range are never dropped and the buffers
+   /// they own keep their plaintext.
    ///
    /// # Panics
    /// Panics if the starting point is greater than the end point or if the end point
@@ -877,6 +941,13 @@ impl<T: Clone + Zeroize, const LENGTH: usize> From<SecureArray<T, LENGTH>> for S
 
 impl<T: Zeroize> Drop for SecureVec<T> {
    fn drop(&mut self) {
+      // The guard owns the free, so an element destructor that panics in the loop
+      // below cannot skip it. Without that the region stayed mapped and unprotected
+      // with the plaintext still in it: measured on the `memfd_secret` path, the
+      // data page survives the unwind as `rw-s` and the un-dropped element's bytes
+      // are still readable.
+      let _free = unsafe { FreeGuard::new(self.ptr, self.capacity * mem::size_of::<T>()) };
+
       // SAFETY: `drop` has exclusive ownership; `unlock_memory` restores access.
       // Only the `len` initialized elements are touched — zeroizing the
       // uninitialised capacity would interpret poison bytes as a `T`. Each
@@ -893,22 +964,8 @@ impl<T: Zeroize> Drop for SecureVec<T> {
             core::ptr::drop_in_place(slot);
          }
       }
-
-      #[cfg(feature = "use_os")]
-      free(self.ptr);
-
-      #[cfg(not(feature = "use_os"))]
-      // SAFETY: `allocated_byte_size()` is the full allocation size, still owned
-      // here and unprotected above; the `Layout` matches the one `alloc` used.
-      // Byte-wiping it also removes anything a `clear()` left behind, which
-      // `use_os` gets from `secure_alloc::free` instead.
-      unsafe {
-         let byte_size = self.allocated_byte_size();
-         zero_bytes(self.ptr.as_ptr() as *mut u8, byte_size);
-
-         let layout = Layout::from_size_align_unchecked(byte_size, mem::align_of::<T>());
-         alloc::alloc::dealloc(self.ptr.as_ptr() as *mut u8, layout);
-      }
+      // `_free` releases the region here on the normal path, and during the unwind
+      // when an element destructor panics.
    }
 }
 
@@ -1143,8 +1200,11 @@ where
 ///
 /// The memory is unlocked only while an item is read and while `Drop` compacts the
 /// vector, so a leaked iterator (`mem::forget`) leaves the vector locked rather than
-/// exposed. Leaking it still skips the drops of the elements left in the drained
-/// range and leaves the length at the drain start.
+/// exposed. Leaking it still skips the drops of the elements left in the drained range
+/// and leaves the length at the drain start. And because `drain` lowers the length
+/// before anything is moved, the elements *after* the drained range stay in the
+/// allocation outside that length: their owned buffers are never freed either, so the
+/// plaintext they hold outlives the vector.
 ///
 /// Elements that are never yielded are zeroized and then dropped when the iterator
 /// is dropped, exactly as `clear` and `Drop` discard an element.
@@ -1220,13 +1280,26 @@ impl<'a, T: Zeroize> Drain<'a, T> {
          // reaches the slot, so without it the memory a `T` owns (a `String`'s
          // buffer) would be freed with its plaintext intact.
          if mem::needs_drop::<T>() {
-            let mut current_ptr = base.add(self.current_drain_iter_index);
-            let end_ptr = base.add(self.drain_end_index);
-            while current_ptr < end_ptr {
-               (*current_ptr).zeroize();
-               ptr::drop_in_place(current_ptr);
-               current_ptr = current_ptr.add(1);
+            let first = self.current_drain_iter_index;
+            let end = self.drain_end_index;
+
+            // Covers the unyielded slots the loop has not reached yet, so a destructor
+            // that panics discards them instead of orphaning them. The loop runs from
+            // the back, which is what makes the live set a prefix of `base.add(first)`.
+            let mut discard = InitGuard::<T>::new(base.add(first));
+            discard.set_written(end - first);
+
+            for index in (first..end).rev() {
+               let slot = base.add(index);
+               // `zeroize` can panic too, so the slot is still the guard's until the
+               // drop below takes ownership of it.
+               discard.set_written(index - first + 1);
+               (*slot).zeroize();
+               discard.set_written(index - first);
+               ptr::drop_in_place(slot);
             }
+
+            discard.commit();
          }
 
          let hole_dst_ptr = base.add(self.drain_start_index);
