@@ -276,8 +276,11 @@ where
 ///
 /// Measured, not estimated: `value` is serialized once into a sink that only
 /// counts, through the same [`serde::Serializer`] that produces a document, so
-/// the answer cannot drift from the wire format. Nothing is allocated and no
-/// memory is locked; the cost is one extra pass over `value`.
+/// the answer cannot drift from the wire format. The sink stores nothing, but the
+/// encoder's own bookkeeping still runs: a struct reserves one frame entry per
+/// field, and `collect_str` (or a container whose length is not known up front)
+/// collects through a [`SecureBytes`] scratch. So this is one extra pass over
+/// `value` with transient bookkeeping — not a zero-allocation call.
 ///
 /// This is for sizing a destination so that it never has to grow. Growth is not
 /// free for a plain `Vec`: reallocating leaves a copy of the partial document in

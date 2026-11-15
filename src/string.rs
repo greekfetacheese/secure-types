@@ -118,16 +118,27 @@ impl SecureString {
 
    /// Returns the number of chars in the string
    ///
+   /// This unlocks the string for the count, so it must not be called from inside
+   /// another `unlock*` closure on the same string: the nested unlock would re-lock
+   /// the pages while the outer closure is still reading them, which faults instead
+   /// of returning. See [`unlock_str`](Self::unlock_str).
+   ///
    /// # Panics
    /// Panics if the string is not valid UTF-8.
    pub fn char_len(&self) -> usize {
       self.unlock_str(|s| s.chars().count())
    }
 
-   /// Returns the number of chars in the string
+   /// Returns the number of chars in the string without validating the bytes
    ///
-   /// # Safety
-   /// The caller must guarantee that the string is valid UTF-8.
+   /// This is the unchecked counterpart of [`char_len`](Self::char_len): it skips
+   /// the UTF-8 pass, which every safe constructor already guarantees. It is only
+   /// sound on a string built by [`from_utf8_unchecked`](Self::from_utf8_unchecked)
+   /// if that string really does hold valid UTF-8 — a safe function cannot check
+   /// that for you, so keep the promise the `unsafe` constructor made.
+   ///
+   /// Like [`char_len`](Self::char_len), this unlocks the string and must not be
+   /// called from inside another `unlock*` closure.
    pub fn char_len_unchecked(&self) -> usize {
       self.unlock_str_unchecked(|s| s.chars().count())
    }
@@ -144,6 +155,15 @@ impl SecureString {
    ///
    /// It uses the `from_utf8` function to check the validity of the internal
    /// bytes. If the bytes are not valid UTF-8, the function panics.
+   ///
+   /// # Re-entrancy
+   ///
+   /// The closure must not call another `unlock*` method on this string, nor
+   /// [`char_len`](Self::char_len), which unlocks internally — [`byte_len`](Self::byte_len)
+   /// does not unlock and is fine. The pages are unprotected once and re-protected
+   /// when this call returns, so a nested unlock re-locks the memory while this
+   /// closure is still reading it, and the read faults. Use the `&str` you were
+   /// given instead, or measure before/after the call.
    pub fn unlock_str<F, R>(&self, f: F) -> R
    where
       F: FnOnce(&str) -> R,
@@ -155,12 +175,14 @@ impl SecureString {
       })
    }
 
-   /// Immutable access as `&str`
+   /// Immutable access as `&str` without validating the bytes
    ///
-   /// It uses the `from_utf8_unchecked` function to bypass the validity check.
+   /// It uses `from_utf8_unchecked` to bypass the validity check. Every safe
+   /// constructor keeps the contents valid UTF-8, so this is only a hazard for a
+   /// string built by [`from_utf8_unchecked`](Self::from_utf8_unchecked) with bytes
+   /// that are not valid UTF-8; keeping that promise is the caller's job.
    ///
-   /// # Safety
-   /// The caller must guarantee that the internal bytes are valid UTF-8.
+   /// The re-entrancy rule of [`unlock_str`](Self::unlock_str) applies here too.
    pub fn unlock_str_unchecked<F, R>(&self, f: F) -> R
    where
       F: FnOnce(&str) -> R,
