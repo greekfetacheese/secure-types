@@ -12,6 +12,7 @@ use std::vec::Vec;
 use alloc::vec::Vec;
 
 use super::{Error, SecureArray, alloc, zero_bytes};
+use crate::array::SourceWipe;
 use core::{
    marker::PhantomData,
    mem,
@@ -48,6 +49,57 @@ impl<'a, T: Zeroize> Drop for UnlockGuard<'a, T> {
       // Failing to re-lock means the protection is silently gone while the value is
       // still alive, so this is a hard error in every profile.
       assert!(ok, "UnlockGuard::drop: lock_memory failed");
+   }
+}
+
+/// Zeroizes and drops the elements written so far if a clone loop unwinds.
+///
+/// The owning container commits `len` / `initialized` only after the whole loop, so
+/// a panic from `T::clone` leaves the already-written values in the secure
+/// allocation. Without this guard they would be neither dropped nor zeroized: their
+/// heap payloads (a `String`'s buffer, a `Vec`'s allocation) would outlive the
+/// container.
+pub(crate) struct InitGuard<T: Zeroize> {
+   ptr: *mut T,
+   written: usize,
+}
+
+impl<T: Zeroize> InitGuard<T> {
+   /// # Safety
+   ///
+   /// `ptr` must be the base of a live, exclusively owned allocation of at least
+   /// as many writable `T` slots as the loop writes, unprotected for this guard's
+   /// whole lifetime. Every slot below `written` must hold a live `T` once
+   /// `wrote` has recorded it, and nothing else may drop it.
+   pub(crate) unsafe fn new(ptr: *mut T) -> Self {
+      InitGuard { ptr, written: 0 }
+   }
+
+   /// Records that the slot at `index` now holds a live `T`.
+   pub(crate) fn wrote(&mut self, index: usize) {
+      self.written = index + 1;
+   }
+
+   /// Hands the written prefix back to the container, which now tracks it.
+   pub(crate) fn commit(mut self) {
+      self.written = 0;
+   }
+}
+
+impl<T: Zeroize> Drop for InitGuard<T> {
+   fn drop(&mut self) {
+      for i in 0..self.written {
+         // SAFETY: `wrote` only recorded slots this guard's constructor proved
+         // live and writable, the container still counts them as uninitialised,
+         // and nothing else holds a reference to them — so each one is zeroized
+         // and dropped exactly once. Zeroize first, while the value is still
+         // valid, then run the destructor (a `String`'s buffer is freed here).
+         unsafe {
+            let slot = self.ptr.add(i);
+            (*slot).zeroize();
+            core::ptr::drop_in_place(slot);
+         }
+      }
    }
 }
 
@@ -288,21 +340,21 @@ impl<T: Zeroize> SecureVec<T> {
 
    /// Create a new `SecureVec` from a mutable slice.
    ///
-   /// The slice is zeroized afterwards
+   /// The slice is zeroized afterwards — including when a `T::clone` panics while
+   /// the vector is being filled.
    pub fn from_slice_mut(slice: &mut [T]) -> Result<Self, Error>
    where
       T: Clone + DefaultIsZeroes,
    {
-      let mut secure_vec = match SecureVec::new_with_capacity(slice.len()) {
-         Ok(secure_vec) => secure_vec,
-         Err(e) => {
-            slice.zeroize();
-            return Err(e);
-         }
-      };
+      // Wipes the caller's buffer on every way out of this function, the unwind from
+      // a panicking `T::clone` in `init_from_clone` included: a wipe placed after the
+      // copy loop is bypassed by the panic.
+      let wipe = SourceWipe::new(slice);
 
-      secure_vec.init_from_clone(slice);
-      slice.zeroize();
+      let mut secure_vec = SecureVec::new_with_capacity(wipe.as_slice().len())?;
+      secure_vec.init_from_clone(wipe.as_slice());
+
+      drop(wipe);
 
       Ok(secure_vec)
    }
@@ -571,9 +623,18 @@ impl<T: Zeroize> SecureVec<T> {
          // so every `dst.add(write_at + i)` is an uninitialised in-bounds slot;
          // `ptr::write` never reads it. `len` is committed only after the loop.
          unsafe {
+            // SAFETY: `dst.add(write_at)` is the first of the reserved slots in
+            // the live allocation the `UnlockGuard` above unprotects, the
+            // `InitGuard` is dropped before the region is re-locked, and `wrote`
+            // records exactly the slots that hold a live `T`.
+            let mut init = InitGuard::new(dst.add(write_at));
+
             for (i, item) in src.iter().enumerate() {
                core::ptr::write(dst.add(write_at + i), item.clone());
+               init.wrote(i);
             }
+
+            init.commit();
          }
       }
 
@@ -722,9 +783,19 @@ impl<T: Zeroize> SecureVec<T> {
          // committed only after the loop.
          unsafe {
             let dst = self.ptr.as_ptr();
+
+            // SAFETY: `dst` is the base of the live allocation the `UnlockGuard`
+            // above unprotects, the `InitGuard` is dropped before the region is
+            // re-locked, and `wrote` records exactly the slots that hold a live
+            // `T` once `ptr::write` has put one there.
+            let mut init = InitGuard::new(dst);
+
             for (i, item) in src.iter().enumerate() {
                core::ptr::write(dst.add(i), item.clone());
+               init.wrote(i);
             }
+
+            init.commit();
          }
       }
 
@@ -1579,5 +1650,100 @@ mod tests {
          );
          eprintln!("Test passed: Process correctly terminated with STATUS_ACCESS_VIOLATION.");
       }
+   }
+
+   /// Counters for the clone-bomb tests. They are deliberately separate from the
+   /// `ZEROIZED` / `DROPPED` pair above: libtest runs tests in parallel, so two
+   /// tests resetting and asserting the same globals would race.
+   ///
+   /// Counts every `Tracked::clone` call, so the clone bomb can fire mid-loop.
+   #[cfg(feature = "use_os")]
+   static CLONES: AtomicUsize = AtomicUsize::new(0);
+
+   /// Counts every `Tracked::zeroize` call.
+   #[cfg(feature = "use_os")]
+   static CLONE_ZEROIZED: AtomicUsize = AtomicUsize::new(0);
+
+   /// Counts every `Tracked::drop` call.
+   #[cfg(feature = "use_os")]
+   static CLONE_DROPPED: AtomicUsize = AtomicUsize::new(0);
+
+   /// Owns a `String` like a real secret does, but panics on its second clone.
+   #[cfg(feature = "use_os")]
+   #[derive(Debug)]
+   struct Tracked(String);
+
+   #[cfg(feature = "use_os")]
+   impl Tracked {
+      fn new(data: impl Into<String>) -> Self {
+         Tracked(data.into())
+      }
+   }
+
+   #[cfg(feature = "use_os")]
+   impl Clone for Tracked {
+      fn clone(&self) -> Self {
+         if CLONES.fetch_add(1, Ordering::SeqCst) == 1 {
+            panic!("clone bomb");
+         }
+
+         Tracked::new(self.0.clone())
+      }
+   }
+
+   #[cfg(feature = "use_os")]
+   impl Zeroize for Tracked {
+      fn zeroize(&mut self) {
+         CLONE_ZEROIZED.fetch_add(1, Ordering::SeqCst);
+         self.0.zeroize();
+      }
+   }
+
+   #[cfg(feature = "use_os")]
+   impl Drop for Tracked {
+      fn drop(&mut self) {
+         CLONE_DROPPED.fetch_add(1, Ordering::SeqCst);
+      }
+   }
+
+   /// `extend_from_slice` is crate-private, so its clone loop is only reachable
+   /// from here: a panic from `T::clone` must zeroize and drop the elements
+   /// already appended, not leak them past the container.
+   ///
+   /// The bomb fires on the second clone, so exactly one element was written.
+   #[cfg(feature = "use_os")]
+   #[test]
+   fn test_extend_from_slice_panic_zeroizes_written_prefix() {
+      CLONES.store(0, Ordering::SeqCst);
+      CLONE_ZEROIZED.store(0, Ordering::SeqCst);
+      CLONE_DROPPED.store(0, Ordering::SeqCst);
+
+      let source = [Tracked::new("first")];
+      let mut secure = SecureVec::<Tracked>::from_slice(&source).unwrap();
+
+      // The one clone above is expected; only the append is under test.
+      CLONES.store(0, Ordering::SeqCst);
+      CLONE_ZEROIZED.store(0, Ordering::SeqCst);
+      CLONE_DROPPED.store(0, Ordering::SeqCst);
+
+      let more = [Tracked::new("a"), Tracked::new("b"), Tracked::new("c")];
+      let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+         secure.extend_from_slice(&more)
+      }));
+
+      assert!(
+         result.is_err(),
+         "the clone bomb must make `extend_from_slice` unwind"
+      );
+      assert_eq!(
+         CLONE_ZEROIZED.load(Ordering::SeqCst),
+         1,
+         "the element appended before the panic must be zeroized"
+      );
+      assert_eq!(
+         CLONE_DROPPED.load(Ordering::SeqCst),
+         1,
+         "the element appended before the panic must be dropped"
+      );
    }
 }

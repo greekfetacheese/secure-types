@@ -9,6 +9,7 @@ use alloc::vec::Vec;
 #[cfg(not(feature = "use_os"))]
 use super::zero_bytes;
 use super::{Error, SecureVec, alloc};
+use crate::vec::InitGuard;
 use core::{marker::PhantomData, mem, ptr::NonNull};
 use zeroize::Zeroize;
 
@@ -45,18 +46,19 @@ impl<'a, T: Zeroize, const LENGTH: usize> Drop for UnlockGuard<'a, T, LENGTH> {
 /// The constructors whose documentation promises to zeroize the source they were
 /// handed wipe it after the copy loop, which is not enough: a `T::clone` that
 /// panics unwinds straight past that wipe and leaves the plaintext in the caller's
-/// buffer, so the wipe is tied to a guard instead.
-struct SourceWipe<'a, T: Zeroize> {
+/// buffer, so the wipe is tied to a guard instead. Shared with
+/// `SecureVec::from_slice_mut`, which makes the same promise.
+pub(crate) struct SourceWipe<'a, T: Zeroize> {
    source: &'a mut [T],
 }
 
 impl<'a, T: Zeroize> SourceWipe<'a, T> {
-   fn new(source: &'a mut [T]) -> Self {
+   pub(crate) fn new(source: &'a mut [T]) -> Self {
       Self { source }
    }
 
    /// The borrowed source, for the copy loop that runs before the wipe.
-   fn as_slice(&self) -> &[T] {
+   pub(crate) fn as_slice(&self) -> &[T] {
       &*self.source
    }
 }
@@ -212,9 +214,19 @@ where
          // loop, so a panic here still leaves the array sound.
          unsafe {
             let dst = secure_array.ptr.as_ptr();
+
+            // SAFETY: `dst` is the base of the live allocation the `UnlockGuard`
+            // above unprotects, the `InitGuard` is dropped before the region is
+            // re-locked, and `wrote` records exactly the slots that hold a live
+            // `T` once `ptr::write` has put one there.
+            let mut init = InitGuard::new(dst);
+
             for (i, item) in wipe.as_slice().iter().enumerate() {
                core::ptr::write(dst.add(i), item.clone());
+               init.wrote(i);
             }
+
+            init.commit();
          }
       }
       secure_array.initialized = LENGTH;
@@ -241,9 +253,19 @@ where
          // never reads the destination, and `initialized` is committed afterwards.
          unsafe {
             let dst = secure_array.ptr.as_ptr();
+
+            // SAFETY: as in `from_slice_mut` — `dst` is the base of the live
+            // allocation the `UnlockGuard` above unprotects, the `InitGuard` is
+            // dropped before the region is re-locked, and `wrote` records exactly
+            // the slots that hold a live `T`.
+            let mut init = InitGuard::new(dst);
+
             for (i, item) in content.iter().enumerate() {
                core::ptr::write(dst.add(i), item.clone());
+               init.wrote(i);
             }
+
+            init.commit();
          }
       }
       secure_array.initialized = LENGTH;
@@ -271,31 +293,13 @@ where
 
          // Zeroizes and drops the prefix written so far if `f` panics. Declared
          // after `_unlock`, so it is dropped first, while the memory is still
-         // unlocked.
-         struct InitGuard<T: Zeroize> {
-            ptr: *mut T,
-            written: usize,
-         }
-
-         impl<T: Zeroize> Drop for InitGuard<T> {
-            fn drop(&mut self) {
-               // SAFETY: `written` counts exactly the slots `from_fn` filled with
-               // `ptr::write`, and this guard is dropped before the enclosing
-               // `UnlockGuard` re-locks the region.
-               unsafe {
-                  for i in 0..self.written {
-                     let slot = self.ptr.add(i);
-                     (*slot).zeroize();
-                     core::ptr::drop_in_place(slot);
-                  }
-               }
-            }
-         }
-
-         let mut guard = InitGuard::<T> {
-            ptr: array.ptr.as_ptr(),
-            written: 0,
-         };
+         // unlocked. The same guard covers the clone loops below, so there is one
+         // definition of "the slots a partial fill must clean up".
+         //
+         // SAFETY: `array.ptr` is the base of the live allocation `_unlock`
+         // unprotects, `wrote` records exactly the slots `ptr::write` has filled,
+         // and this guard is dropped before the region is re-locked.
+         let mut guard = unsafe { InitGuard::<T>::new(array.ptr.as_ptr()) };
 
          for i in 0..LENGTH {
             let value = f(i);
@@ -305,10 +309,10 @@ where
             unsafe {
                core::ptr::write(array.ptr.as_ptr().add(i), value);
             }
-            guard.written = i + 1;
+            guard.wrote(i);
          }
 
-         core::mem::forget(guard);
+         guard.commit();
       }
 
       array.initialized = LENGTH;
@@ -472,9 +476,19 @@ where
          // unprotects it, and `ptr::write` never reads the unwritten destination.
          unsafe {
             let dst = self.ptr.as_ptr();
+
+            // SAFETY: `dst` is the base of the live allocation the `UnlockGuard`
+            // above unprotects, the `InitGuard` is dropped before the region is
+            // re-locked, and `wrote` records exactly the slots that hold a live
+            // `T` once `ptr::write` has put one there.
+            let mut init = InitGuard::new(dst);
+
             for (i, item) in src.iter().enumerate() {
                core::ptr::write(dst.add(i), item.clone());
+               init.wrote(i);
             }
+
+            init.commit();
          }
       }
       // Commit only after every write succeeded, so a panic from `T::clone`
