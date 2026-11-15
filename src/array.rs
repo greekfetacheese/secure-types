@@ -521,11 +521,21 @@ impl<T: Zeroize, const LENGTH: usize> Drop for SecureArray<T, LENGTH> {
       // `initialized` written slots, and each is zeroized then dropped once.
       unsafe {
          let ptr = self.ptr.as_ptr();
-         for i in 0..self.initialized {
-            let slot = ptr.add(i);
-            (*slot).zeroize();
-            core::ptr::drop_in_place(slot);
+
+         // The loop runs backwards so the live set is a prefix of the guard's base:
+         // a destructor that panics leaves exactly the un-reached slots to the guard,
+         // which zeroizes and drops them while the pages are still open.
+         let mut discard = InitGuard::<T>::new(ptr);
+         discard.set_written(self.initialized);
+
+         for i in (0..self.initialized).rev() {
+            discard.set_written(i + 1);
+            (*ptr.add(i)).zeroize();
+            discard.set_written(i);
+            core::ptr::drop_in_place(ptr.add(i));
          }
+
+         discard.commit();
       }
 
       // `_free` releases the region here, or during the unwind if a destructor

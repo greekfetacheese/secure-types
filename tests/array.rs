@@ -672,3 +672,55 @@ fn test_a_panicking_destructor_still_frees_the_region() {
       output.status
    );
 }
+
+static ARRAY_DROP_ZEROIZED: AtomicUsize = AtomicUsize::new(0);
+static ARRAY_DROP_DROPPED: AtomicUsize = AtomicUsize::new(0);
+
+/// A T that records both halves of the discard lifecycle and panics once.
+struct ArrayDropBomb {
+   index: usize,
+}
+
+impl Zeroize for ArrayDropBomb {
+   fn zeroize(&mut self) {
+      ARRAY_DROP_ZEROIZED.fetch_add(1, Ordering::SeqCst);
+   }
+}
+
+impl Drop for ArrayDropBomb {
+   fn drop(&mut self) {
+      ARRAY_DROP_DROPPED.fetch_add(1, Ordering::SeqCst);
+
+      if self.index == 1 {
+         panic!("element destructor panics");
+      }
+   }
+}
+
+/// Drop must discard the elements it has not reached when a destructor panics.
+///
+/// SecureArray's forward loop had the same shape as SecureVec's: the free guard
+/// released the region, but every slot after the panicking element was neither
+/// zeroized nor dropped, so an owned buffer kept its plaintext.
+#[test]
+fn test_drop_discards_the_rest_when_a_destructor_panics() {
+   ARRAY_DROP_ZEROIZED.store(0, Ordering::SeqCst);
+   ARRAY_DROP_DROPPED.store(0, Ordering::SeqCst);
+
+   let array: SecureArray<ArrayDropBomb, 3> =
+      SecureArray::from_fn(|index| ArrayDropBomb { index }).unwrap();
+
+   let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(array))).is_err();
+
+   assert!(panicked, "the destructor was supposed to panic");
+   assert_eq!(
+      ARRAY_DROP_ZEROIZED.load(Ordering::SeqCst),
+      3,
+      "every element must be zeroized, including the ones the panic skipped"
+   );
+   assert_eq!(
+      ARRAY_DROP_DROPPED.load(Ordering::SeqCst),
+      3,
+      "every element must be dropped, including the ones the panic skipped"
+   );
+}
