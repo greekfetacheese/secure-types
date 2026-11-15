@@ -149,9 +149,20 @@ impl SecureString {
    ///
    /// Panics if the buffer has to grow and the new capacity overflows `usize` or the
    /// allocation fails — the contract of
-   /// [`SecureVec::push`](crate::SecureVec::push), which this calls once per byte.
+   /// [`SecureVec::reserve`](crate::SecureVec::reserve), which this calls once for the
+   /// whole `&str` before any byte is written. Growing first is what keeps the string
+   /// valid: a reserve per byte would panic halfway through a multi-byte character and
+   /// leave the buffer holding truncated UTF-8, which every later safe read rejects and
+   /// the `_unchecked` readers would hand to `from_utf8_unchecked`.
    pub fn push_str(&mut self, string: &str) {
       let slice = string.as_bytes();
+
+      // One reserve for the whole slice, so a growth failure happens before the first
+      // byte is written: appending byte by byte would let it land in the middle of a
+      // multi-byte character and leave the buffer holding invalid UTF-8, breaking the
+      // invariant every reader relies on.
+      self.vec.reserve(slice.len());
+
       for s in slice.iter() {
          self.vec.push(*s);
       }
@@ -451,4 +462,36 @@ fn char_to_byte_idx(s_bytes: &[u8], char_idx: usize) -> usize {
       .ok()
       .and_then(|s| s.char_indices().nth(char_idx).map(|(idx, _)| idx))
       .unwrap_or(s_bytes.len()) // Fallback to end if char_idx is out of bounds
+}
+
+#[cfg(test)]
+mod tests {
+   use super::SecureString;
+
+   /// Pushing text reserves the whole slice in one growth instead of one per byte.
+   ///
+   /// The capacity is the observable: `SecureVec` doubles, so a reserve per byte
+   /// grows 1 -> 2 -> 4 for a two-byte append, while one reserve for the whole slice
+   /// grows straight to `len + appended`. That single growth is what makes a failed
+   /// allocation land *before* the first byte is written. A per-byte reserve can
+   /// panic half-way through a multi-byte character and leave the buffer holding
+   /// truncated UTF-8: every later `unlock_str` rejects it, and the safe
+   /// `unlock_str_unchecked` / `char_len_unchecked` would hand those bytes to
+   /// `from_utf8_unchecked`.
+   #[test]
+   fn test_push_str_reserves_the_whole_slice_once() {
+      let mut string = SecureString::from("a");
+      assert_eq!(string.byte_len(), 1);
+      assert_eq!(string.vec.capacity(), 1);
+
+      string.push_str("\u{e9}");
+
+      assert_eq!(string.byte_len(), 3);
+      assert_eq!(
+         string.vec.capacity(),
+         3,
+         "one reserve for the whole slice grows to 3; a reserve per byte grows 1 -> 2 -> 4"
+      );
+      string.unlock_str(|text| assert_eq!(text, "a\u{e9}"));
+   }
 }
