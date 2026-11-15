@@ -165,6 +165,19 @@ impl<'a, B: Buffer> Encoder<'a, B> {
       Ok(())
    }
 
+   /// Reserves room for one frame per declared struct field.
+   ///
+   /// The length is the `Serialize` impl's own claim, so it is not trusted with an
+   /// allocation: reserving it directly panicked (`capacity overflow`) on
+   /// `usize::MAX` and aborted the process on any large value, before the mismatch
+   /// could be reported as the error the contract promises.
+   fn reserve_frames(&mut self, len: usize) -> Result<(), EncodeError> {
+      self
+         .frames
+         .try_reserve(len)
+         .map_err(|_| EncodeError::ElementCountMismatch)
+   }
+
    /// Finishes every frame opened by the struct scope starting at `scope`, then
    /// drops back to it.
    ///
@@ -376,7 +389,7 @@ impl<'a, 'b, B: Buffer> ser::Serializer for &'b mut Encoder<'a, B> {
       len: usize,
    ) -> Result<Self::SerializeStruct, Self::Error> {
       self.write_varint(len)?;
-      self.frames.reserve(len);
+      self.reserve_frames(len)?;
       Ok(StructEncoder::new(self, len))
    }
 
@@ -389,7 +402,7 @@ impl<'a, 'b, B: Buffer> ser::Serializer for &'b mut Encoder<'a, B> {
    ) -> Result<Self::SerializeStructVariant, Self::Error> {
       self.write_name(variant)?;
       self.write_varint(len)?;
-      self.frames.reserve(len);
+      self.reserve_frames(len)?;
       Ok(StructEncoder::new(self, len))
    }
 

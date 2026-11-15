@@ -14,8 +14,10 @@
 //!   `string "…the plaintext…"`, which is exactly what ends up in a log.
 //!
 //! None of those are serde's trait layer — they belong to `serde_json`. A
-//! format we own has no scratch buffer, no escaping pass, no `Value`, and
-//! builds every error from a length, an index or a `&'static str`. The one
+//! format we own needs no escaping pass and no `Value`: it builds every error from
+//! a length, an index or a `&'static str`, and the only buffers it writes through
+//! are locked `SecureBytes` scratch buffers (`collect_str`, and containers whose
+//! length is not known up front), which are zeroized on drop. The one
 //! message an impl can influence is discarded rather than rendered in both
 //! directions — serde's own `unknown_variant` / `unknown_field` helpers format
 //! the offending name into it, and a hand-written `Serialize` impl can format
@@ -53,7 +55,8 @@
 //!
 //! let encoded = encode(&vault)?;
 //!
-//! // The plaintext only ever existed in locked memory.
+//! // The document this crate produced lives in locked memory and is zeroized on
+//! // drop; the value it was encoded from stays wherever the caller put it.
 //! let decoded = decode::<VaultData>(&encoded)?;
 //!
 //! assert_eq!(decoded.wallet_state_key, Some(7));
@@ -147,9 +150,8 @@ pub use format::{DecodeError, EncodeError, FORMAT_VERSION};
 
 /// Initial buffer size used by [`encode`].
 ///
-/// Matches the JSON helpers' `DEFAULT_JSON_CAPACITY`: large enough that a
-/// typical payload does not grow at all, small enough not to lock pages for
-/// nothing.
+/// Large enough that a typical payload does not grow at all, small enough not to lock
+/// pages for nothing.
 const DEFAULT_CAPACITY: usize = 1024;
 
 /// Encodes `value` into a fresh locked buffer.
@@ -356,7 +358,10 @@ where
 /// document that decodes with bytes left over means the reader and the writer
 /// disagree about the layout.
 ///
-/// Recursive types are bounded at 128 levels and return [`DecodeError::DepthLimit`].
+/// Recursive types are bounded at 128 depth units and return
+/// [`DecodeError::DepthLimit`]. A struct field is framed by its own sub-decoder and an
+/// `Option` adds a level of its own, so a recursive struct costs two units per level —
+/// about 64 levels — while an enum/newtype chain reaches 128.
 ///
 /// # Errors
 ///
