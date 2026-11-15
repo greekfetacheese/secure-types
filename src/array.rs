@@ -6,6 +6,8 @@ use super::{Error, SecureVec, alloc};
 use crate::vec::{FreeGuard, InitGuard};
 use core::{marker::PhantomData, mem, ptr::NonNull};
 use zeroize::Zeroize;
+#[cfg(feature = "serde")]
+use zeroize::Zeroizing;
 
 #[cfg(feature = "use_os")]
 use secure_alloc::Prot;
@@ -679,15 +681,15 @@ impl<'de, const LENGTH: usize> serde::Deserialize<'de> for SecureArray<u8, LENGT
             SecureArray::from_slice(bytes).map_err(serde::de::Error::custom)
          }
 
-         /// Mirrors `SecureString`'s `visit_string`: wipe the owned buffer the format
-         /// handed over, instead of letting it drop with the plaintext inside.
-         fn visit_byte_buf<E>(self, mut v: Vec<u8>) -> Result<Self::Value, E>
+         /// Wipe the owned buffer the format handed over, including when the copy
+         /// panics: a plain `v.zeroize()` after the call runs only on the success and
+         /// error arms, not on the unwind that a failed re-lock can start.
+         fn visit_byte_buf<E>(self, v: Vec<u8>) -> Result<Self::Value, E>
          where
             E: serde::de::Error,
          {
-            let array = self.visit_bytes(&v);
-            v.zeroize();
-            array
+            let v = Zeroizing::new(v);
+            self.visit_bytes(v.as_slice())
          }
       }
 
