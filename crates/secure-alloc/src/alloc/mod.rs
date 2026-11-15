@@ -65,9 +65,14 @@ unsafe fn alloc_init() {
 
 /// The page size this allocator lays its regions out with.
 ///
-/// `malloc`, `malloc_sized` and the `memfd_secret` family return memory aligned to
-/// this, and `mprotect` plus the guard pages are page-granular, so it is also the
-/// strongest alignment an allocation from this crate can promise.
+/// It is the unit the guard pages and `mprotect` work in, and the data region is
+/// rounded up to a multiple of it. It is **not** the alignment of the returned
+/// pointer: that pointer sits `size` bytes below the end of the page-rounded data
+/// region, so it only lands on a page boundary when `size` is a whole number of
+/// pages. `malloc::<T>` and `memfd_secret::<T>` are still aligned for `T`, because
+/// their size is `size_of::<T>()`, a multiple of `align_of::<T>()`;
+/// `malloc_sized` and `memfd_secret_sized` carry no such guarantee, so a result
+/// that needs a stronger alignment has to be checked.
 #[inline]
 pub fn page_size() -> usize {
     ALLOC_INIT.call_once(|| unsafe { alloc_init() });
@@ -342,6 +347,36 @@ mod tests {
         }
 
         assert!(unsafe { malloc_sized(usize::MAX) }.is_none());
+    }
+
+    /// `malloc::<T>` is aligned for `T`, but `malloc_sized` is page-aligned only
+    /// for a page-multiple size: the pointer sits `size` bytes below the end of the
+    /// page-rounded data region. Pins the guarantee `page_size` documents.
+    #[test]
+    fn malloc_is_aligned_for_t_while_malloc_sized_is_not_page_aligned() {
+        let allocation = unsafe { malloc::<u64>() }.expect("allocation");
+        assert_eq!(
+            allocation.as_ptr() as usize % mem::align_of::<u64>(),
+            0,
+            "malloc::<T> must be aligned for T"
+        );
+        unsafe { free(allocation) };
+
+        let allocation = unsafe { malloc_sized(24) }.expect("allocation");
+        assert_ne!(
+            allocation.as_ptr() as *const u8 as usize % page_size(),
+            0,
+            "malloc_sized is only page-aligned for a page-multiple size"
+        );
+        unsafe { free(allocation) };
+
+        let allocation = unsafe { malloc_sized(page_size()) }.expect("allocation");
+        assert_eq!(
+            allocation.as_ptr() as *const u8 as usize % page_size(),
+            0,
+            "a page-multiple size does land on a page boundary"
+        );
+        unsafe { free(allocation) };
     }
 
     #[test]

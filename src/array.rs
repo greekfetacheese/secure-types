@@ -38,6 +38,37 @@ impl<'a, T: Zeroize, const LENGTH: usize> Drop for UnlockGuard<'a, T, LENGTH> {
    }
 }
 
+/// Zeroizes a caller-owned buffer when it goes out of scope.
+///
+/// The constructors whose documentation promises to zeroize the source they were
+/// handed wipe it after the copy loop, which is not enough: a `T::clone` that
+/// panics unwinds straight past that wipe and leaves the plaintext in the caller's
+/// buffer, so the wipe is tied to a guard instead.
+struct SourceWipe<'a, T: Zeroize> {
+   source: &'a mut [T],
+}
+
+impl<'a, T: Zeroize> SourceWipe<'a, T> {
+   fn new(source: &'a mut [T]) -> Self {
+      Self { source }
+   }
+
+   /// The borrowed source, for the copy loop that runs before the wipe.
+   fn as_slice(&self) -> &[T] {
+      &*self.source
+   }
+}
+
+impl<T: Zeroize> Drop for SourceWipe<'_, T> {
+   fn drop(&mut self) {
+      // Element by element: `[T]` is only `Zeroize` for `T: DefaultIsZeroes`, and
+      // the source here may be any `T: Zeroize` (a `String` included).
+      for item in self.source.iter_mut() {
+         item.zeroize();
+      }
+   }
+}
+
 /// A fixed-size array allocated in a secure memory region.
 ///
 /// ## Security Model
@@ -157,37 +188,36 @@ where
 
    /// Creates a new SecureArray from a `&mut [T; LENGTH]`.
    ///
-   /// The passed slice is zeroized afterwards
+   /// The passed slice is zeroized afterwards — including when a `T::clone`
+   /// panics while the array is being filled.
    pub fn from_slice_mut(content: &mut [T; LENGTH]) -> Result<Self, Error>
    where
       T: Clone,
    {
-      let mut secure_array = match Self::empty() {
-         Ok(secure_array) => secure_array,
-         Err(e) => {
-            content.zeroize();
-            return Err(e);
-         }
-      };
+      // Wipes the caller's buffer on every way out of this function, the unwind
+      // from a panicking `T::clone` in the loop below included.
+      let wipe = SourceWipe::new(content);
+
+      let mut secure_array = Self::empty()?;
 
       {
          let _guard = UnlockGuard::new(&secure_array);
 
          // SAFETY: the fresh allocation holds `LENGTH` uninitialised slots and
-         // the guard unprotects it. `content` has exactly `LENGTH` elements, so
+         // the guard unprotects it. The source holds exactly `LENGTH` elements, so
          // every `dst.add(i)` is in bounds, and `ptr::write` never reads the
          // uninitialised destination. `initialized` is committed only after the
          // loop, so a panic here still leaves the array sound.
          unsafe {
             let dst = secure_array.ptr.as_ptr();
-            for (i, item) in content.iter().enumerate() {
+            for (i, item) in wipe.as_slice().iter().enumerate() {
                core::ptr::write(dst.add(i), item.clone());
             }
          }
       }
       secure_array.initialized = LENGTH;
 
-      content.zeroize();
+      drop(wipe);
 
       Ok(secure_array)
    }
@@ -535,23 +565,23 @@ impl<T: Clone + Zeroize, const LENGTH: usize> TryFrom<Vec<T>> for SecureArray<T,
    /// `LENGTH` is a compile-time constant on the destination type, it cannot
    /// be taken from the vector's runtime length.
    ///
-   /// The `Vec` is consumed and zeroized.
+   /// The `Vec` is consumed and zeroized — including when a `T::clone` panics
+   /// while the array is being filled.
    fn try_from(mut vec: Vec<T>) -> Result<Self, Self::Error> {
       if vec.len() != LENGTH {
          vec.zeroize();
          return Err(Error::LengthMismatch);
       }
 
-      let mut new_array = match Self::empty() {
-         Ok(new_array) => new_array,
-         Err(e) => {
-            vec.zeroize();
-            return Err(e);
-         }
-      };
+      // Wipes the elements on every way out of this function, the unwind from a
+      // panicking `T::clone` in `init_from_clone` included.
+      let wipe = SourceWipe::new(vec.as_mut_slice());
 
-      new_array.init_from_clone(&vec);
-      vec.zeroize();
+      let mut new_array = Self::empty()?;
+
+      new_array.init_from_clone(wipe.as_slice());
+
+      drop(wipe);
 
       Ok(new_array)
    }

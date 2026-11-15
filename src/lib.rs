@@ -169,9 +169,13 @@ pub(crate) unsafe fn alloc<T>(size: usize) -> Result<NonNull<T>, Error> {
          return Err(Error::SizeCannotBeZero);
       }
 
-      // `secure-alloc` lays its regions out on page boundaries and returns a pointer
-      // inside a page-rounded region, so it can only promise the page size as
-      // alignment. A stronger alignment would be written through a misaligned pointer.
+      // `secure-alloc` returns a pointer at an arbitrary offset inside a page-rounded
+      // region, so the alignment we get is the one built in below: `alloc_size` is
+      // padded up to `align_req`, and the pointer sits
+      // `page_round(alloc_size + canary) - alloc_size` bytes into the region — a
+      // multiple of `align_req`, because `alloc_size` is one. The region base itself
+      // is only page-aligned, so that padding cannot express an alignment stronger
+      // than a page; refuse it rather than write through a misaligned pointer.
       if core::mem::align_of::<T>() > secure_alloc::page_size() {
          return Err(Error::AlignmentFailed);
       }
