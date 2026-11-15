@@ -152,6 +152,25 @@ pub fn supports_memfd_secret() -> bool {
    }
 }
 
+/// Writes `len` zeros at `ptr`, without forming a reference to the range.
+///
+/// Some of the ranges this crate wipes cover memory that was never written: a
+/// `Vec`'s spare capacity, or the slots of a `SecureArray` that a constructor never
+/// filled. A `&mut [u8]` over uninitialised memory is undefined behaviour even
+/// when it is only written through, so the wipe goes through a raw pointer. The
+/// writes are volatile, which is also what keeps a wipe that runs immediately
+/// before the memory is freed from being dropped as a dead store.
+///
+/// # Safety
+///
+/// `ptr` must be valid for writes of `len` bytes for the duration of the call.
+pub(crate) unsafe fn zero_bytes(ptr: *mut u8, len: usize) {
+   for i in 0..len {
+      // SAFETY: the caller guarantees `ptr` is valid for `len` bytes of writes.
+      unsafe { core::ptr::write_volatile(ptr.add(i), 0) };
+   }
+}
+
 /// Allocate memory
 ///
 /// For `Windows` it always uses [secure_alloc::malloc_sized]

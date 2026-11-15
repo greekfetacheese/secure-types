@@ -6,6 +6,8 @@ use alloc::alloc::Layout;
 #[cfg(not(feature = "use_os"))]
 use alloc::vec::Vec;
 
+#[cfg(not(feature = "use_os"))]
+use super::zero_bytes;
 use super::{Error, SecureVec, alloc};
 use core::{marker::PhantomData, mem, ptr::NonNull};
 use zeroize::Zeroize;
@@ -505,8 +507,7 @@ impl<T: Zeroize, const LENGTH: usize> Drop for SecureArray<T, LENGTH> {
       // the region was unprotected above and is still owned here, and the
       // `Layout` below matches the one `alloc` used.
       unsafe {
-         let bytes = core::slice::from_raw_parts_mut(self.ptr.as_ptr() as *mut u8, size);
-         bytes.zeroize();
+         zero_bytes(self.ptr.as_ptr() as *mut u8, size);
 
          let layout = Layout::from_size_align_unchecked(size, mem::align_of::<T>());
          alloc::alloc::dealloc(self.ptr.as_ptr() as *mut u8, layout);
