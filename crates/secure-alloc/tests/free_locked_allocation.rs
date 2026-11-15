@@ -8,7 +8,7 @@
 //!
 //! Each test re-executes itself: the child protects the allocation and frees it, and
 //! the parent requires a clean exit. A fault in the child is the failure.
-#![cfg(feature = "use_os")]
+#![cfg(feature = "alloc")]
 
 use std::process::Command;
 
