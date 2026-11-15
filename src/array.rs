@@ -316,10 +316,20 @@ where
       Ok(array)
    }
 
+   /// The array's fixed length, `LENGTH`.
+   ///
+   /// This is the number of slots the allocation holds, not the number that have
+   /// been written. An [`empty`](Self::empty) array that was never filled reports
+   /// `LENGTH` here while [`unlock`](Self::unlock) yields nothing, because the
+   /// remaining slots still hold the allocator's poison bytes. Every constructor
+   /// returns a fully initialized array, and so does `Clone` of one, so the two
+   /// agree there.
    pub fn len(&self) -> usize {
       LENGTH
    }
 
+   /// Always `false`: [`empty`](Self::empty) rejects a zero length, so no
+   /// `SecureArray` can have `len() == 0`.
    pub fn is_empty(&self) -> bool {
       self.len() == 0
    }

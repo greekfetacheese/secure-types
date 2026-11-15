@@ -144,6 +144,12 @@ impl SecureString {
    }
 
    /// Push a `&str` into the `SecureString`
+   ///
+   /// # Panics
+   ///
+   /// Panics if the buffer has to grow and the new capacity overflows `usize` or the
+   /// allocation fails — the contract of
+   /// [`SecureVec::push`](crate::SecureVec::push), which this calls once per byte.
    pub fn push_str(&mut self, string: &str) {
       let slice = string.as_bytes();
       for s in slice.iter() {
@@ -210,6 +216,12 @@ impl SecureString {
    /// # Returns
    ///
    /// The number of characters inserted
+   ///
+   /// # Panics
+   ///
+   /// Panics if the buffer has to grow for the inserted text and the new capacity
+   /// overflows `usize` or the allocation fails — the contract of
+   /// [`SecureVec::reserve`](crate::SecureVec::reserve).
    ///
    /// # Example
    ///

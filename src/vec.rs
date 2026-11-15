@@ -514,6 +514,13 @@ impl<T: Zeroize> SecureVec<T> {
       }
    }
 
+   /// Appends `value` to the back.
+   ///
+   /// # Panics
+   ///
+   /// Panics if the vector has to grow and the new capacity overflows `usize` or
+   /// the allocation fails — the contract of [`reserve`](Self::reserve), which this
+   /// calls first.
    pub fn push(&mut self, value: T) {
       self.reserve(1);
 
