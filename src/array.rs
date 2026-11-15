@@ -73,9 +73,10 @@ impl<T: Zeroize> Drop for SourceWipe<'_, T> {
 /// - **Zeroization on Drop**: The memory is zeroized and every element is dropped when the array
 ///   is dropped.
 /// - **Memory Locking**: the allocation is `mprotect`ed `PROT_NONE` outside an access scope —
-///   an `unlock*` call, or one of this type's own mutating methods (`erase`, `unlock_mut`, and
-///   `Drop`) — which stops accidental reads, this process's included, but is not a defence
-///   against `ptrace` or a debugger. On the malloc path it is also `mlock`ed on a best-effort
+///   an `unlock*` call, or one of this type's own operations that must touch the bytes
+///   (`erase`, `unlock_mut`, `Clone`, conversions, serde `Serialize`, and `Drop`) — which
+///   stops accidental reads, this process's included, but is not a defence against `ptrace`
+///   or a debugger. On the malloc path it is also `mlock`ed on a best-effort
 ///   basis (the call's result is discarded, so hitting `RLIMIT_MEMLOCK` still constructs;
 ///   Windows: `VirtualLock`) and, where the OS supports it, excluded from core dumps
 ///   (`MADV_DONTDUMP` on Linux, `MADV_NOCORE` on FreeBSD/DragonFly). Linux uses `memfd_secret`
