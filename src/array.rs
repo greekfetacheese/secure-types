@@ -321,9 +321,10 @@ where
    /// This is the number of slots the allocation holds, not the number that have
    /// been written. An [`empty`](Self::empty) array that was never filled reports
    /// `LENGTH` here while [`unlock`](Self::unlock) yields nothing, because the
-   /// remaining slots still hold the allocator's poison bytes. Every constructor
-   /// returns a fully initialized array, and so does `Clone` of one, so the two
-   /// agree there.
+   /// remaining slots still hold the allocator's poison bytes, and a `Clone` of
+   /// it behaves the same way, since `Clone` carries the source's state. Every
+   /// other constructor fills all `LENGTH` slots, so `len()` and `unlock` agree
+   /// there.
    pub fn len(&self) -> usize {
       LENGTH
    }
