@@ -294,7 +294,9 @@ pub unsafe fn malloc_sized(size: usize) -> Option<NonNull<[u8]>> {
 /// afterwards every pointer into the allocation is dangling. A pointer from
 /// `free_memfd_secret`, or any other foreign pointer, aborts on the allocator tag
 /// before its length is used rather than on the canary, so it never reaches
-/// `dealloc`; a pointer whose metadata page is unreadable also faults there.
+/// `dealloc`; a pointer whose metadata page is unreadable also faults there. The
+/// data region is made readable again before the canary is checked, so an allocation
+/// the caller left `mprotect`ed `NoAccess` is freed normally.
 pub unsafe fn free<T: ?Sized>(memptr: NonNull<T>) {
     let memptr = memptr.as_ptr() as *mut u8;
 
@@ -303,12 +305,21 @@ pub unsafe fn free<T: ?Sized>(memptr: NonNull<T>) {
     let unprotected_ptr = unprotected_ptr_from_user_ptr(memptr);
     let base_ptr = unprotected_ptr.sub(PAGE_SIZE * 2);
 
-    // Check the allocator tag before trusting the size.
+    // Check the allocator tag before trusting the size. The metadata page is not
+    // part of what the caller protects, so this reads even when the allocation is
+    // left `NoAccess`.
     if ptr::read(base_ptr.add(MALLOC_TAG_OFFSET) as *const usize) != MALLOC_TAG {
         abort();
     }
 
     let unprotected_size = ptr::read(base_ptr as *const usize);
+
+    // The canary lives in the data region, so restore access before reading it: the
+    // caller is allowed to leave the allocation protected until it is freed, and a
+    // check that faulted there would kill the process instead of reaching the
+    // diagnostic abort below.
+    let total_size = PAGE_SIZE + PAGE_SIZE + unprotected_size + PAGE_SIZE;
+    _mprotect(base_ptr, total_size, Prot::ReadWrite);
 
     // check
     #[allow(static_mut_refs)]
@@ -317,9 +328,6 @@ pub unsafe fn free<T: ?Sized>(memptr: NonNull<T>) {
     }
 
     // free
-    let total_size = PAGE_SIZE + PAGE_SIZE + unprotected_size + PAGE_SIZE;
-    _mprotect(base_ptr, total_size, Prot::ReadWrite);
-
     crate::munlock(unprotected_ptr, unprotected_size);
 
     free_aligned(base_ptr, total_size);

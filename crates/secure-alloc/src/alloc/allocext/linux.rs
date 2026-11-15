@@ -12,13 +12,16 @@ mod memfd_secret_alloc {
 
     /// Create the backing descriptor, close-on-exec.
     ///
-    /// `MFD_CLOEXEC` sets that atomically, but not every kernel accepts the flag
-    /// for `memfd_secret` and answers `EINVAL`; those fall back to setting it
-    /// immediately after creation, which narrows the window to these two calls.
+    /// `memfd_secret` takes `O_CLOEXEC` itself, which makes the descriptor
+    /// close-on-exec at creation. It is not `memfd_create`'s `MFD_CLOEXEC`: the
+    /// kernel rejects that value with `EINVAL` (measured on 7.0), so passing it
+    /// would silently send every allocation through the fallback below and leave the
+    /// descriptor inheritable until the `fcntl` lands. The fallback stays for kernels
+    /// that refuse the flag outright, and narrows the window to these two calls.
     #[inline]
     unsafe fn secretmem_fd() -> Option<libc::c_int> {
         let fd: Result<libc::c_int, _> =
-            libc::syscall(libc::SYS_memfd_secret, libc::MFD_CLOEXEC).try_into();
+            libc::syscall(libc::SYS_memfd_secret, libc::O_CLOEXEC).try_into();
 
         if let Some(fd) = fd.ok().filter(|&fd| fd >= 0) {
             return Some(fd);
@@ -153,7 +156,8 @@ pub unsafe fn memfd_secret_sized(size: usize) -> Option<NonNull<[u8]>> {
 /// pointer from `free`, or any other foreign pointer, aborts on the allocator tag
 /// before the descriptor is read or the canary checked, so it cannot close an
 /// unrelated descriptor; a pointer whose metadata page is unreadable also faults
-/// there.
+/// there. The data region is made readable again before the canary is checked, so an
+/// allocation the caller left `mprotect`ed `NoAccess` is freed normally.
 pub unsafe fn free_memfd_secret<T: ?Sized>(memptr: NonNull<T>) {
     use libc::c_void;
 
@@ -175,6 +179,13 @@ pub unsafe fn free_memfd_secret<T: ?Sized>(memptr: NonNull<T>) {
     let unprotected_size = ptr::read(base_ptr as *const usize);
     let fd = ptr::read(fd_ptr);
 
+    // The canary lives in the data region, so restore access before reading it: an
+    // allocation the caller left `NoAccess` must still be freed. The tag above and
+    // the descriptor here both come from the metadata page, which the caller does not
+    // protect.
+    let total_size = PAGE_SIZE + PAGE_SIZE + unprotected_size + PAGE_SIZE;
+    _mprotect(base_ptr, total_size, Prot::ReadWrite);
+
     // check
     #[allow(static_mut_refs)]
     if !crate::memeq(canary_ptr as *const u8, CANARY.as_ptr(), CANARY_SIZE) {
@@ -182,9 +193,6 @@ pub unsafe fn free_memfd_secret<T: ?Sized>(memptr: NonNull<T>) {
     }
 
     // free
-    let total_size = PAGE_SIZE + PAGE_SIZE + unprotected_size + PAGE_SIZE;
-    _mprotect(base_ptr, total_size, Prot::ReadWrite);
-
     crate::memzero(unprotected_ptr, unprotected_size);
 
     let res = libc::munmap(base_ptr as *mut c_void, total_size);

@@ -27,6 +27,40 @@ fn secretmem_fd() -> Option<i32> {
         .next()
 }
 
+/// `memfd_secret` takes `O_CLOEXEC`, not `memfd_create`'s `MFD_CLOEXEC`.
+///
+/// The flag has to be the one the kernel accepts, or the descriptor is not
+/// close-on-exec at creation and the inherited-by-`exec` window the test above
+/// guards stays open until a separate `fcntl` runs. That end state cannot tell the
+/// two paths apart — the fallback sets the flag as well — so this pins the value the
+/// code has to pass.
+#[test]
+fn memfd_secret_accepts_o_cloexec() {
+    let fd = unsafe { libc::syscall(libc::SYS_memfd_secret, libc::O_CLOEXEC) };
+
+    if fd < 0 {
+        let error = std::io::Error::last_os_error();
+
+        if error.raw_os_error() == Some(libc::ENOSYS) {
+            eprintln!("skipping: memfd_secret is unavailable on this kernel");
+            return;
+        }
+
+        panic!("memfd_secret(O_CLOEXEC) failed: {}", error);
+    }
+
+    let fd = fd as i32;
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    unsafe { libc::close(fd) };
+
+    assert!(flags >= 0, "F_GETFD failed on descriptor {}", fd);
+    assert_ne!(
+        flags & libc::FD_CLOEXEC,
+        0,
+        "memfd_secret(O_CLOEXEC) did not mark the descriptor close-on-exec at creation"
+    );
+}
+
 #[test]
 fn secretmem_descriptor_is_close_on_exec() {
     if let Ok(fd) = std::env::var(CHILD_FD) {
