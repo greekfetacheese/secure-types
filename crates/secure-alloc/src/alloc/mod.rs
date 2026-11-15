@@ -69,10 +69,12 @@ unsafe fn alloc_init() {
 /// rounded up to a multiple of it. It is **not** the alignment of the returned
 /// pointer: that pointer sits `size` bytes below the end of the page-rounded data
 /// region, so it only lands on a page boundary when `size` is a whole number of
-/// pages. `malloc::<T>` and `memfd_secret::<T>` are still aligned for `T`, because
-/// their size is `size_of::<T>()`, a multiple of `align_of::<T>()`;
-/// `malloc_sized` and `memfd_secret_sized` carry no such guarantee, so a result
-/// that needs a stronger alignment has to be checked.
+/// pages. `malloc::<T>` and `memfd_secret::<T>` are aligned for `T` while
+/// `align_of::<T>() <= page_size()`, because their size is `size_of::<T>()`, a
+/// multiple of `align_of::<T>()`, and the offset above is a multiple of the
+/// alignment only when the alignment divides the page. `malloc_sized` and
+/// `memfd_secret_sized` carry no such guarantee, and neither does an over-aligned
+/// `T`, so a result that needs a stronger alignment has to be checked.
 #[inline]
 pub fn page_size() -> usize {
     ALLOC_INIT.call_once(|| unsafe { alloc_init() });
