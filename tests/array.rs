@@ -149,6 +149,76 @@ fn test_panic_during_partial_init_is_sound() {
    );
 }
 
+/// The constructors that take a `&mut` source promise to leave it wiped, so the
+/// wipe has to run on the panic path too. A `T::clone` that panics must not
+/// unwind past it and leave the caller's plaintext behind.
+#[test]
+fn test_from_slice_mut_wipes_the_source_when_a_clone_panics() {
+   struct PanicOnClone(u8);
+
+   impl Clone for PanicOnClone {
+      fn clone(&self) -> Self {
+         panic!("clone bomb");
+      }
+   }
+
+   impl Zeroize for PanicOnClone {
+      fn zeroize(&mut self) {
+         self.0 = 0;
+      }
+   }
+
+   let mut source: [PanicOnClone; 2] = [PanicOnClone(0x11), PanicOnClone(0x22)];
+
+   let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+      let _ = SecureArray::<PanicOnClone, 2>::from_slice_mut(&mut source);
+   }))
+   .is_err();
+
+   assert!(panicked, "the clone was supposed to panic");
+   assert_eq!(
+      source.iter().map(|item| item.0).collect::<Vec<_>>(),
+      vec![0, 0],
+      "the caller's buffer must be wiped even when T::clone panics"
+   );
+}
+
+/// The same guarantee for the `Vec<T>` conversion. The vector is consumed, so the
+/// observable survivor is whether its elements were zeroized before it dropped.
+#[test]
+fn test_try_from_vec_wipes_the_source_when_a_clone_panics() {
+   static ZEROIZED: AtomicUsize = AtomicUsize::new(0);
+
+   struct PanicOnClone(u8);
+
+   impl Clone for PanicOnClone {
+      fn clone(&self) -> Self {
+         panic!("clone bomb");
+      }
+   }
+
+   impl Zeroize for PanicOnClone {
+      fn zeroize(&mut self) {
+         self.0 = 0;
+         ZEROIZED.fetch_add(1, Ordering::SeqCst);
+      }
+   }
+
+   let source: Vec<PanicOnClone> = vec![PanicOnClone(0x11), PanicOnClone(0x22)];
+
+   let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+      let _ = SecureArray::<PanicOnClone, 2>::try_from(source);
+   }))
+   .is_err();
+
+   assert!(panicked, "the clone was supposed to panic");
+   assert_eq!(
+      ZEROIZED.load(Ordering::SeqCst),
+      2,
+      "both elements of the consumed vector must be zeroized before it drops"
+   );
+}
+
 #[test]
 fn test_erase() {
    let exposed: &mut [u8; 3] = &mut [1, 2, 3];
