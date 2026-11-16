@@ -13,8 +13,10 @@ fn test_supports_memfd_secret() {
    if supports {
       print!("memfd_secret is supported");
       let size = std::mem::size_of::<u8>();
-      let ptr = unsafe { secure_alloc::memfd_secret_sized(size) };
-      assert!(ptr.is_some());
+      let ptr = unsafe { secure_alloc::memfd_secret_sized(size) }.expect("allocation");
+      // The probe is a live allocation: release it, or its region and descriptor outlive the
+      // test's `memfd_secret` use.
+      unsafe { secure_alloc::free_memfd_secret(ptr) };
    } else {
       print!("memfd_secret is not supported");
    }
