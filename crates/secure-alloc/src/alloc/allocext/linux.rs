@@ -122,6 +122,10 @@ unsafe fn _memfd_secret(size: usize) -> Option<*mut u8> {
 /// types; initialise it before reading it as one. Release the allocation exactly
 /// once with `free_memfd_secret` — not `free` — and do not read or write outside
 /// the region it was allocated for.
+///
+/// The pointer is aligned for `T` only while `align_of::<T>() <= page_size()`, for
+/// the reason given on [`malloc`](crate::malloc): an over-aligned `T` lands on a
+/// misaligned address, and writing through it is undefined behaviour.
 #[inline]
 pub unsafe fn memfd_secret<T>() -> Option<NonNull<T>> {
     _memfd_secret(mem::size_of::<T>()).map(|memptr| {

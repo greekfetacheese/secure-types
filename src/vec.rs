@@ -314,7 +314,12 @@ impl<T: Zeroize> SecureVec<T> {
    /// cannot be locked.
    pub fn from_vec(mut vec: Vec<T>) -> Result<Self, Error> {
       if vec.capacity() == 0 {
-         vec.reserve(1);
+         // `Vec::reserve` aborts on allocation failure, which would skip the wipe and
+         // the `Error::AllocationFailed` this function documents.
+         if vec.try_reserve(1).is_err() {
+            vec.zeroize();
+            return Err(Error::AllocationFailed);
+         }
       }
 
       let capacity = vec.capacity();
@@ -846,7 +851,10 @@ impl<T: Zeroize> SecureVec<T> {
    where
       T: Clone,
    {
-      debug_assert!(src.len() <= self.capacity);
+      assert!(
+         src.len() <= self.capacity,
+         "init_from_clone: src is longer than the capacity"
+      );
 
       {
          let _guard = UnlockGuard::new(self);
@@ -1203,6 +1211,9 @@ where
                SecureVec::new_with_capacity(capacity).map_err(serde::de::Error::custom)?;
 
             while let Some(item) = seq.next_element::<T>()? {
+               // Reserved fallibly first: `push` would panic out of a decode if the
+               // growth failed, and `decode_slice` promises a `DecodeError`.
+               vec.try_reserve(1).map_err(serde::de::Error::custom)?;
                vec.push(item);
             }
 
