@@ -128,7 +128,10 @@ pub enum EncodeError {
    /// `Serialize` impls derived by `serde` always declare the exact length, and this
    /// catches a hand-written one that returns `Err` or writes too many. It does not
    /// catch one that drops the sink without calling `end`: nothing is left to compare
-   /// the count against, so the declaration stays on the wire as written.
+   /// the count against, so the declaration stays on the wire as written. Nor does it
+   /// check that keys and values alternate — the count moves only in `serialize_key`, so
+   /// an impl that emits two keys in a row still balances while the document decodes to a
+   /// different mapping.
    ElementCountMismatch,
    /// The value's `Serialize` impl asked for something the format cannot express.
    Unsupported(&'static str),

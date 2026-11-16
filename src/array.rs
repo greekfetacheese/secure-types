@@ -398,7 +398,8 @@ where
    ///
    /// The slice covers exactly the elements that have been initialized: `LENGTH`
    /// for any array built through a constructor or `unlock_mut`, and empty for
-   /// an [`empty`](Self::empty) array that was never filled (see its contract).
+   /// an [`empty`](Self::empty) array that was never filled — and for a `Clone` of one,
+   /// since `Clone` carries the source's state (see [`len`](Self::len)).
    ///
    /// # Re-entrancy
    ///

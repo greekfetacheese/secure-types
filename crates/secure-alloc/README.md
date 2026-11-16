@@ -167,8 +167,10 @@ unrelated descriptor. They are only compiled on Linux: on any other target the
   The dump exclusion (`MADV_DONTDUMP` / `MADV_NOCORE`) is best-effort as well: it
   is applied to the page-aligned range covering the caller's bytes, and a failure
   is not reported.
-- **Zeroization happens in `munlock`.** `free` never zeroes the buffer itself; it
-  delegates to `munlock`, which `memzero`s the whole data region before unlocking.
+- **Zeroization happens in `munlock`.** On the success path `free` does not zero the buffer
+  itself; it delegates to `munlock`, which `memzero`s the whole data region before unlocking.
+  The canary-mismatch path is the exception: it `memzero`s the data region too, before
+  aborting, so the plaintext does not outlive the process.
   On stable Rust `memset` protects against dead-store elimination only by re-reading
   its arguments and the destination pointer with `read_volatile`; the stores
   themselves are ordinary writes. `nightly` swaps in the real
