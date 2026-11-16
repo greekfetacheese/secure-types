@@ -435,6 +435,44 @@ mod tests {
         unsafe { free(mem) };
     }
 
+    /// `free` and `mprotect` read a `usize` at `MALLOC_TAG_OFFSET`. On a `memfd_secret`
+    /// header that slot is the descriptor plus the four bytes after it, and the header
+    /// must define both halves: the composite stays `fd`, never `MALLOC_TAG`.
+    ///
+    /// The kernel zero-fills a fresh `secretmem` mapping, so this pins the header
+    /// invariant rather than reproducing the pre-fix read; it fails if the layout
+    /// changes, not if the zeroing store is removed.
+    #[cfg(all(feature = "alloc_ext", target_os = "linux"))]
+    #[test]
+    fn memfd_secret_header_defines_the_malloc_tag_slot() {
+        let Some(mem) = (unsafe { crate::memfd_secret_sized(32) }) else {
+            return;
+        };
+        let base = unsafe { unprotected_ptr_from_user_ptr(mem.as_ptr() as *const u8) };
+        let base = unsafe { base.sub(PAGE_SIZE * 2) };
+        let slot = unsafe { ptr::read(base.add(MALLOC_TAG_OFFSET) as *const usize) };
+
+        assert_ne!(slot, MALLOC_TAG);
+
+        #[cfg(target_pointer_width = "64")]
+        {
+            let pad = unsafe {
+                ptr::read_unaligned(
+                    base.add(MALLOC_TAG_OFFSET + mem::size_of::<libc::c_int>()) as *const u32,
+                )
+            };
+            assert_eq!(pad, 0);
+        }
+
+        #[cfg(all(target_pointer_width = "64", target_endian = "little"))]
+        {
+            let fd = unsafe { ptr::read(base.add(mem::size_of::<usize>()) as *const libc::c_int) };
+            assert_eq!(slot, fd as usize);
+        }
+
+        unsafe { crate::free_memfd_secret(mem) };
+    }
+
     /// `mprotect` accepts a `malloc` allocation (its tag is `MALL`), and the
     /// allocation is still freeable afterwards.
     #[test]
