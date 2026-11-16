@@ -184,13 +184,11 @@ impl<'a, B: Buffer> Encoder<'a, B> {
       let placeholder = self.bytes.len();
       self.write_bytes(&[0u8; FIELD_FRAME_LEN])?;
 
-      self.frames.push(Frame {
+      self.push_frame(Frame {
          placeholder,
          value_start: self.bytes.len(),
          len: 0,
-      });
-
-      Ok(())
+      })
    }
 
    /// Reserves room for one frame per declared struct field.
@@ -200,10 +198,51 @@ impl<'a, B: Buffer> Encoder<'a, B> {
    /// `usize::MAX` and aborted the process on any large value, before the mismatch
    /// could be reported as the error the contract promises.
    fn reserve_frames(&mut self, len: usize) -> Result<(), EncodeError> {
-      self
+      let needed = self
          .frames
-         .try_reserve(len)
-         .map_err(|_| EncodeError::ElementCountMismatch)
+         .len()
+         .checked_add(len)
+         .ok_or(EncodeError::ElementCountMismatch)?;
+      if needed > self.frames.capacity() {
+         self.grow_frames(needed)?;
+      }
+      Ok(())
+   }
+
+   /// Grows the frame table without releasing a buffer that still holds live frames.
+   ///
+   /// `Vec::push` and `Vec::try_reserve` copy the frames into a new allocation and
+   /// free the old one as it stands, so the field offsets and lengths stay in freed
+   /// memory. This builds the replacement by hand and wipes the old frames first.
+   fn grow_frames(&mut self, needed: usize) -> Result<(), EncodeError> {
+      let capacity = needed.max(self.frames.capacity().saturating_mul(2)).max(8);
+      let mut grown = Vec::new();
+      grown
+         .try_reserve_exact(capacity)
+         .map_err(|_| EncodeError::ElementCountMismatch)?;
+      grown.extend_from_slice(&self.frames);
+
+      for frame in &mut self.frames {
+         frame.zeroize();
+      }
+
+      self.frames = grown;
+      Ok(())
+   }
+
+   /// Appends one frame, growing the table first when it is full.
+   fn push_frame(&mut self, frame: Frame) -> Result<(), EncodeError> {
+      if self.frames.len() == self.frames.capacity() {
+         let needed = self
+            .frames
+            .len()
+            .checked_add(1)
+            .ok_or(EncodeError::ElementCountMismatch)?;
+         self.grow_frames(needed)?;
+      }
+
+      self.frames.push(frame);
+      Ok(())
    }
 
    /// Finishes every frame opened by the struct scope starting at `scope`, then
