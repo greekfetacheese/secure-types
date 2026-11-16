@@ -357,6 +357,9 @@ impl<T: Zeroize> SecureVec<T> {
    }
 
    /// Create a new `SecureVec` with the given capacity
+   ///
+   /// A capacity of 0 is clamped to 1: the secure allocator rejects a zero-sized
+   /// allocation, so the constructor asks for room for one element instead.
    pub fn new_with_capacity(mut capacity: usize) -> Result<Self, Error> {
       if capacity == 0 {
          capacity = 1;
@@ -597,10 +600,11 @@ impl<T: Zeroize> SecureVec<T> {
    ///
    /// # Re-entrancy
    ///
-   /// The closure must not call another `unlock*` method on this vector: the
-   /// pages are unprotected once and re-protected when this call returns, so a
-   /// nested unlock would re-lock the memory while the inner scope is still
-   /// reading it. The same holds for every `unlock*` method.
+   /// The closure must not call any method that unlocks this vector — in
+   /// particular another `unlock*` method, `Clone` or serde `Serialize`. The pages
+   /// are unprotected once and re-protected when this call returns, so a nested
+   /// unlock would re-lock the memory while the outer closure is still reading it,
+   /// and the read faults.
    ///
    /// Aborts with a diagnostic if the memory-protection call fails.
    pub fn unlock<F, R>(&self, f: F) -> R
@@ -614,7 +618,8 @@ impl<T: Zeroize> SecureVec<T> {
    /// Immutable access to the `SecureVec` as `&[T]`
    ///
    /// The re-entrancy rule of [`unlock`](Self::unlock) applies here: the closure
-   /// must not call another `unlock*` method on this vector.
+   /// must not call any method that unlocks this vector, in particular another
+   /// `unlock*` method, `Clone` or serde `Serialize`.
    ///
    /// Aborts with a diagnostic if the memory-protection call fails.
    pub fn unlock_slice<F, R>(&self, f: F) -> R
@@ -632,7 +637,8 @@ impl<T: Zeroize> SecureVec<T> {
    /// Mutable access to the `SecureVec` as `&mut [T]`
    ///
    /// The re-entrancy rule of [`unlock`](Self::unlock) applies here: the closure
-   /// must not call another `unlock*` method on this vector.
+   /// must not call any method that unlocks this vector, in particular another
+   /// `unlock*` method, `Clone` or serde `Serialize`.
    ///
    /// Aborts with a diagnostic if the memory-protection call fails.
    pub fn unlock_slice_mut<F, R>(&mut self, f: F) -> R
@@ -651,7 +657,8 @@ impl<T: Zeroize> SecureVec<T> {
    /// Immutable access to the `SecureVec` as `Iter<T>`
    ///
    /// The re-entrancy rule of [`unlock`](Self::unlock) applies here: the closure
-   /// must not call another `unlock*` method on this vector.
+   /// must not call any method that unlocks this vector, in particular another
+   /// `unlock*` method, `Clone` or serde `Serialize`.
    ///
    /// Aborts with a diagnostic if the memory-protection call fails.
    pub fn unlock_iter<F, R>(&self, f: F) -> R
@@ -671,7 +678,8 @@ impl<T: Zeroize> SecureVec<T> {
    /// Mutable access to the `SecureVec` as `IterMut<T>`
    ///
    /// The re-entrancy rule of [`unlock`](Self::unlock) applies here: the closure
-   /// must not call another `unlock*` method on this vector.
+   /// must not call any method that unlocks this vector, in particular another
+   /// `unlock*` method, `Clone` or serde `Serialize`.
    ///
    /// Aborts with a diagnostic if the memory-protection call fails.
    pub fn unlock_iter_mut<F, R>(&mut self, f: F) -> R
@@ -932,8 +940,11 @@ impl<T: Zeroize> SecureVec<T> {
    /// done with it, like any other copy.
    ///
    /// # Panics
-   /// Panics if the starting point is greater than the end point or if the end point
-   /// is greater than the length of the vector.
+   /// Panics if the starting point is greater than the end point, if the end point
+   /// is greater than the length of the vector, or if a bound cannot be converted
+   /// to an index without overflowing: a start of `Bound::Excluded(usize::MAX)` or
+   /// an end of `Bound::Included(usize::MAX)`, either of which a custom
+   /// `RangeBounds` implementation can return from safe code.
    pub fn drain<R>(&mut self, range: R) -> Drain<'_, T>
    where
       R: RangeBounds<usize>,

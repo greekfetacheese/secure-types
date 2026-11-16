@@ -80,9 +80,11 @@ impl<B: Buffer> Drop for Encoder<'_, B> {
 /// or if a container's `Serialize` impl writes a different number of elements
 /// than the length it declared.
 ///
-/// A failure leaves nothing behind: whatever was appended before the error is
-/// erased by [`Buffer::rollback`], and `buffer` is left exactly as it was.
-/// Restores a buffer to its pre-encoding length when the encoding stops early.
+/// A failure restores `buffer` to its pre-encoding length only where the sink can
+/// do that in place: [`Buffer::rollback`] truncates a `Vec<u8>` or a `Counter`.
+/// The `SecureBytes` sink's rollback is a no-op, safe only because its owner
+/// (`encode` / `encode_with_capacity`) drops the buffer on the error path, and the
+/// drop zeroizes the partial document.
 ///
 /// The rollback has to be part of the unwind path: a caller `Serialize` impl that
 /// panics unwinds past a plain `if result.is_err()` check and leaves the version

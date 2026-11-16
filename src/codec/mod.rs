@@ -275,6 +275,15 @@ where
 /// # Errors
 ///
 /// Same as [`encode_to_vec`].
+///
+/// # Panics
+///
+/// Panics with `capacity overflow` if `capacity` exceeds the largest `Vec<u8>`
+/// allocation (`isize::MAX`) — `usize::MAX` is the measured case. An ordinary
+/// allocation failure still aborts rather than panicking, and
+/// [`encode_with_capacity`] reports both as [`EncodeError::Secure`] instead,
+/// because [`SecureBytes::new_with_capacity`](crate::SecureVec::new_with_capacity)
+/// returns the allocation error rather than aborting.
 pub fn encode_to_vec_with_capacity<T>(value: &T, capacity: usize) -> Result<Vec<u8>, EncodeError>
 where
    T: ?Sized + Serialize,

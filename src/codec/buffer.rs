@@ -1,8 +1,10 @@
 //! The destination the encoder appends its encoded document to.
 //!
 //! Both encoder entry points share one [`serde::Serializer`](super::encoder), so
-//! the buffer it writes through is abstracted behind [`Buffer`]. The two
-//! implementations differ in exactly the guarantee this crate exists for.
+//! the buffer it writes through is abstracted behind [`Buffer`]. There are three
+//! implementations — [`SecureBytes`], `Vec<u8>` and [`Counter`], which only
+//! measures — and the two document sinks differ in exactly the guarantee this
+//! crate exists for.
 
 #[cfg(not(feature = "use_os"))]
 use alloc::vec::Vec;
@@ -42,13 +44,14 @@ pub(crate) trait Buffer {
    /// broken-invariant check rather than a reachable runtime error.
    fn patch_at(&mut self, offset: usize, bytes: &[u8]);
 
-   /// Erases everything written after the first `len` bytes, restoring the sink
-   /// to what it held before an encoding started.
+   /// Erases everything written after the first `len` bytes where the sink can
+   /// restore in place: `Vec<u8>` and [`Counter`] do. [`SecureBytes`] deliberately
+   /// does nothing here; its rollback is safe only because its owner
+   /// ([`encode`](crate::encode) or [`encode_with_capacity`](crate::encode_with_capacity))
+   /// drops the buffer on the error path, and the drop zeroizes the document.
    ///
    /// A failed encoding stops wherever it stopped, and the sink would otherwise
-   /// keep a partial document — plaintext that nothing wipes. Each sink says for
-   /// itself what erasing costs: [`SecureBytes`] is zeroized on drop already, so
-   /// it has nothing to do here.
+   /// keep a partial document — plaintext that nothing wipes.
    fn rollback(&mut self, len: usize);
 }
 

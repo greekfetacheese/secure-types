@@ -57,8 +57,10 @@ impl Write for SecureBytesWriter<'_> {
       Ok(buf.len())
    }
 
-   /// Appends in one go, where the default implementation would call [`write`]
-   /// repeatedly and pay an `mprotect` pair per fragment.
+   /// Appends the whole buffer in one explicit `extend_from_slice`, exactly as
+   /// [`write`] does. The default `io::Write::write_all` would also call `write`
+   /// once here, because this `write` always accepts the whole buffer; the
+   /// override just makes that one append explicit.
    ///
    /// [`write`]: Write::write
    fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
