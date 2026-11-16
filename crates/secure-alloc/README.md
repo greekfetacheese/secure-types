@@ -154,11 +154,16 @@ unrelated descriptor. They are only compiled on Linux: on any other target the
   the first allocation (`Once`). `free` and `free_memfd_secret` compare it with the
   constant-time `memeq` and call `abort()` on a mismatch; a pointer whose page-aligned
   base is not a plausible allocation also aborts. A corrupted or foreign pointer
-  therefore kills the process, it does not return an error. A failed protection change
-  inside the allocator — a guard page, the read-only metadata page, or the restore
-  before `munlock` — aborts the same way rather than continuing with the old protection.
+  therefore kills the process, it does not return an error. A protection change the
+  allocator cannot make follows the channel the call already has: the allocation paths
+  give the region back and return `None`, because a failure there is recoverable —
+  `mprotect` answers `ENOMEM` when the change would split the region past
+  `vm.max_map_count` — while `free` and `free_memfd_secret` abort, because they return
+  no error and the restore is a precondition for the canary check and the zeroization
+  that follow. A region that cannot even be restored to `ReadWrite` is abandoned instead
+  of handed back to the global allocator, which may write into a freed block.
 - **`page_size` can panic while initialising.** The first call runs `alloc_init`: it panics
-  if `sysconf` fails or reports a page size smaller than the metadata header, and
+  if `sysconf` fails or reports a page size too small for the region layout, and
   `getrandom`'s failure is unwrapped; the failed `Once` is poisoned, so every later call
   (and every allocation) panics too.
 - **`mlock` failure is ignored.** `malloc`/`malloc_sized` call `mlock` and discard its
@@ -212,6 +217,15 @@ deliberate and have to survive any future sync:
   upstream aborts on the canary only;
 - the region total is computed with checked arithmetic and an `isize::MAX` ceiling, so a
   size near `usize::MAX` is an allocation failure instead of a wrapped layout;
+- every `mprotect` result is checked. A guard page, the read-only metadata page or the
+  restore before `munlock`/`munmap` that the platform rejects is an allocation failure
+  (`None`) on the allocation paths and fatal on the free paths; upstream discards every
+  result and carries on with the old protection. The page size is validated the same way:
+  a failed `sysconf` panics instead of becoming `usize::MAX`, and the floor covers the
+  metadata header rather than one word;
+- the canary is checked *after* the data region is restored to `ReadWrite` in `free` and
+  `free_memfd_secret`, so an allocation the caller left protected is freeable; upstream
+  checks it first and faults (SIGSEGV) on the usage `secure-types` relies on;
 - `src/lib.rs` — `#![doc = include_str!("../README.md")]`, so this README is the crate
   front page and its examples are doctests;
 - `src/alloc/mod.rs`, `src/alloc/allocext/linux.rs` — `::core::usize::MAX` is written
@@ -232,8 +246,9 @@ deliberate and have to survive any future sync:
   `use_os` without `alloc` build;
 - `page_size()` is public, and `mprotect` accepts either tag;
 - `tests/memfd_secret_cloexec.rs`, `tests/mlock_dump_exclusion.rs`,
-  `tests/wrong_free_aborts.rs` and the header-tag unit tests are new regression tests
-  for the deviations above.
+  `tests/wrong_free_aborts.rs`, `tests/protect_failure.rs` and the header-tag unit tests
+  are new regression tests for the deviations above; `protect_failure.rs` forces
+  `mprotect` to fail with a seccomp filter and with a punched-out guard page.
 
 ## License
 
