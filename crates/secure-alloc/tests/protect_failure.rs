@@ -46,6 +46,21 @@ fn stderr_of(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
+/// A rejected change is reported with the range it covered and the error the call left
+/// behind. The seccomp filter answers `ENOMEM`, so the number is 12.
+fn assert_protection_detail(stderr: &str, what: &str) {
+    let site = format!("secure-alloc: mprotect failed: {what} (ptr 0x");
+    // Edition 2018: a panic message is only a format string when its arguments are passed
+    // explicitly.
+    let message = format!(
+        "the child must name the rejected change and the range it covered ({site:?}): {stderr:?}"
+    );
+    assert!(stderr.contains(&site), "{}", message);
+
+    let message = format!("the child must carry the ENOMEM the filter answers with: {stderr:?}");
+    assert!(stderr.contains("os error 12"), "{}", message);
+}
+
 /// `SECCOMP_RET_ALLOW` and `SECCOMP_RET_ERRNO`, from `linux/seccomp.h`.
 const SECCOMP_RET_ALLOW: u32 = 0x7fff_0000;
 const SECCOMP_RET_ERRNO: u32 = 0x0005_0000;
@@ -65,7 +80,12 @@ const SECCOMP_DATA_NR: u32 = 0;
 const SECCOMP_DATA_ARG2: u32 = 32;
 
 fn stmt(code: u16, k: u32) -> libc::sock_filter {
-    libc::sock_filter { code, jt: 0, jf: 0, k }
+    libc::sock_filter {
+        code,
+        jt: 0,
+        jf: 0,
+        k,
+    }
 }
 
 fn jump(code: u16, k: u32, jt: u8, jf: u8) -> libc::sock_filter {
@@ -156,6 +176,7 @@ fn allocation_returns_none_when_the_guard_page_is_rejected() {
         "the child must name the rejected protection change: {:?}",
         stderr
     );
+    assert_protection_detail(&stderr, "malloc guard page");
 }
 
 /// A metadata page left writable would let the caller rewrite the length and the tag.
@@ -190,6 +211,7 @@ fn allocation_returns_none_when_the_metadata_page_is_rejected() {
         "the child must name the rejected protection change: {:?}",
         stderr
     );
+    assert_protection_detail(&stderr, "malloc metadata");
 }
 
 /// `free` has no error channel, so a restore that cannot cover the region must abort
@@ -214,7 +236,10 @@ fn free_aborts_when_the_restore_is_rejected() {
         std::process::exit(3);
     }
 
-    let output = run_child("free_aborts_when_the_restore_is_rejected", CHILD_FREE_RESTORE);
+    let output = run_child(
+        "free_aborts_when_the_restore_is_rejected",
+        CHILD_FREE_RESTORE,
+    );
     let stderr = stderr_of(&output);
 
     assert_eq!(
@@ -228,6 +253,7 @@ fn free_aborts_when_the_restore_is_rejected() {
         "the child must name the rejected protection change: {:?}",
         stderr
     );
+    assert_protection_detail(&stderr, "free restore");
 }
 
 /// The same for the `memfd_secret` teardown, whose restore precedes `munmap`.
@@ -275,4 +301,5 @@ fn free_memfd_secret_aborts_when_the_restore_is_rejected() {
         "the child must name the rejected protection change: {:?}",
         stderr
     );
+    assert_protection_detail(&stderr, "memfd free restore");
 }
