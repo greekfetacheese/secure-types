@@ -69,15 +69,12 @@ mod memfd_secret_alloc {
 unsafe fn _memfd_secret(size: usize) -> Option<*mut u8> {
     ALLOC_INIT.call_once(|| alloc_init());
 
-    //Assert size of unprotected_size (usize) and fd (i32) is less than PAGE_SIZE before allocating memory
-    assert!(size_of::<usize>() + size_of::<i32>() <= PAGE_SIZE);
-
     // Every step that can overflow is checked. A size in the last few dozen values
     // before `usize::MAX` used to wrap the page-rounded total to zero, and the guard
     // pages, canary and user pointer were then addressed from the unwrapped length.
     let size_with_canary = CANARY_SIZE.checked_add(size)?;
     let unprotected_size = page_round(size_with_canary)?;
-    let total_size = PAGE_SIZE.checked_mul(3)?.checked_add(unprotected_size)?;
+    let total_size = region_total(unprotected_size)?;
 
     // A `Layout` must fit in `isize`; anything larger is an allocation failure, not
     // an invalid layout to hand to `mmap`.
@@ -228,7 +225,9 @@ pub unsafe fn free_memfd_secret<T: ?Sized>(memptr: NonNull<T>) {
     // allocation the caller left `NoAccess` must still be freed. The tag above and
     // the descriptor here both come from the metadata page, which the caller does not
     // protect.
-    let total_size = PAGE_SIZE + PAGE_SIZE + unprotected_size + PAGE_SIZE;
+    let Some(total_size) = region_total(unprotected_size) else {
+        abort();
+    };
     mprotect_or_abort(base_ptr, total_size, Prot::ReadWrite, "memfd free restore");
 
     // check

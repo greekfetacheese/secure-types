@@ -42,33 +42,38 @@ static mut CANARY: [u8; CANARY_SIZE] = [0; CANARY_SIZE];
 #[inline]
 unsafe fn alloc_init() {
     #[cfg(unix)]
-    {
+    let page_size = {
         let page_size = libc::sysconf(libc::_SC_PAGESIZE);
         if page_size <= 0 {
             panic!("page size unavailable");
         }
-        PAGE_SIZE = page_size as usize;
-    }
+        page_size as usize
+    };
 
     #[cfg(windows)]
-    {
+    let page_size = {
         let mut si = mem::MaybeUninit::uninit();
         windows_sys::Win32::System::SystemInformation::GetSystemInfo(si.as_mut_ptr());
-        PAGE_SIZE = (*si.as_ptr()).dwPageSize as usize;
-    }
+        (*si.as_ptr()).dwPageSize as usize
+    };
 
     // Every byte up to `MEMFD_TAG_OFFSET + size_of::<usize>()` is written into the
     // metadata header; a page smaller than that would put the tag store into a
     // `PROT_NONE` guard page.
     let header_size = MEMFD_TAG_OFFSET + mem::size_of::<usize>();
-    if PAGE_SIZE < CANARY_SIZE || PAGE_SIZE < header_size {
+    if page_size < CANARY_SIZE || page_size < header_size {
         panic!("page size too small");
     }
 
-    PAGE_MASK = PAGE_SIZE - 1;
+    let mut canary = [0; CANARY_SIZE];
+    getrandom::fill(&mut canary).unwrap();
 
-    #[allow(static_mut_refs)]
-    getrandom::fill(&mut CANARY).unwrap();
+    // Publish last: a panic above poisons the `Once` and leaves every static untouched,
+    // so no path can observe a layout built from an unvalidated page size, a mask that
+    // does not match it, or an all-zero canary that every comparison would accept.
+    PAGE_MASK = page_size - 1;
+    PAGE_SIZE = page_size;
+    CANARY = canary;
 }
 
 /// The page size this allocator lays its regions out with.
@@ -178,16 +183,20 @@ pub unsafe fn _mprotect(ptr: *mut u8, len: usize, prot: Prot::Ty) -> bool {
 
 /// Reports a protection change the platform rejected.
 ///
-/// Best-effort: the write is discarded and cannot stand in the way of what the caller
-/// does next. `writeln!` is used rather than `eprintln!`, which panics when the write
-/// itself fails (a dead stderr pipe) and would turn a rejected protection change into
-/// an unwind.
+/// `error` is the OS error the failed call left behind, read at the failure site because
+/// the write below may overwrite it. Best-effort otherwise: the write is discarded and
+/// cannot stand in the way of what the caller does next. `writeln!` is used rather than
+/// `eprintln!`, which panics when the write itself fails (a dead stderr pipe) and would
+/// turn a rejected protection change into an unwind.
 #[cfg(any(unix, windows))]
 #[cold]
 #[inline(never)]
-fn mprotect_failed(what: &'static str) {
+fn mprotect_failed(what: &'static str, ptr: *mut u8, len: usize, error: std::io::Error) {
     use std::io::Write;
-    let _ = writeln!(std::io::stderr(), "secure-alloc: mprotect failed: {what}");
+    let _ = writeln!(
+        std::io::stderr(),
+        "secure-alloc: mprotect failed: {what} (ptr {ptr:p}, len {len:#x}): {error}"
+    );
 }
 
 /// Applies a protection change the allocation paths can still refuse to go on with.
@@ -204,7 +213,8 @@ unsafe fn mprotect_checked(ptr: *mut u8, len: usize, prot: Prot::Ty, what: &'sta
         return true;
     }
 
-    mprotect_failed(what);
+    let error = std::io::Error::last_os_error();
+    mprotect_failed(what, ptr, len, error);
     false
 }
 
@@ -241,7 +251,8 @@ unsafe fn release_region(base_ptr: *mut u8, total_size: usize) {
         return;
     }
 
-    mprotect_failed("malloc release restore");
+    let error = std::io::Error::last_os_error();
+    mprotect_failed("malloc release restore", base_ptr, total_size, error);
 }
 
 /// Secure `mprotect`.
@@ -286,6 +297,18 @@ unsafe fn page_round(size: usize) -> Option<usize> {
     size.checked_add(PAGE_MASK).map(|size| size & !PAGE_MASK)
 }
 
+/// Total size of an allocation's region: both guard pages, the metadata page and the
+/// page-rounded data region.
+///
+/// Returns `None` when the total would overflow. The allocation paths turn that into an
+/// allocation failure; the free paths abort, because there `unprotected_size` comes from
+/// the metadata page and a wrapped total would `mprotect` a short range, check the canary
+/// at a wild address and `dealloc` with a layout the allocation never had.
+#[inline]
+unsafe fn region_total(unprotected_size: usize) -> Option<usize> {
+    PAGE_SIZE.checked_mul(3)?.checked_add(unprotected_size)
+}
+
 #[inline]
 unsafe fn unprotected_ptr_from_user_ptr(memptr: *const u8) -> *mut u8 {
     let canary_ptr = memptr.sub(CANARY_SIZE);
@@ -304,7 +327,7 @@ unsafe fn _malloc(size: usize) -> Option<*mut u8> {
     // pages, canary and user pointer were then addressed from the unwrapped length.
     let size_with_canary = CANARY_SIZE.checked_add(size)?;
     let unprotected_size = page_round(size_with_canary)?;
-    let total_size = PAGE_SIZE.checked_mul(3)?.checked_add(unprotected_size)?;
+    let total_size = region_total(unprotected_size)?;
 
     // A `Layout` must fit in `isize`; anything larger is an allocation failure, not
     // an invalid layout to hand to the global allocator.
@@ -428,7 +451,9 @@ pub unsafe fn free<T: ?Sized>(memptr: NonNull<T>) {
     // caller is allowed to leave the allocation protected until it is freed, and a
     // check that faulted there would kill the process instead of reaching the
     // diagnostic abort below.
-    let total_size = PAGE_SIZE + PAGE_SIZE + unprotected_size + PAGE_SIZE;
+    let Some(total_size) = region_total(unprotected_size) else {
+        abort();
+    };
     mprotect_or_abort(base_ptr, total_size, Prot::ReadWrite, "free restore");
 
     // check
@@ -468,6 +493,21 @@ mod tests {
         }
 
         assert!(unsafe { malloc_sized(usize::MAX) }.is_none());
+    }
+
+    /// A corrupted data-region length must not wrap the region total: the free paths
+    /// refuse it rather than `mprotect` a short range and `dealloc` a layout the
+    /// allocation never had.
+    #[test]
+    fn overflowing_region_total_is_rejected() {
+        let page_size = page_size();
+
+        assert_eq!(
+            unsafe { region_total(CANARY_SIZE) },
+            Some(page_size * 3 + CANARY_SIZE)
+        );
+        assert!(unsafe { region_total(usize::MAX) }.is_none());
+        assert!(unsafe { region_total(usize::MAX - page_size) }.is_none());
     }
 
     /// `malloc::<T>` is aligned for `T`, but `malloc_sized` is page-aligned only
