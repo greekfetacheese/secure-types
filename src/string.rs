@@ -185,7 +185,8 @@ impl SecureString {
    /// # Re-entrancy
    ///
    /// The closure must not call another `unlock*` method on this string, nor
-   /// [`char_len`](Self::char_len), which unlocks internally — [`byte_len`](Self::byte_len)
+   /// [`char_len`](Self::char_len), [`char_len_unchecked`](Self::char_len_unchecked) and
+   /// `Clone`, which all unlock internally — [`byte_len`](Self::byte_len)
    /// does not unlock and is fine. The pages are unprotected once and re-protected
    /// when this call returns, so a nested unlock re-locks the memory while this
    /// closure is still reading it, and the read faults. Use the `&str` you were

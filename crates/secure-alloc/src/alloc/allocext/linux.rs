@@ -106,6 +106,15 @@ unsafe fn _memfd_secret(size: usize) -> Option<*mut u8> {
     ptr::copy_nonoverlapping(CANARY.as_ptr(), canary_ptr, CANARY_SIZE);
     ptr::write_unaligned(base_ptr as *mut usize, unprotected_size);
     ptr::write_unaligned(fd_ptr as *mut libc::c_int, fd);
+    // `free` and `mprotect` read a `usize` at `MALLOC_TAG_OFFSET`; on this header that
+    // slot is the descriptor plus the four bytes after it, and only the descriptor was
+    // written. Zero the rest so the read is initialised, the way the malloc header
+    // defines its spare slot (`NOT_MEMFD_TAG`). The slot still cannot equal `MALLOC_TAG`:
+    // its descriptor half is a small fd, never "MALL".
+    ptr::write_unaligned(
+        base_ptr.add(MALLOC_TAG_OFFSET + size_of::<libc::c_int>()) as *mut libc::c_int,
+        0,
+    );
     ptr::write_unaligned(base_ptr.add(MEMFD_TAG_OFFSET) as *mut usize, MEMFD_TAG);
     _mprotect(base_ptr, PAGE_SIZE, Prot::ReadOnly);
 

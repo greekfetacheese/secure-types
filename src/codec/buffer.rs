@@ -22,8 +22,10 @@ use crate::{Error, SecureBytes};
 ///   something that only takes a `Vec<u8>` — does not have to allocate a
 ///   [`SecureBytes`] first and copy out of it.
 ///
-/// The encoder keeps no scratch of this kind: everything it needs internally is a
-/// [`SecureBytes`], so this choice only decides where the *result* lives.
+/// The encoder keeps no scratch of this kind: its document-byte scratch is always a
+/// [`SecureBytes`], so this choice only decides where the *result* lives. Its frame table
+/// is separate bookkeeping — an ordinary `Vec<Frame>` of field offsets and lengths, not a
+/// `SecureBytes`.
 pub(crate) trait Buffer {
    /// The number of bytes written so far.
    fn len(&self) -> usize;

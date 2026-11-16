@@ -1170,7 +1170,7 @@ impl<'de> serde::Deserialize<'de> for SecureVec<u8> {
    }
 }
 
-/// Elements that a [`SecureVec`] or [`SecureArray`] encodes as a *sequence of values*
+/// Elements that a [`SecureVec`] or [`SecureArray`] encodes element by element
 /// rather than as one byte buffer.
 ///
 /// [`u8`] is deliberately absent. A `u8` container is a byte string, so it encodes as a
@@ -1178,7 +1178,8 @@ impl<'de> serde::Deserialize<'de> for SecureVec<u8> {
 /// element. A blanket impl that covered `u8` too would overlap with the byte-buffer impls
 /// above, and Rust has no specialization, so each element type opts in here instead.
 ///
-/// Implemented for the core scalar types. Implement it for your own type to make
+/// Implemented for the scalar types listed below; `usize` and `isize` are absent
+/// because their width is target-dependent. Implement it for your own type to make
 /// `SecureVec<T>` and `SecureArray<T, N>` serializable. It is a safe trait: implementing it
 /// only selects an encoding.
 #[cfg(feature = "serde")]
