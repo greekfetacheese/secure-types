@@ -336,6 +336,9 @@ pub unsafe fn free<T: ?Sized>(memptr: NonNull<T>) {
     // check
     #[allow(static_mut_refs)]
     if !crate::memeq(canary_ptr as *const u8, CANARY.as_ptr(), CANARY_SIZE) {
+        // The region was just restored to `ReadWrite` above. Wipe it before the
+        // diagnostic-free abort, so the plaintext does not outlive the process.
+        crate::memzero(unprotected_ptr, unprotected_size);
         abort();
     }
 

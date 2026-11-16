@@ -19,9 +19,9 @@ use core::{
    ops::{Bound, RangeBounds},
    ptr::{self, NonNull},
 };
+use zeroize::Zeroize;
 #[cfg(feature = "serde")]
 use zeroize::Zeroizing;
-use zeroize::{DefaultIsZeroes, Zeroize};
 
 #[cfg(feature = "use_os")]
 use super::free;
@@ -406,7 +406,7 @@ impl<T: Zeroize> SecureVec<T> {
    /// the vector is being filled.
    pub fn from_slice_mut(slice: &mut [T]) -> Result<Self, Error>
    where
-      T: Clone + DefaultIsZeroes,
+      T: Clone,
    {
       // Wipes the caller's buffer on every way out of this function, the unwind from
       // a panicking `T::clone` in `init_from_clone` included: a wipe placed after the
@@ -1058,6 +1058,10 @@ impl<'de> serde::Deserialize<'de> for SecureVec<u8> {
                SecureVec::new_with_capacity(capacity).map_err(serde::de::Error::custom)?;
 
             while let Some(byte) = seq.next_element::<u8>()? {
+               // Reserved fallibly first, for the same reason as the SeqElement
+               // visitor below: push would panic out of a decode if the growth
+               // failed, and a Deserialize impl has to report the failure instead.
+               vec.try_reserve(1).map_err(serde::de::Error::custom)?;
                vec.push(byte);
             }
 
@@ -1311,29 +1315,29 @@ impl<'a, T: Zeroize> Drain<'a, T> {
          // double-free. Each unyielded element is zeroized before it is dropped,
          // exactly as `clear` and `Drop` discard one: the byte wipe below only
          // reaches the slot, so without it the memory a `T` owns (a `String`'s
-         // buffer) would be freed with its plaintext intact.
-         if mem::needs_drop::<T>() {
-            let first = self.current_drain_iter_index;
-            let end = self.drain_end_index;
+         // buffer) would be freed with its plaintext intact. Runs for every `T`,
+         // not only `needs_drop` ones: a `Zeroize` impl may wipe memory outside
+         // the element's own bytes, and `clear`/`Drop` zeroize unconditionally.
+         let first = self.current_drain_iter_index;
+         let end = self.drain_end_index;
 
-            // Covers the unyielded slots the loop has not reached yet, so a destructor
-            // that panics discards them instead of orphaning them. The loop runs from
-            // the back, which is what makes the live set a prefix of `base.add(first)`.
-            let mut discard = InitGuard::<T>::new(base.add(first));
-            discard.set_written(end - first);
+         // Covers the unyielded slots the loop has not reached yet, so a destructor
+         // that panics discards them instead of orphaning them. The loop runs from
+         // the back, which is what makes the live set a prefix of `base.add(first)`.
+         let mut discard = InitGuard::<T>::new(base.add(first));
+         discard.set_written(end - first);
 
-            for index in (first..end).rev() {
-               let slot = base.add(index);
-               // `zeroize` can panic too, so the slot is still the guard's until the
-               // drop below takes ownership of it.
-               discard.set_written(index - first + 1);
-               (*slot).zeroize();
-               discard.set_written(index - first);
-               ptr::drop_in_place(slot);
-            }
-
-            discard.commit();
+         for index in (first..end).rev() {
+            let slot = base.add(index);
+            // `zeroize` can panic too, so the slot is still the guard's until the
+            // drop below takes ownership of it.
+            discard.set_written(index - first + 1);
+            (*slot).zeroize();
+            discard.set_written(index - first);
+            ptr::drop_in_place(slot);
          }
+
+         discard.commit();
 
          let hole_dst_ptr = base.add(self.drain_start_index);
          let tail_src_ptr = base.add(self.drain_end_index);

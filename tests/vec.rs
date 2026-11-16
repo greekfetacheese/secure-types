@@ -6,6 +6,7 @@
 mod common;
 
 use std::fmt::Debug;
+use std::mem::{ManuallyDrop, needs_drop};
 #[cfg(target_os = "linux")]
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1091,5 +1092,98 @@ fn test_drop_discards_the_rest_when_a_destructor_panics() {
       DROP_DROPPED.load(Ordering::SeqCst),
       3,
       "every element must be dropped, including the ones the panic skipped"
+   );
+}
+
+static NON_DROP_ZEROIZED: AtomicUsize = AtomicUsize::new(0);
+
+/// A `T` with no destructor that still owns a heap buffer.
+///
+/// The buffer hides behind `ManuallyDrop`, so `needs_drop` reports `false` for the
+/// element and only `Zeroize` can wipe it: a discard path that gates on `needs_drop`
+/// skips it silently, and the wipe a `Zeroize` impl performs outside the element's own
+/// bytes never happens.
+struct NonDropSecret {
+   data: ManuallyDrop<Box<[u8]>>,
+   zeroized: bool,
+}
+
+impl NonDropSecret {
+   fn new(data: Box<[u8]>) -> Self {
+      Self {
+         data: ManuallyDrop::new(data),
+         zeroized: false,
+      }
+   }
+}
+
+impl Zeroize for NonDropSecret {
+   fn zeroize(&mut self) {
+      // Guarded so a second call is a no-op: the counter counts elements, not calls.
+      if self.zeroized {
+         return;
+      }
+
+      self.zeroized = true;
+
+      self.data[..].zeroize();
+      NON_DROP_ZEROIZED.fetch_add(1, Ordering::SeqCst);
+   }
+}
+
+/// `Drain::compact` must zeroize the elements it discards for every `T`, not only for
+/// the `needs_drop` ones: a `Zeroize` impl may wipe memory outside the element's own
+/// bytes, and `clear` / `Drop` zeroize unconditionally.
+#[test]
+fn test_drain_zeroizes_discarded_non_drop_elements() {
+   NON_DROP_ZEROIZED.store(0, Ordering::SeqCst);
+
+   assert!(
+      !needs_drop::<NonDropSecret>(),
+      "the element type must have no destructor for this test to mean anything"
+   );
+
+   let mut secure: SecureVec<NonDropSecret> = SecureVec::new_with_capacity(4).unwrap();
+
+   for value in 0..4u8 {
+      let secret = NonDropSecret::new(vec![value; 8].into_boxed_slice());
+      secure.push(secret);
+   }
+
+   // Never iterated, so dropping the iterator is the only path that can discard them.
+   let drain = secure.drain(0..2);
+   drop(drain);
+
+   assert_eq!(secure.len(), 2);
+   assert_eq!(
+      NON_DROP_ZEROIZED.load(Ordering::SeqCst),
+      2,
+      "every unyielded drain-range element must be zeroized"
+   );
+
+   secure.clear();
+
+   assert_eq!(
+      NON_DROP_ZEROIZED.load(Ordering::SeqCst),
+      4,
+      "clear must zeroize the remaining elements too"
+   );
+}
+
+/// `from_slice_mut` wipes its source through `SourceWipe`, which needs `Zeroize` and
+/// nothing more: a non-`Copy` type must be accepted without `DefaultIsZeroes`.
+#[test]
+fn test_from_slice_mut_accepts_non_copy_zeroize_types() {
+   let mut source = [String::from("first"), String::from("second")];
+
+   let secure = SecureVec::from_slice_mut(&mut source).unwrap();
+
+   secure.unlock_slice(|values| {
+      assert_eq!(values, &["first", "second"]);
+   });
+   assert_eq!(
+      source,
+      ["", ""],
+      "the source strings must be wiped"
    );
 }

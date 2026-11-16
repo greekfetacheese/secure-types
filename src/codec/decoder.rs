@@ -32,6 +32,11 @@ pub(crate) struct Decoder<'de> {
    framed: bool,
    /// Current value-nesting depth, bounded by [`MAX_DEPTH`].
    depth: usize,
+   /// Element visits charged so far against visit_budget.
+   visits: usize,
+   /// Maximum element visits this decoder may charge. A multiple of the bytes it
+   /// can read, so a document of D bytes cannot drive more than O(D) visits.
+   visit_budget: usize,
 }
 
 /// Decodes a whole document from `bytes`.
@@ -73,6 +78,8 @@ impl<'de> Decoder<'de> {
          pos: 0,
          framed: false,
          depth: 0,
+         visits: 0,
+         visit_budget: buf.len().saturating_mul(4).saturating_add(64),
       }
    }
 
@@ -131,8 +138,10 @@ impl<'de> Decoder<'de> {
    /// can each spend up to the document length in element visits, so a document of D
    /// bytes can drive O(D²) of them before the last count is rejected — measured, a
    /// 16 KB document performs 32 million visits (1.2 s in a debug build; the pure
-   /// zero-byte visit loops are folded away in release). Bounding it needs a
-   /// total-element budget, not a per-container one.
+   /// zero-byte visit loops are folded away in release). The total is bounded by
+   /// [`count_visit`](Self::count_visit) instead, whose budget is a multiple of the
+   /// readable bytes, so a pathological nesting is refused early rather than taking
+   /// quadratic time.
    fn read_count(&mut self) -> Result<usize, DecodeError> {
       let count = self.read_varint()?;
       if count > self.remaining() {
@@ -155,6 +164,23 @@ impl<'de> Decoder<'de> {
    /// Balances [`enter`](Self::enter) once the nested value has been decoded.
    fn leave(&mut self) {
       self.depth -= 1;
+   }
+
+   /// Charges one element visit against this decoder's work budget.
+   ///
+   /// Every next_element_seed / next_key_seed / next_value_seed calls this
+   /// before it hands an element to a visitor. Without it, a nested container of
+   /// zero-byte elements can spend the whole buffer in visits at every level and a
+   /// small document drives O(D^2) work (see read_count) - this is the total bound
+   /// read_count cannot supply. A framed struct field gets its own decoder and its
+   /// own budget, proportional to its frame, so the sum stays linear in the document.
+   fn count_visit(&mut self) -> Result<(), DecodeError> {
+      if self.visits >= self.visit_budget {
+         return Err(DecodeError::InvalidLength);
+      }
+
+      self.visits += 1;
+      Ok(())
    }
 }
 
@@ -494,6 +520,7 @@ impl<'de> de::SeqAccess<'de> for SeqAccess<'de, '_> {
       if self.remaining == 0 {
          return Ok(None);
       }
+      self.decoder.count_visit()?;
       self.remaining -= 1;
 
       self.decoder.enter()?;
@@ -535,6 +562,7 @@ impl<'de> de::MapAccess<'de> for MapAccess<'de, '_> {
       if self.remaining == 0 {
          return Ok(None);
       }
+      self.decoder.count_visit()?;
       self.remaining -= 1;
 
       self.decoder.enter()?;
@@ -548,6 +576,7 @@ impl<'de> de::MapAccess<'de> for MapAccess<'de, '_> {
    where
       V: DeserializeSeed<'de>,
    {
+      self.decoder.count_visit()?;
       self.decoder.enter()?;
       let value = seed.deserialize(&mut *self.decoder);
       self.decoder.leave();
@@ -592,6 +621,7 @@ impl<'de> de::MapAccess<'de> for StructMapAccess<'de, '_> {
       if self.remaining == 0 {
          return Ok(None);
       }
+      self.decoder.count_visit()?;
 
       let name = self.decoder.read_str()?;
       let frame_len = u32::from_le_bytes(self.decoder.read_array::<4>()?) as usize;
@@ -623,6 +653,7 @@ impl<'de> de::MapAccess<'de> for StructMapAccess<'de, '_> {
          return Err(DecodeError::Custom);
       }
       self.value_pending = false;
+      self.decoder.count_visit()?;
 
       let start = self.decoder.pos;
       let end = self.value_end;
@@ -636,6 +667,8 @@ impl<'de> de::MapAccess<'de> for StructMapAccess<'de, '_> {
          pos: 0,
          framed: true,
          depth: self.decoder.depth,
+         visits: 0,
+         visit_budget: frame.len().saturating_mul(4).saturating_add(64),
       };
 
       framed.enter()?;
@@ -702,6 +735,7 @@ impl<'de> de::VariantAccess<'de> for VariantAccess<'de, '_> {
    where
       T: DeserializeSeed<'de>,
    {
+      self.decoder.count_visit()?;
       self.decoder.enter()?;
       let value = seed.deserialize(&mut *self.decoder);
       self.decoder.leave();
@@ -759,5 +793,26 @@ impl<'de> de::Deserializer<'de> for FieldName<'de> {
       bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
       bytes byte_buf option unit unit_struct newtype_struct seq tuple
       tuple_struct map struct enum identifier ignored_any
+   }
+}
+
+#[cfg(test)]
+mod tests {
+   use super::*;
+
+   /// The total bound `read_count` cannot supply: once the budget is spent, the next
+   /// element visit is refused rather than charged.
+   #[test]
+   fn test_visit_budget_refuses_the_visit_after_the_budget() {
+      let mut decoder = Decoder::new(&[0u8; 64]);
+
+      for _ in 0..decoder.visit_budget {
+         assert!(decoder.count_visit().is_ok());
+      }
+
+      assert!(matches!(
+         decoder.count_visit(),
+         Err(DecodeError::InvalidLength)
+      ));
    }
 }
