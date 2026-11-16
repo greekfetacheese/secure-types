@@ -204,10 +204,10 @@ fn test_ignored_any_outside_a_struct_field_is_unsupported() {
    ));
 }
 
-/// Nothing here may panic: a corrupt document is an error, and the count guard
-/// keeps a corrupt length from pre-allocating or looping without bound.
+/// Every prefix shorter than the document is refused: the count guard keeps a
+/// corrupt length from pre-allocating or looping without bound.
 #[test]
-fn test_every_truncation_and_bit_flip_is_an_error_not_a_panic() {
+fn test_every_truncation_is_an_error_not_a_panic() {
    let encoded = encode(&fixture());
 
    encoded.unlock_slice(|bytes| {
@@ -220,6 +220,18 @@ fn test_every_truncation_and_bit_flip_is_an_error_not_a_panic() {
             "a {len}-byte prefix decoded successfully"
          );
       }
+   });
+}
+
+/// A flipped payload bit may legitimately decode to a different value; what is
+/// pinned here is that no byte of the document sends the decoder into a panic.
+#[test]
+fn test_every_bit_flip_never_panics() {
+   let encoded = encode(&fixture());
+
+   encoded.unlock_slice(|bytes| {
+      let original = bytes.to_vec();
+      assert!(secure_types::decode_slice::<Fixture>(&original).is_ok());
 
       for index in 0..original.len() {
          for bit in 0..8 {
@@ -230,6 +242,36 @@ fn test_every_truncation_and_bit_flip_is_an_error_not_a_panic() {
             let _ = secure_types::decode_slice::<Fixture>(&mutated);
          }
       }
+   });
+}
+
+/// A corrupt *structural* byte is refused rather than decoded into something else:
+/// the version tag has to name a format this build understands, and a declared
+/// field count of zero leaves a required field unwritten.
+#[test]
+fn test_corrupt_structural_bytes_are_errors() {
+   let encoded = encode(&fixture());
+
+   encoded.unlock_slice(|bytes| {
+      let original = bytes.to_vec();
+
+      let mut wrong_version = original.clone();
+      wrong_version[0] = FORMAT_VERSION.wrapping_add(1);
+      assert!(matches!(
+         secure_types::decode_slice::<Fixture>(&wrong_version),
+         Err(DecodeError::UnsupportedVersion(_))
+      ));
+
+      let mut no_fields = original.clone();
+      no_fields[1] = 0;
+      let outcome = secure_types::decode_slice::<Fixture>(&no_fields);
+      // Refused, and not decoded into a default-valued struct. The variant today is
+      // `Custom` (serde's missing-field check); assert only that it is refused, so the
+      // pin does not turn into a serde-version test.
+      assert!(
+         outcome.is_err(),
+         "a zero field count decoded to {outcome:?}"
+      );
    });
 }
 

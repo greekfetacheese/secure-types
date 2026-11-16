@@ -59,10 +59,11 @@ no_os = []
 expose-ptr = []
 
 # `access_violation` dereferences the raw pointer of a locked array to
-# demonstrate the SIGSEGV, so it needs the `expose-ptr` testing feature.
+# demonstrate the SIGSEGV, so it needs the `expose-ptr` testing feature and the
+# OS-backed protection: with `no_os` the lock is a no-op and the read succeeds.
 [[example]]
 name = "access_violation"
-required-features = ["expose-ptr"]
+required-features = ["expose-ptr", "use_os"]
 
 # These use constructors that only exist with OS support: `SecureString: From<String>`
 # and `SecureVec::from_vec` are `use_os`-only.
