@@ -19,9 +19,9 @@ use core::{
    ops::{Bound, RangeBounds},
    ptr::{self, NonNull},
 };
+use zeroize::Zeroize;
 #[cfg(feature = "serde")]
 use zeroize::Zeroizing;
-use zeroize::{DefaultIsZeroes, Zeroize};
 
 #[cfg(feature = "use_os")]
 use super::free;
@@ -152,6 +152,58 @@ impl<T> Drop for FreeGuard<T> {
 
          let layout = Layout::from_size_align_unchecked(self.byte_size, mem::align_of::<T>());
          alloc::alloc::dealloc(self.ptr.as_ptr() as *mut u8, layout);
+      }
+   }
+}
+/// Zeroizes and drops a `Drain`'s not-yet-moved tail if compaction unwinds first.
+///
+/// `Drain::compact` discards the unyielded drained elements before it copies the tail
+/// down. A destructor that panics in that loop unwinds past the copy, so without this
+/// guard the tail elements are owned by nobody: their `Drop` never runs and the buffers
+/// they own keep their plaintext. The guard is armed until the copy has moved them.
+struct TailGuard<T: Zeroize> {
+   base: *mut T,
+   start: usize,
+   len: usize,
+   armed: bool,
+}
+
+impl<T: Zeroize> TailGuard<T> {
+   /// # Safety
+   ///
+   /// `base.add(start .. start + len)` must be live, initialized `T` slots of the
+   /// allocation the caller has unprotected, and nothing else may drop them while this
+   /// guard is armed.
+   unsafe fn new(base: *mut T, start: usize, len: usize) -> Self {
+      TailGuard {
+         base,
+         start,
+         len,
+         armed: true,
+      }
+   }
+
+   /// Hands the tail to the caller once the copy has moved it.
+   fn disarm(&mut self) {
+      self.armed = false;
+   }
+}
+
+impl<T: Zeroize> Drop for TailGuard<T> {
+   fn drop(&mut self) {
+      if !self.armed {
+         return;
+      }
+
+      for offset in (0..self.len).rev() {
+         // SAFETY: the constructor proved the range live; the guard is declared after
+         // the `UnlockGuard`, so it is dropped while the pages are still open, and each
+         // slot is zeroized and dropped exactly once.
+         unsafe {
+            let slot = self.base.add(self.start + offset);
+            (*slot).zeroize();
+            ptr::drop_in_place(slot);
+         }
       }
    }
 }
@@ -406,7 +458,7 @@ impl<T: Zeroize> SecureVec<T> {
    /// the vector is being filled.
    pub fn from_slice_mut(slice: &mut [T]) -> Result<Self, Error>
    where
-      T: Clone + DefaultIsZeroes,
+      T: Clone,
    {
       // Wipes the caller's buffer on every way out of this function, the unwind from
       // a panicking `T::clone` in `init_from_clone` included: a wipe placed after the
@@ -1058,6 +1110,10 @@ impl<'de> serde::Deserialize<'de> for SecureVec<u8> {
                SecureVec::new_with_capacity(capacity).map_err(serde::de::Error::custom)?;
 
             while let Some(byte) = seq.next_element::<u8>()? {
+               // Reserved fallibly first, for the same reason as the SeqElement
+               // visitor below: push would panic out of a decode if the growth
+               // failed, and a Deserialize impl has to report the failure instead.
+               vec.try_reserve(1).map_err(serde::de::Error::custom)?;
                vec.push(byte);
             }
 
@@ -1301,39 +1357,46 @@ impl<'a, T: Zeroize> Drain<'a, T> {
       let _guard = UnlockGuard::new(&*self.vec_ref);
 
       // SAFETY: the guard unprotects the live vector. Every index is within the
-      // original length; unyielded drain-range elements are zeroized and then
-      // dropped exactly once, the tail is moved (not copied) into the hole, and
-      // the leftover slots hold only moved-from / duplicate bit patterns — wiped
-      // as bytes, never reinterpreted as a `T`.
+      // original length; unyielded drain-range elements and the not-yet-moved tail
+      // are zeroized and then dropped exactly once (each by its own guard), the tail
+      // is moved (not copied) into the hole, and the leftover slots hold only
+      // moved-from / duplicate bit patterns — wiped as bytes, never reinterpreted as
+      // a `T`.
       unsafe {
+         // The tail elements are still owned by nobody until the copy below moves them
+         // down: if a destructor in the discard loop panics, this guard zeroizes and
+         // drops them while the pages are open. The loop's `InitGuard` covers the
+         // drained range; this covers everything after it.
+         let mut tail = TailGuard::<T>::new(base, self.drain_end_index, self.tail_len);
+
          // Discard drain-range elements that were never yielded. `next` already
          // `ptr::read` them out to the caller; dropping those again would
          // double-free. Each unyielded element is zeroized before it is dropped,
          // exactly as `clear` and `Drop` discard one: the byte wipe below only
          // reaches the slot, so without it the memory a `T` owns (a `String`'s
-         // buffer) would be freed with its plaintext intact.
-         if mem::needs_drop::<T>() {
-            let first = self.current_drain_iter_index;
-            let end = self.drain_end_index;
+         // buffer) would be freed with its plaintext intact. Runs for every `T`,
+         // not only `needs_drop` ones: a `Zeroize` impl may wipe memory outside
+         // the element's own bytes, and `clear`/`Drop` zeroize unconditionally.
+         let first = self.current_drain_iter_index;
+         let end = self.drain_end_index;
 
-            // Covers the unyielded slots the loop has not reached yet, so a destructor
-            // that panics discards them instead of orphaning them. The loop runs from
-            // the back, which is what makes the live set a prefix of `base.add(first)`.
-            let mut discard = InitGuard::<T>::new(base.add(first));
-            discard.set_written(end - first);
+         // Covers the unyielded slots the loop has not reached yet, so a destructor
+         // that panics discards them instead of orphaning them. The loop runs from
+         // the back, which is what makes the live set a prefix of `base.add(first)`.
+         let mut discard = InitGuard::<T>::new(base.add(first));
+         discard.set_written(end - first);
 
-            for index in (first..end).rev() {
-               let slot = base.add(index);
-               // `zeroize` can panic too, so the slot is still the guard's until the
-               // drop below takes ownership of it.
-               discard.set_written(index - first + 1);
-               (*slot).zeroize();
-               discard.set_written(index - first);
-               ptr::drop_in_place(slot);
-            }
-
-            discard.commit();
+         for index in (first..end).rev() {
+            let slot = base.add(index);
+            // `zeroize` can panic too, so the slot is still the guard's until the
+            // drop below takes ownership of it.
+            discard.set_written(index - first + 1);
+            (*slot).zeroize();
+            discard.set_written(index - first);
+            ptr::drop_in_place(slot);
          }
+
+         discard.commit();
 
          let hole_dst_ptr = base.add(self.drain_start_index);
          let tail_src_ptr = base.add(self.drain_end_index);
@@ -1341,6 +1404,9 @@ impl<'a, T: Zeroize> Drain<'a, T> {
          if self.tail_len > 0 {
             ptr::copy(tail_src_ptr, hole_dst_ptr, self.tail_len);
          }
+
+         // The tail now lives at the front of the hole, so the guard must not drop it.
+         tail.disarm();
 
          let new_len = self.drain_start_index + self.tail_len;
 

@@ -181,6 +181,10 @@ pub enum DecodeError {
    /// A length or count varint was malformed, or did not fit a `usize`.
    InvalidVarint,
    /// A length or element count exceeded what the remaining input can hold.
+   ///
+   /// The same error is returned when a document needs more element visits than the
+   /// decoder's work budget allows (only possible for containers of zero-byte element
+   /// types).
    InvalidLength,
    /// A string was not valid UTF-8.
    InvalidUtf8,
