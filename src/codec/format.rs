@@ -119,8 +119,10 @@ pub enum EncodeError {
    /// would leave a length prefix that lies about the payload. That is rejected
    /// here rather than turned into a buffer that decodes subtly wrong.
    ///
-   /// `Serialize` impls derived by `serde` always declare the exact length;
-   /// this catches hand-written ones.
+   /// `Serialize` impls derived by `serde` always declare the exact length, and this
+   /// catches a hand-written one that returns `Err` or writes too many. It does not
+   /// catch one that drops the sink without calling `end`: nothing is left to compare
+   /// the count against, so the declaration stays on the wire as written.
    ElementCountMismatch,
    /// The value's `Serialize` impl asked for something the format cannot express.
    Unsupported(&'static str),
@@ -215,7 +217,8 @@ pub enum DecodeError {
    /// field body.
    Unsupported(&'static str),
    /// The value's `Deserialize` impl rejected the decoded value, or drove the
-   /// codec incorrectly — asking for a map value before a key, for instance.
+   /// codec incorrectly — asking for a struct-map value before its key, for instance
+   /// (a plain `MapAccess` has no such guard).
    ///
    /// Only reachable from a `Deserialize` impl, and it carries no message on
    /// purpose: the text such an impl — and serde's own `unknown_variant` /

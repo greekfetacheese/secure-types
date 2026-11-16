@@ -114,6 +114,9 @@ pub mod Prot {
 
     pub const NoAccess: Ty = libc::PROT_NONE;
     pub const ReadOnly: Ty = libc::PROT_READ;
+    /// `PROT_WRITE`, passed to `mprotect` unchanged. On architectures where a
+    /// writable page is readable this is **not** write-only: a page mapped with it
+    /// can be read back by this process (x86-64 is one).
     pub const WriteOnly: Ty = libc::PROT_WRITE;
     pub const ReadWrite: Ty = libc::PROT_READ | libc::PROT_WRITE;
     pub const Execute: Ty = libc::PROT_EXEC;
@@ -265,6 +268,12 @@ unsafe fn _malloc(size: usize) -> Option<*mut u8> {
 /// types; initialise it before reading it as one. Release the allocation exactly
 /// once with `free` — not `dealloc`, and not `free_memfd_secret` — and do not
 /// read or write outside the region it was allocated for.
+///
+/// The pointer is aligned for `T` only while `align_of::<T>() <= page_size()`. The
+/// user region starts `page_round(size + canary) - size` bytes into the mapping, which
+/// is a multiple of the alignment only when the alignment divides a page — so an
+/// over-aligned `T` gets a misaligned pointer, and writing through it is undefined
+/// behaviour.
 #[inline]
 pub unsafe fn malloc<T>() -> Option<NonNull<T>> {
     _malloc(mem::size_of::<T>()).map(|memptr| {

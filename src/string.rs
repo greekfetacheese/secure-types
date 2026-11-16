@@ -77,9 +77,13 @@ impl SecureString {
    /// Creates a `SecureString` from a `SecureVec<u8>` without checking UTF-8.
    ///
    /// # Safety
-   /// The caller must guarantee `vec` holds valid UTF-8. Violating this breaks
-   /// the `SecureString` invariant and will make `unlock_str`/`char_len`/serde
-   /// panic.
+   ///
+   /// The caller must guarantee `vec` holds valid UTF-8. Violating that is undefined
+   /// behaviour, not only a panic: [`unlock_str`](Self::unlock_str) and
+   /// [`char_len`](Self::char_len) do reject the bytes, but
+   /// [`unlock_str_unchecked`](Self::unlock_str_unchecked) and
+   /// [`char_len_unchecked`](Self::char_len_unchecked) are safe functions that hand
+   /// them straight to `str::from_utf8_unchecked`.
    pub unsafe fn from_utf8_unchecked(vec: SecureVec<u8>) -> SecureString {
       SecureString { vec }
    }
@@ -106,7 +110,9 @@ impl SecureString {
    /// [`delete_text_char_range`](Self::delete_text_char_range).
    ///
    /// # Panics
-   /// Panics if the range is not on UTF-8 char boundaries.
+   ///
+   /// Panics if the range is not on UTF-8 char boundaries, or if its start is past
+   /// its end.
    pub fn drain(&mut self, range: Range<usize>) {
       self.unlock_str(|s| {
          assert!(
@@ -302,6 +308,10 @@ impl SecureString {
          old_byte_len + insert_len
       };
 
+      // Committed after the guard re-locks: the guard holds a shared borrow of
+      // `self.vec`, so the length cannot be written inside its scope. Nothing between
+      // the mutation above and this line can unwind — a failed re-lock aborts — which is
+      // what keeps a stale length off a half-shifted buffer.
       self.vec.len = new_byte_len;
 
       chars_to_insert_count
@@ -353,6 +363,9 @@ impl SecureString {
          }
          new_len
       });
+      // Same shape as `insert_text_at_char_idx`: the mutation happens inside the
+      // guard's scope, the length is committed after it. The shifted prefix is already
+      // valid UTF-8 here, so even a stale length would only expose trailing zeros.
       self.vec.len = new_len;
    }
 }
@@ -443,11 +456,15 @@ impl<'de> serde::Deserialize<'de> for SecureString {
          fn expecting(&self, formatter: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
             write!(formatter, "an utf-8 encoded string")
          }
+         /// The borrowed path, and the one the crate's own codec drives. It goes
+         /// through the fallible constructor for the same reason the owned ones do: a
+         /// failed secure allocation has to be an error out of a `Deserialize` impl,
+         /// not a panic out of a decode.
          fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
          where
             E: serde::de::Error,
          {
-            Ok(SecureString::from(v))
+            secure_string_from_str(v)
          }
 
          fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>

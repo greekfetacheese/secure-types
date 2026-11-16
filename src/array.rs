@@ -465,7 +465,7 @@ where
    where
       T: Clone,
    {
-      debug_assert!(
+      assert!(
          src.len() <= LENGTH,
          "init_from_clone: more elements than the array can hold"
       );
@@ -473,9 +473,9 @@ where
       {
          let _guard = UnlockGuard::new(self);
 
-         // SAFETY: `src.len() == LENGTH` is the caller's contract, so every
-         // `dst.add(i)` is in bounds of this fixed-size allocation, the guard
-         // unprotects it, and `ptr::write` never reads the unwritten destination.
+         // SAFETY: `src.len() <= LENGTH` (asserted above), so every `dst.add(i)` is
+         // in bounds of this fixed-size allocation, the guard unprotects it, and
+         // `ptr::write` never reads the unwritten destination.
          unsafe {
             let dst = self.ptr.as_ptr();
 
