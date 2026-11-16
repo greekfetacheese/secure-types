@@ -93,12 +93,24 @@ unsafe fn _memfd_secret(size: usize) -> Option<*mut u8> {
 
     // mprotect can be used to change protection flag after mmap setup
     // https://www.gnu.org/software/libc/manual/html_node/Memory-Protection.html#index-mprotect
-    _mprotect(base_ptr.add(PAGE_SIZE), PAGE_SIZE, Prot::NoAccess);
-    _mprotect(
+    //
+    // A guard page the platform refuses to install means the region cannot be handed
+    // out; unmap it and report an allocation failure, the channel every other failure
+    // in this function uses.
+    if !mprotect_checked(
+        base_ptr.add(PAGE_SIZE),
+        PAGE_SIZE,
+        Prot::NoAccess,
+        "memfd guard page",
+    ) || !mprotect_checked(
         unprotected_ptr.add(unprotected_size),
         PAGE_SIZE,
         Prot::NoAccess,
-    );
+        "memfd trailing guard",
+    ) {
+        unmap_secretmem(base_ptr, total_size, fd);
+        return None;
+    }
 
     let canary_ptr = unprotected_ptr.add(unprotected_size - size_with_canary);
     let user_ptr = canary_ptr.add(CANARY_SIZE);
@@ -116,7 +128,10 @@ unsafe fn _memfd_secret(size: usize) -> Option<*mut u8> {
         0,
     );
     ptr::write_unaligned(base_ptr.add(MEMFD_TAG_OFFSET) as *mut usize, MEMFD_TAG);
-    _mprotect(base_ptr, PAGE_SIZE, Prot::ReadOnly);
+    if !mprotect_checked(base_ptr, PAGE_SIZE, Prot::ReadOnly, "memfd metadata") {
+        unmap_secretmem(base_ptr, total_size, fd);
+        return None;
+    }
 
     assert_eq!(unprotected_ptr_from_user_ptr(user_ptr), unprotected_ptr);
 
@@ -157,6 +172,24 @@ pub unsafe fn memfd_secret_sized(size: usize) -> Option<NonNull<[u8]>> {
     })
 }
 
+/// Unmaps a `memfd_secret` region and closes its descriptor.
+///
+/// Neither call fails for a region this allocator built, so a failure means a region
+/// or descriptor that is already gone; there is no error channel to report it through,
+/// and leaving either behind would keep the secret alive, so it aborts the way
+/// `free_memfd_secret` always has.
+unsafe fn unmap_secretmem(base_ptr: *mut u8, total_size: usize, fd: libc::c_int) {
+    let res = libc::munmap(base_ptr as *mut libc::c_void, total_size);
+    if res < 0 {
+        abort();
+    }
+
+    let res = libc::close(fd);
+    if res < 0 {
+        abort();
+    }
+}
+
 /// Secure `free` for memfd_secret allocations,
 /// i.e. provides read write access back to mprotect guard pages
 /// and unmaps mmaped secrets
@@ -170,10 +203,9 @@ pub unsafe fn memfd_secret_sized(size: usize) -> Option<NonNull<[u8]>> {
 /// before the descriptor is read or the canary checked, so it cannot close an
 /// unrelated descriptor; a pointer whose metadata page is unreadable also faults
 /// there. The data region is made readable again before the canary is checked, so an
-/// allocation the caller left `mprotect`ed `NoAccess` is freed normally.
+/// allocation the caller left `mprotect`ed `NoAccess` is freed normally. A restore the
+/// platform rejects aborts, for the reason given on `free`.
 pub unsafe fn free_memfd_secret<T: ?Sized>(memptr: NonNull<T>) {
-    use libc::c_void;
-
     let memptr = memptr.as_ptr() as *mut u8;
 
     // get unprotected ptr
@@ -197,7 +229,7 @@ pub unsafe fn free_memfd_secret<T: ?Sized>(memptr: NonNull<T>) {
     // the descriptor here both come from the metadata page, which the caller does not
     // protect.
     let total_size = PAGE_SIZE + PAGE_SIZE + unprotected_size + PAGE_SIZE;
-    _mprotect(base_ptr, total_size, Prot::ReadWrite);
+    mprotect_or_abort(base_ptr, total_size, Prot::ReadWrite, "memfd free restore");
 
     // check
     #[allow(static_mut_refs)]
@@ -211,14 +243,5 @@ pub unsafe fn free_memfd_secret<T: ?Sized>(memptr: NonNull<T>) {
 
     // free
     crate::memzero(unprotected_ptr, unprotected_size);
-
-    let res = libc::munmap(base_ptr as *mut c_void, total_size);
-    if res < 0 {
-        abort();
-    }
-
-    let res = libc::close(fd);
-    if res < 0 {
-        abort();
-    }
+    unmap_secretmem(base_ptr, total_size, fd);
 }
