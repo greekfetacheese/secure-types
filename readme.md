@@ -11,7 +11,7 @@ Currently there are 3 types:
 ## Features
 
 - **Zeroization on Drop**: Memory is wiped when dropped.
-- **Memory locking** (OS only): Pages are `mprotect`ed `PROT_NONE` while the value is idle. They are unprotected only for the operation that needs them — an `unlock*` call; an internal read (`char_len`/`char_len_unchecked`, `Clone`, the `SecureArray`↔`SecureVec` conversions, serde `Serialize`, `encode*`/`encoded_len`); or one of the type's own mutations (`push`, `clear`/`erase`, `drain`, `reserve`, `Drop`). That stops accidental reads, including from this process; it is not a defence against `ptrace` or a debugger. On the malloc path the allocation is also `mlock`ed on a best-effort basis (the call's result is discarded, so hitting `RLIMIT_MEMLOCK` still constructs; Windows: `VirtualLock`) and, where the OS allows it, excluded from core dumps. Linux uses `memfd_secret` when the kernel supports it. See [How memory is locked](#how-memory-is-locked).
+- **Memory locking** (OS only): Pages are `mprotect`ed `PROT_NONE` while the value is idle. They are unprotected only for the operation that needs them — an `unlock*` call; an internal read (`char_len`/`char_len_unchecked`, `Clone`, the `SecureArray`↔`SecureVec` conversions and `TryFrom<SecureVec<u8>> for SecureString`, serde `Serialize`, `encode*`/`encoded_len`); or one of the type's own mutations (`push`, `push_str`, `insert_text_at_char_idx`, `delete_text_char_range`, `clear`/`erase`, `drain`, `reserve`, `Drop`). That stops accidental reads, including from this process; it is not a defence against `ptrace` or a debugger. On the malloc path the allocation is also `mlock`ed on a best-effort basis (the call's result is discarded, so hitting `RLIMIT_MEMLOCK` still constructs; Windows: `VirtualLock`) and, where the OS allows it, excluded from core dumps. Linux uses `memfd_secret` when the kernel supports it. See [How memory is locked](#how-memory-is-locked).
 - **Scoped access**: No `Index`/`Deref` — `secret[0]` does not compile. The contents are read through the `unlock*` closures (the `expose-ptr` testing feature aside). They can still leave the type as an ordinary copy — `drain` yields owned elements, `Clone` duplicates them, and the conversions move them out — so treat those like any other copy of the secret.
 - **Send, not Sync**: Values can move to another thread. Sharing one instance needs an explicit lock (`Arc<Mutex<_>>`); concurrent `unlock` races on page protection.
 - **`no_std`**: Zeroization only. Disable the default features — see [Feature Flags](#feature-flags).
@@ -141,7 +141,7 @@ assert_eq!(payload[0], 0x07);
 
 **Nesting depth.** A recursive type is bounded at 128 depth units: a document nested deeper is refused with `DecodeError::DepthLimit` rather than overflowing the stack. A struct field is framed by its own sub-decoder and an `Option` adds a level of its own, so a recursive struct costs two units per level — about 64 levels, measured (`struct Node { next: Option<Box<Node>> }` accepts 63 and refuses 64).
 
-## See also the [examples](/examples/).
+## See also the [examples](https://github.com/greekfetacheese/secure-types/tree/master/examples).
 
 
 ## Feature Flags
@@ -161,7 +161,7 @@ assert_eq!(payload[0], 0x07);
 
 ## Running tests
 
-Public-API tests live in `tests/` (one integration crate per module). Internals and memory-protection checks live in `src/` unit tests; crash tests that spawn a child live in both `src/` and `tests/` — a fault on locked memory kills the process, so they run in a child. Shared fixtures are in `tests/common/`.
+Public-API tests live in `tests/`: one integration crate per public module, plus the codec sub-suites (`decoder`, `encoder`, `format`, `depth`) and a crate-level file. Internals and memory-protection checks live in `src/` unit tests; crash tests that spawn a child live in both `src/` and `tests/` — a fault on locked memory kills the process, so they run in a child. Shared fixtures are in `tests/common/`.
 
 ```bash
 cargo test                                          # default features

@@ -515,6 +515,8 @@ impl<T: Zeroize> SecureVec<T> {
    /// pages are unprotected once and re-protected when this call returns, so a
    /// nested unlock would re-lock the memory while the inner scope is still
    /// reading it. The same holds for every `unlock*` method.
+   ///
+   /// Aborts with a diagnostic if the memory-protection call fails.
    pub fn unlock<F, R>(&self, f: F) -> R
    where
       F: FnOnce(&SecureVec<T>) -> R,
@@ -524,6 +526,11 @@ impl<T: Zeroize> SecureVec<T> {
    }
 
    /// Immutable access to the `SecureVec` as `&[T]`
+   ///
+   /// The re-entrancy rule of [`unlock`](Self::unlock) applies here: the closure
+   /// must not call another `unlock*` method on this vector.
+   ///
+   /// Aborts with a diagnostic if the memory-protection call fails.
    pub fn unlock_slice<F, R>(&self, f: F) -> R
    where
       F: FnOnce(&[T]) -> R,
@@ -537,6 +544,11 @@ impl<T: Zeroize> SecureVec<T> {
    }
 
    /// Mutable access to the `SecureVec` as `&mut [T]`
+   ///
+   /// The re-entrancy rule of [`unlock`](Self::unlock) applies here: the closure
+   /// must not call another `unlock*` method on this vector.
+   ///
+   /// Aborts with a diagnostic if the memory-protection call fails.
    pub fn unlock_slice_mut<F, R>(&mut self, f: F) -> R
    where
       F: FnOnce(&mut [T]) -> R,
@@ -551,6 +563,11 @@ impl<T: Zeroize> SecureVec<T> {
    }
 
    /// Immutable access to the `SecureVec` as `Iter<T>`
+   ///
+   /// The re-entrancy rule of [`unlock`](Self::unlock) applies here: the closure
+   /// must not call another `unlock*` method on this vector.
+   ///
+   /// Aborts with a diagnostic if the memory-protection call fails.
    pub fn unlock_iter<F, R>(&self, f: F) -> R
    where
       F: FnOnce(core::slice::Iter<T>) -> R,
@@ -566,6 +583,11 @@ impl<T: Zeroize> SecureVec<T> {
    }
 
    /// Mutable access to the `SecureVec` as `IterMut<T>`
+   ///
+   /// The re-entrancy rule of [`unlock`](Self::unlock) applies here: the closure
+   /// must not call another `unlock*` method on this vector.
+   ///
+   /// Aborts with a diagnostic if the memory-protection call fails.
    pub fn unlock_iter_mut<F, R>(&mut self, f: F) -> R
    where
       F: FnOnce(core::slice::IterMut<T>) -> R,
@@ -814,6 +836,9 @@ impl<T: Zeroize> SecureVec<T> {
    /// iterator is leaked with `mem::forget`. Leaking it also skips the compaction, so
    /// the elements in and after the drained range are never dropped and the buffers
    /// they own keep their plaintext.
+   ///
+   /// Every yielded element is an owned copy of the secret: zeroize it when you are
+   /// done with it, like any other copy.
    ///
    /// # Panics
    /// Panics if the starting point is greater than the end point or if the end point

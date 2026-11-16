@@ -15,13 +15,15 @@
 //!
 //! None of those are serde's trait layer — they belong to `serde_json`. A
 //! format we own needs no escaping pass and no `Value`: it builds every error from
-//! a length, an index or a `&'static str`, and the only scratch buffers it
-//! allocates are locked `SecureBytes` (`collect_str`, and containers whose
-//! length is not known up front), which are zeroized on drop. The one
-//! message an impl can influence is discarded rather than rendered in both
-//! directions — serde's own `unknown_variant` / `unknown_field` helpers format
-//! the offending name into it, and a hand-written `Serialize` impl can format
-//! payload into it. Errors are then safe to log, and a test pins that.
+//! a length, an index or a `&'static str`, and the only buffers it allocates for
+//! document bytes are locked `SecureBytes` (`collect_str`, and containers whose
+//! length is not known up front), which are zeroized on drop. The struct-field
+//! frame table is bookkeeping rather than document bytes: an ordinary `Vec<Frame>`
+//! whose entries are zeroized when a struct scope closes and when the encoder
+//! drops. The one message an impl can influence is discarded rather than
+//! rendered in both directions — serde's own `unknown_variant` / `unknown_field`
+//! helpers format the offending name into it, and a hand-written `Serialize` impl
+//! can format payload into it. Errors are then safe to log, and a test pins that.
 //!
 //! # Why serde traits instead of a new trait pair
 //!
@@ -79,6 +81,13 @@
 //! back in. A successful [`encode`] is therefore not on its own a promise that
 //! the value is decodable.
 //!
+//! One more value can encode but not decode: a container of zero-byte element
+//! types (`Vec<()>`, `[(); N]`, a sequence of unit structs). The encoder writes
+//! its element count and no element bytes; the decoder refuses a count larger than
+//! the bytes left, because that bound is what stops a one-byte document from
+//! driving an unbounded number of visits. Only an empty container of that kind
+//! round-trips.
+//!
 //! [`serde::Deserializer::deserialize_ignored_any`] works in exactly one place:
 //! the body of a struct field, which is the only position whose extent is known.
 //! That is what makes "add a field with `#[serde(default)]`" a compatible
@@ -92,8 +101,8 @@
 //! `Vec<u8>` the caller owns — for callers that keep the document in one anyway,
 //! such as a codec tag to prefix it with or an API that only takes `Vec<u8>`,
 //! and would otherwise allocate a [`SecureBytes`] just to copy out of it. Both
-//! go through the same serializer, and every scratch buffer it needs internally
-//! is a [`SecureBytes`], so this only decides where the *result* lives.
+//! go through the same serializer, and its document-byte scratch is always a
+//! [`SecureBytes`], so this only decides where the *result* lives.
 //!
 //! Note that the reader takes a plain `&[u8]` ([`decode_slice`]), so a document
 //! produced into a `Vec` decodes without being copied back into locked memory
@@ -106,7 +115,10 @@
 //! # The wire format
 //!
 //! Integers are little-endian; lengths and counts are unsigned LEB128 varints.
-//! [`FORMAT_VERSION`] is the first byte of every document.
+//! (The encoder always writes the minimal form; the decoder also accepts a
+//! non-minimal form, so two documents can decode to the same value. Compare decoded
+//! values, not document bytes, when identity matters.) [`FORMAT_VERSION`] is the
+//! first byte of every document.
 //!
 //! ```text
 //! unit, unit_struct   := (no bytes)
@@ -231,7 +243,8 @@ where
 /// [`encode`] when the document itself should live in locked, zeroizing memory.
 ///
 /// A failed encoding erases what it appended and leaves `buffer` at its previous
-/// length, so nothing partial survives in a buffer this crate cannot wipe.
+/// length, so no partial document survives in that buffer; growth can still leave a
+/// copy in an allocation the `Vec` abandons, as the Security section above warns.
 pub fn encode_into_vec<T>(buffer: &mut Vec<u8>, value: &T) -> Result<(), EncodeError>
 where
    T: ?Sized + Serialize,

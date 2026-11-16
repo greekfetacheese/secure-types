@@ -61,6 +61,12 @@ pub(crate) fn write_varint<B: Buffer>(buffer: &mut B, value: usize) -> Result<()
 /// [`DecodeError::UnexpectedEnd`] if `buf` ends mid-varint, and
 /// [`DecodeError::InvalidVarint`] if the encoding is longer than
 /// [`MAX_VARINT_LEN`] or carries bits that cannot fit a `usize`.
+///
+/// # Canonicality
+///
+/// Only the encoder writes the minimal LEB128 form; this reader also accepts
+/// non-minimal (overlong) encodings, so a document has no unique byte
+/// representation. Do not use document bytes as an identity value.
 pub(crate) fn read_varint(buf: &[u8], pos: &mut usize) -> Result<usize, DecodeError> {
    let mut result: u64 = 0;
    let mut shift: u32 = 0;
@@ -172,7 +178,9 @@ impl core::error::Error for EncodeError {
 /// hand-written impl, build their text by formatting data read out of the input document,
 /// so keeping it would put payload bytes — a secret included — into whatever logs the error.
 /// Both `Display` and `Debug` are therefore free of input data, unlike serde's
-/// `Unexpected::Str`, which renders the plaintext it was handed.
+/// `Unexpected::Str`, which renders the plaintext it was handed. The single exception
+/// is [`DecodeError::UnsupportedVersion`], which renders the document's version byte —
+/// the format tag, never a secret.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum DecodeError {
@@ -200,6 +208,9 @@ pub enum DecodeError {
    /// is refused instead, and nothing about it is carried.
    DepthLimit,
    /// The input carries a format version this build does not understand.
+   ///
+   /// The byte is the document's first byte; it is the only input byte any error
+   /// renders.
    UnsupportedVersion(u8),
    /// Bytes remained after the top-level value was decoded.
    TrailingBytes {

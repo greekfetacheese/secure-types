@@ -5,8 +5,10 @@
 //! [`SecureBytes`] — locked while unused, zeroized on drop, and with the previous
 //! allocation wiped on growth — while
 //! [`encode_into_vec`](crate::encode_into_vec) writes into a plain `Vec<u8>` the
-//! caller owns. The scratch buffers the encoder needs internally are always
-//! [`SecureBytes`], so no partial document is left in un-wiped memory either way.
+//! caller owns. Its document-byte scratch is always [`SecureBytes`], so no partial
+//! document is left in un-wiped memory either way; the frame table is separate
+//! bookkeeping, an ordinary `Vec<Frame>` whose entries are zeroized when scopes close
+//! and on drop.
 
 use core::fmt;
 

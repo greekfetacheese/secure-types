@@ -74,7 +74,7 @@ unsafe {
 | `malloc_sized` | `unsafe fn malloc_sized(size: usize) -> Option<NonNull<[u8]>>` | Same for a byte slice of `size` bytes. |
 | `free` | `unsafe fn free<T: ?Sized>(memptr: NonNull<T>)` | Checks the allocator tag, restores read/write protection, checks the canary, zeroes through `munlock`, and releases the allocation (`dealloc`; the block returns to the global allocator, which decides whether the pages go back to the OS). Accepts the pointer from `malloc` or `malloc_sized`; a pointer from `free_memfd_secret` aborts on the tag. |
 | `mprotect` | `unsafe fn mprotect<T: ?Sized>(memptr: NonNull<T>, prot: Prot::Ty) -> bool` | Re-protects the whole allocation's data region. Aborts unless the metadata page carries an allocator tag: it is checked before the length is read, and both `malloc` and `memfd_secret` allocations are accepted. |
-| `page_size` | `fn page_size() -> usize` | Safe. The page size the regions above are laid out with: guard-page and `mprotect` granularity, and the unit the data region is rounded up to. It is not a guarantee of the returned pointer's alignment (see *Layout* under [Security notes](#security-notes)). The first call initialises the allocator's page size and canary. |
+| `page_size` | `fn page_size() -> usize` | Safe, but the first call can panic while initialising (see [Security notes](#security-notes)). The page size the regions above are laid out with: guard-page and `mprotect` granularity, and the unit the data region is rounded up to. It is not a guarantee of the returned pointer's alignment (see *Layout* under [Security notes](#security-notes)). |
 | `Prot` | module of constants | Unix: `NoAccess`, `ReadOnly`, `WriteOnly`, `ReadWrite`, `Execute`, `ReadExec`, `WriteExec`, `ReadWriteExec` (raw `libc::c_int`). Windows: `NoAccess`, `ReadOnly`, `ReadWrite`, `WriteCopy`, `Execute`, `ReadExec`, `ReadWriteExec`, `WriteCopyExec`, `Guard`, `NoCache`, `WriteCombine`, and the `PAGE_TARGETS_*` flags (`PAGE_PROTECTION_FLAGS`). |
 
 ```rust
@@ -155,6 +155,10 @@ unrelated descriptor. They are only compiled on Linux: on any other target the
   constant-time `memeq` and call `abort()` on a mismatch; a pointer whose page-aligned
   base is not a plausible allocation also aborts. A corrupted or foreign pointer
   therefore kills the process, it does not return an error.
+- **`page_size` can panic while initialising.** The first call runs `alloc_init`: it panics
+  if `sysconf` reports a page size smaller than the canary/word size, and `getrandom`'s
+  failure is unwrapped; the failed `Once` is poisoned, so every later call (and every
+  allocation) panics too.
 - **`mlock` failure is ignored.** `malloc`/`malloc_sized` call `mlock` and discard its
   return value: the allocation succeeds even when the page could not be locked (for
   example when `RLIMIT_MEMLOCK` is exhausted). Call `mlock` yourself, or check
@@ -188,7 +192,7 @@ unrelated descriptor. They are only compiled on Linux: on any other target the
 
 Forked from [quininer/memsec](https://github.com/quininer/memsec) by quininer kel, from the
 published `memsec` 0.7.0 release at upstream master commit `b4de7b9a` (2025-01-21).
-`LICENSE` is copied verbatim; the four `#[allow(static_mut_refs)]` attributes are
+`LICENSE` is copied verbatim; the five `#[allow(static_mut_refs)]` attributes are
 upstream's, added after 0.7.0 was published. Upstream has been unmaintained since that
 release. This fork keeps the source close to upstream, so upstream fixes can still be
 carried over. The layout and the API are upstream's.
