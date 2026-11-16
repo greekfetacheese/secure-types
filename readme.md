@@ -141,6 +141,8 @@ assert_eq!(payload[0], 0x07);
 
 **Nesting depth.** A recursive type is bounded at 128 depth units: a document nested deeper is refused with `DecodeError::DepthLimit` rather than overflowing the stack. A struct field is framed by its own sub-decoder and an `Option` adds a level of its own, so a recursive struct costs two units per level — about 64 levels, measured (`struct Node { next: Option<Box<Node>> }` accepts 63 and refuses 64).
 
+**Element visits.** Decoding also bounds the total element visits a document may drive to a small multiple of its own byte length, so a compact document built from zero-byte element types (`Vec<Vec<()>>`) is refused with `DecodeError::InvalidLength` instead of taking quadratic time to be rejected.
+
 ## See also the [examples](https://github.com/greekfetacheese/secure-types/tree/master/examples).
 
 

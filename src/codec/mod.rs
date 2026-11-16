@@ -376,6 +376,11 @@ where
 /// `Option` adds a level of its own, so a recursive struct costs two units per level —
 /// about 64 levels — while an enum/newtype chain reaches 128.
 ///
+/// Element visits are bounded too: a document may drive at most a small multiple of
+/// its own byte length in element visits, so a small document built from zero-byte
+/// element types (`Vec<Vec<()>>`) is refused with [`DecodeError::InvalidLength`] instead
+/// of taking quadratic time to be rejected.
+///
 /// # Errors
 ///
 /// Same as [`decode`].

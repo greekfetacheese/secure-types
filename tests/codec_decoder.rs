@@ -3,6 +3,7 @@
 #![cfg(feature = "codec")]
 
 use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
 
 use secure_types::{
    DecodeError, FORMAT_VERSION, SecureArray, SecureBytes, SecureString, SecureVec,
@@ -508,4 +509,29 @@ fn test_wire_names_never_reach_the_error_message() {
    field.push(0x07);
 
    assert_error_is_silent::<DenyUnknown>("struct field name", &field);
+}
+
+/// A document built from nested zero-byte containers is what the visit budget exists
+/// for: without it every level could spend the whole buffer in element visits, so a
+/// document of D bytes drove O(D²) of them before the last count was rejected.
+#[test]
+fn test_visit_budget_refuses_a_nested_zero_byte_container() {
+   let document = encode(&vec![vec![(); 1000]; 1000]);
+   let started = Instant::now();
+
+   let error = document.unlock_slice(secure_types::decode_slice::<Vec<Vec<()>>>);
+   let elapsed = started.elapsed();
+
+   assert!(
+      matches!(&error, Err(DecodeError::InvalidLength)),
+      "the visit budget should have refused the document, got {error:?}"
+   );
+   // A hang guard, not a benchmark: the budget makes the refusal immediate.
+   assert!(
+      elapsed < Duration::from_secs(2),
+      "decoding took {elapsed:?}"
+   );
+
+   // A legitimate zero-byte value costs no visits and still round-trips.
+   assert_eq!(round_trip(&vec![vec![(); 0]]), vec![vec![(); 0]]);
 }
