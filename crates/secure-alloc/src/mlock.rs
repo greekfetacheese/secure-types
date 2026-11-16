@@ -61,6 +61,10 @@ unsafe fn madvise_aligned(addr: *mut u8, len: usize, advice: libc::c_int) {
 ///   DragonFly. That exclusion is best-effort and its failure is not reported.
 /// * Windows `VirtualLock`.
 ///
+/// Both calls work on whole pages: `madvise` takes a page-aligned range, so the range covering
+/// `addr..addr + len` is rounded out to page boundaries, and `mlock` rounds internally. Bytes
+/// that share a page with the range are locked and excluded from dumps along with it.
+///
 /// # Safety
 ///
 /// `addr..addr + len` must be a live mapping owned by the caller and stay mapped
@@ -97,7 +101,9 @@ pub unsafe fn mlock(addr: *mut u8, len: usize) -> bool {
 ///
 /// `addr..addr + len` must be a live, writable mapping owned by the caller and
 /// stay valid for the duration of the call: the range is zeroed (`memzero`)
-/// before it is unlocked. It does not have to be page-aligned.
+/// before it is unlocked. It does not have to be page-aligned, but the unlock and
+/// the restored dump inclusion work on whole pages, so neighbouring bytes in a page
+/// the range shares lose their lock and dump exclusion with it.
 pub unsafe fn munlock(addr: *mut u8, len: usize) -> bool {
     crate::memzero(addr, len);
 

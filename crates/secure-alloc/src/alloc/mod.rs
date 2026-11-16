@@ -65,6 +65,12 @@ unsafe fn alloc_init() {
         panic!("page size too small");
     }
 
+    // `PAGE_MASK` below, every mask derived from it and the `Layout` the aligned allocator is
+    // handed all assume a power of two: `page_size - 1` masks down to a boundary only then,
+    // and `Layout::from_size_align_unchecked` requires it. No supported target reports
+    // anything else, so this is a debug-time tripwire rather than a runtime check.
+    debug_assert!(page_size.is_power_of_two());
+
     let mut canary = [0; CANARY_SIZE];
     getrandom::fill(&mut canary).unwrap();
 
