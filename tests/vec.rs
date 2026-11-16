@@ -1040,6 +1040,33 @@ fn test_drain_discards_the_rest_when_a_destructor_panics() {
    );
 }
 
+static TAIL_ZEROIZED: AtomicUsize = AtomicUsize::new(0);
+static TAIL_DROPPED: AtomicUsize = AtomicUsize::new(0);
+
+/// A `T` whose destructor records both halves of the discard lifecycle and panics once.
+///
+/// Separate from `DrainBomb` so the two drain tests do not share counters: the test
+/// harness runs them in parallel.
+struct TailBomb {
+   index: usize,
+}
+
+impl Zeroize for TailBomb {
+   fn zeroize(&mut self) {
+      TAIL_ZEROIZED.fetch_add(1, Ordering::SeqCst);
+   }
+}
+
+impl Drop for TailBomb {
+   fn drop(&mut self) {
+      TAIL_DROPPED.fetch_add(1, Ordering::SeqCst);
+
+      if self.index == 1 {
+         panic!("element destructor panics");
+      }
+   }
+}
+
 /// `Drain::compact` must also discard the tail it has not moved yet when the discard
 /// loop panics: the copy to the front has not run, so nobody else owns those elements.
 ///
@@ -1047,13 +1074,13 @@ fn test_drain_discards_the_rest_when_a_destructor_panics() {
 /// plaintext forever — a drain range in front of the tail was enough to trigger it.
 #[test]
 fn test_drain_discards_the_tail_when_a_destructor_panics() {
-   DRAIN_ZEROIZED.store(0, Ordering::SeqCst);
-   DRAIN_DROPPED.store(0, Ordering::SeqCst);
+   TAIL_ZEROIZED.store(0, Ordering::SeqCst);
+   TAIL_DROPPED.store(0, Ordering::SeqCst);
 
-   let mut vec: SecureVec<DrainBomb> = SecureVec::new_with_capacity(4).unwrap();
+   let mut vec: SecureVec<TailBomb> = SecureVec::new_with_capacity(4).unwrap();
 
    for index in 0..4 {
-      vec.push(DrainBomb { index });
+      vec.push(TailBomb { index });
    }
 
    // Elements 0..2 stay unyielded and element 1's destructor panics; elements 2..4
@@ -1070,12 +1097,12 @@ fn test_drain_discards_the_tail_when_a_destructor_panics() {
       "the length stays at the drain start"
    );
    assert_eq!(
-      DRAIN_ZEROIZED.load(Ordering::SeqCst),
+      TAIL_ZEROIZED.load(Ordering::SeqCst),
       4,
       "the unyielded range and the tail must both be zeroized"
    );
    assert_eq!(
-      DRAIN_DROPPED.load(Ordering::SeqCst),
+      TAIL_DROPPED.load(Ordering::SeqCst),
       4,
       "the unyielded range and the tail must both be dropped"
    );
