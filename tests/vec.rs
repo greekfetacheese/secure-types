@@ -370,8 +370,9 @@ fn test_erase() {
       assert_eq!(secure.capacity(), 10);
    });
 
-   // `len == 0`, so `unlock_iter` cannot observe the wipe. Pushing again
-   // must not see leftover plaintext in the reused slots.
+   // Reuse after `erase` works, and neither `len` nor `capacity` moved. The wipe
+   // itself is pinned by `test_discarding_elements_zeroizes_and_drops_them` in
+   // `src/vec.rs`, which asserts the zeroize/drop counters on the erase path.
    for i in 0..3 {
       secure.push(i);
    }

@@ -336,6 +336,9 @@ unsafe impl<T: Zeroize + Send> Send for SecureVec<T> {}
 
 impl<T: Zeroize> SecureVec<T> {
    /// Create a new `SecureVec` with a capacity of 1
+   ///
+   /// A zero-sized `T` is rejected with [`Error::SizeCannotBeZero`]: one element of
+   /// it is still zero bytes, which the allocator refuses.
    pub fn new() -> Result<Self, Error> {
       let capacity = 1;
       let size = capacity * mem::size_of::<T>();
@@ -364,7 +367,10 @@ impl<T: Zeroize> SecureVec<T> {
    /// Create a new `SecureVec` with the given capacity
    ///
    /// A capacity of 0 is clamped to 1: the secure allocator rejects a zero-sized
-   /// allocation, so the constructor asks for room for one element instead.
+   /// allocation, so the constructor asks for room for one element instead. The clamp
+   /// only covers a non-zero-sized `T`; one element of a zero-sized `T` is still zero
+   /// bytes, so a zero-sized `T` is rejected with [`Error::SizeCannotBeZero`] rather
+   /// than clamped.
    pub fn new_with_capacity(mut capacity: usize) -> Result<Self, Error> {
       if capacity == 0 {
          capacity = 1;
@@ -1136,13 +1142,15 @@ impl<T: Zeroize> Drop for SecureVec<T> {
 // access locked memory, causing a segfault. This is by design.
 // Always use unlock_slice() / unlock_slice_mut().
 
-/// Upper bound on how much memory a `Deserialize` impl will reserve up front from a
+/// Upper bound on how many elements a `Deserialize` impl will reserve up front from a
 /// format-supplied `size_hint`.
 ///
 /// The hint is advisory and comes from the format, so trusting a huge one would mean
-/// locking that much memory before a single element has been read. The vector still grows
-/// to whatever the real length turns out to be, so a low cap costs nothing but
-/// reallocation.
+/// locking that much memory before a single element has been read. What the cap limits is
+/// the element count handed to [`SecureVec::new_with_capacity`], which multiplies it by
+/// `size_of::<T>()`: 4096 elements pin 4 KiB for a `u8`, 64 KiB for a `u128`, and more
+/// for a user [`SeqElement`] with a large body. The vector still grows to whatever the
+/// real length turns out to be, so a low cap costs nothing but reallocation.
 #[cfg(feature = "serde")]
 const MAX_PREALLOCATION_FROM_SIZE_HINT: usize = 4096;
 
@@ -1209,9 +1217,10 @@ impl<'de> serde::Deserialize<'de> for SecureVec<u8> {
             SecureVec::from_slice(v).map_err(serde::de::Error::custom)
          }
 
-         /// Wipe the owned buffer the format handed over, including when the copy
-         /// panics: a plain `v.zeroize()` after the call runs only on the success and
-         /// error arms, not on the unwind a `T::clone` inside the copy can start.
+         /// Wipe the owned buffer the format handed over, including on an unwind. The
+         /// guard is belt-and-braces for the `u8` copy into the vector below: `u8`'s
+         /// `Clone` cannot panic, so nothing in this visitor can actually unwind, and the
+         /// guard is what would cover a future element type whose `Clone` can.
          fn visit_byte_buf<E>(self, v: Vec<u8>) -> Result<Self::Value, E>
          where
             E: serde::de::Error,

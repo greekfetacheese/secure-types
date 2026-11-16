@@ -2,7 +2,8 @@ use secure_types::SecureArray;
 
 fn main() {
    // Obviously this is an example, you should not hardcode sensitive data in your code
-   // It is better to use the `from_slice_mut` method which takes a mutable slice and zeroizes it afterwards
+   // `from_slice_mut` zeroizes the slice it is given; `from_slice` takes a shared slice
+   // and does not zeroize it.
    let exposed_array: &mut [u8; 3] = &mut [1, 2, 3];
    let mut secure_array = SecureArray::from_slice_mut(exposed_array).unwrap();
 
