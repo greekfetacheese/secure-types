@@ -73,6 +73,7 @@ fn test_supports_memfd_secret() {
    // test alone, so no sibling test opens a `secretmem` descriptor while they are read.
    if std::env::var_os(CHILD).is_some() {
       probe_allocates_and_releases();
+      println!("MEMFD-PROBE-CHILD-OK");
       return;
    }
 
@@ -87,6 +88,12 @@ fn test_supports_memfd_secret() {
    assert!(
       output.status.success(),
       "the memfd_secret probe must release its region and descriptor: {}",
+      String::from_utf8_lossy(&output.stderr)
+   );
+   assert!(
+      String::from_utf8_lossy(&output.stdout).contains("MEMFD-PROBE-CHILD-OK"),
+      "the child never reported success, so the test filter may have missed: stdout: {}, stderr: {}",
+      String::from_utf8_lossy(&output.stdout),
       String::from_utf8_lossy(&output.stderr)
    );
 }
@@ -139,4 +146,26 @@ fn test_array_and_secure_vec_serde_compatibility() {
          assert_eq!(slice, slice2);
       });
    });
+}
+
+/// A zero-sized allocation is refused rather than handed out as a dangling pointer.
+#[test]
+fn test_zero_sized_secure_allocations_are_refused() {
+   use secure_types::{Error, SecureArray, SecureVec};
+
+   let error = SecureVec::<()>::new()
+      .err()
+      .expect("a zero-sized `SecureVec` must be refused");
+   assert!(
+      matches!(error, Error::SizeCannotBeZero),
+      "expected Error::SizeCannotBeZero, got {error:?}"
+   );
+
+   let error = SecureArray::<u8, 0>::empty()
+      .err()
+      .expect("a zero-length `SecureArray` must be refused");
+   assert!(
+      matches!(error, Error::LengthCannotBeZero),
+      "expected Error::LengthCannotBeZero, got {error:?}"
+   );
 }

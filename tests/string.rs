@@ -5,7 +5,7 @@
 #[cfg(feature = "serde")]
 mod common;
 
-use secure_types::{SecureString, SecureVec};
+use secure_types::{Error, SecureString, SecureVec};
 
 #[test]
 fn test_creation() {
@@ -221,7 +221,7 @@ fn test_push_str() {
 }
 
 #[test]
-fn test_unlock_mut() {
+fn test_secure_mut() {
    let hello_world = "Hello, world!";
    let mut string = SecureString::from("Hello, ");
    string.secure_mut(|string| {
@@ -235,4 +235,53 @@ fn test_unlock_mut() {
    string.unlock_str_unchecked(|str| {
       assert_eq!(str, hello_world);
    });
+}
+
+/// The character count differs from the byte count for multibyte text.
+#[test]
+fn test_char_len_of_a_multibyte_string() {
+   let text = "aéλ🦀";
+   let string = SecureString::from(text);
+
+   assert_eq!(string.byte_len(), 9);
+   assert_eq!(string.char_len(), 4);
+   assert_eq!(string.char_len_unchecked(), 4);
+}
+
+/// A string built through the `unsafe` constructor with malformed bytes makes the
+/// safe readers panic rather than hand out invalid `&str`s.
+#[test]
+fn test_safe_readers_panic_on_invalid_utf8() {
+   let bytes: SecureVec<u8> = SecureVec::from_slice(&[0xFF, 0xFE]).unwrap();
+   // SAFETY: deliberately violated — the bytes above are not UTF-8. Only the safe
+   // readers, which validate, are called on the result.
+   let string = unsafe { SecureString::from_utf8_unchecked(bytes) };
+
+   let unlocked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+      string.unlock_str(|_| ())
+   }));
+   assert!(
+      unlocked.is_err(),
+      "`unlock_str` must panic on invalid UTF-8"
+   );
+
+   let counted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| string.char_len()));
+   assert!(
+      counted.is_err(),
+      "`char_len` must panic on invalid UTF-8"
+   );
+}
+
+#[test]
+fn test_try_from_secure_vec_rejects_invalid_utf8() {
+   let bytes: SecureVec<u8> = SecureVec::from_slice(&[0xFF, 0xFE]).unwrap();
+
+   let error = SecureString::try_from(bytes)
+      .err()
+      .expect("invalid UTF-8 must be rejected");
+
+   assert!(
+      matches!(error, Error::InvalidUtf8),
+      "expected Error::InvalidUtf8, got {error:?}"
+   );
 }

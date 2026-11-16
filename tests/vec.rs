@@ -191,7 +191,8 @@ fn test_deserialize_from_owned_byte_buf() {
    use common::OwnedBytes;
    use serde::Deserialize;
 
-   // `visit_byte_buf`: copied into locked memory, then the owned buffer is wiped.
+   // `visit_byte_buf`: copied into locked memory. The owned buffer's wipe runs on
+   // this same path, but it is not observable in-process.
    let secure = SecureVec::<u8>::deserialize(OwnedBytes(vec![1, 2, 3])).unwrap();
 
    secure.unlock_slice(|slice| assert_eq!(slice, &[1, 2, 3]));
@@ -794,9 +795,9 @@ fn test_init_from_clone_panic_zeroizes_written_prefix() {
 /// `from_slice_mut` promises to zeroize the caller's slice, so its wipe cannot sit
 /// after the copy loop: a `T::clone` that panics unwinds straight past it.
 ///
-/// The bound is `T: Clone + DefaultIsZeroes`, i.e. `Copy`, so a hand-written
-/// panicking `Clone` is the only way into this path — and it is exactly the path
-/// that used to leave the caller's buffer untouched.
+/// The bound is `T: Clone` (the type itself carries `T: Zeroize`), so a
+/// hand-written panicking `Clone` is the way into this path — and it is exactly
+/// the path that used to leave the caller's buffer untouched.
 #[test]
 fn test_from_slice_mut_wipes_the_source_when_a_clone_panics() {
    #[derive(Copy, Debug, Default, PartialEq)]
@@ -902,7 +903,12 @@ fn test_a_panicking_destructor_still_frees_the_region() {
       let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(vec))).is_err();
       let after = secretmem_mappings();
 
-      std::process::exit(if panicked && after <= before { 0 } else { 3 });
+      let sound = panicked && after <= before;
+      if sound {
+         println!("VEC-CHILD-OK");
+      }
+
+      std::process::exit(if sound { 0 } else { 3 });
    }
 
    let child = Command::new(std::env::current_exe().unwrap())
@@ -925,6 +931,12 @@ fn test_a_panicking_destructor_still_frees_the_region() {
       output.status.success(),
       "a panicking element destructor must still release the region, but the child exited with {:?}",
       output.status
+   );
+   assert!(
+      String::from_utf8_lossy(&output.stdout).contains("VEC-CHILD-OK"),
+      "the child never reported success, so the test filter may have missed: stdout: {}, stderr: {}",
+      String::from_utf8_lossy(&output.stdout),
+      String::from_utf8_lossy(&output.stderr)
    );
 }
 
