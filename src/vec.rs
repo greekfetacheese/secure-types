@@ -39,7 +39,7 @@ pub(crate) struct UnlockGuard<'a, T: Zeroize> {
 impl<'a, T: Zeroize> UnlockGuard<'a, T> {
    pub(crate) fn new(vec: &'a SecureVec<T>) -> Self {
       let ok = vec.unlock_memory();
-      debug_assert!(ok, "UnlockGuard::new: unlock_memory failed");
+      crate::abort_if_protected(ok, "SecureVec::unlock");
 
       UnlockGuard { vec }
    }
@@ -50,7 +50,7 @@ impl<'a, T: Zeroize> Drop for UnlockGuard<'a, T> {
       let ok = self.vec.lock_memory();
       // Failing to re-lock means the protection is silently gone while the value is
       // still alive, so this is a hard error in every profile.
-      assert!(ok, "UnlockGuard::drop: lock_memory failed");
+      crate::abort_if_protected(ok, "SecureVec::lock");
    }
 }
 
@@ -724,6 +724,11 @@ impl<T: Zeroize> SecureVec<T> {
 
    /// Fallible [`reserve`](Self::reserve). The codec uses this so growth is an
    /// [`Error`] rather than a panic, matching [`EncodeError::Secure`].
+   ///
+   /// The one failure this cannot report is a protection call: the new region is
+   /// re-locked after `self.ptr` and `capacity` have been updated, and returning an
+   /// error there would hand back a live vector with readable pages, so it aborts
+   /// (see `abort_if_protected`).
    pub(crate) fn try_reserve(&mut self, additional: usize) -> Result<(), Error> {
       let required_capacity = self
          .len
@@ -760,7 +765,7 @@ impl<T: Zeroize> SecureVec<T> {
       // updated only after this block.
       unsafe {
          let ok = self.unlock_memory();
-         debug_assert!(ok, "SecureVec::try_reserve: unlock_memory failed");
+         crate::abort_if_protected(ok, "SecureVec::try_reserve");
 
          // Move (not copy) elements to new buffer to support non-Copy T correctly.
          // Using read+write transfers ownership of e.g. Strings.
@@ -786,11 +791,13 @@ impl<T: Zeroize> SecureVec<T> {
          }
       }
 
-      // Update pointer and capacity, then re-lock the new memory region
+      // Update pointer and capacity, then re-lock the new memory region. A failure
+      // here cannot be reported as an error either: returning `Err` would hand back a
+      // live vector whose pages are readable, so this aborts like `Drop` does.
       self.ptr = new_ptr;
       self.capacity = new_capacity;
       let ok = self.lock_memory();
-      assert!(ok, "SecureVec::try_reserve: lock_memory failed");
+      crate::abort_if_protected(ok, "SecureVec::try_reserve");
       Ok(())
    }
 
@@ -883,9 +890,9 @@ impl SecureVec<u8> {
    ///
    /// # Panics
    ///
-   /// Panics if `offset + src.len()` exceeds the current length, or if the
-   /// memory cannot be re-locked afterwards. A patch never grows the vector —
-   /// use [`extend_from_slice`](Self::extend_from_slice) for that.
+   /// Panics if `offset + src.len()` exceeds the current length. Aborts with a
+   /// diagnostic if the memory cannot be re-locked afterwards. A patch never
+   /// grows the vector — use [`extend_from_slice`](Self::extend_from_slice) for that.
    #[cfg(feature = "codec")]
    pub(crate) fn patch_at(&mut self, offset: usize, src: &[u8]) {
       let end = offset
@@ -958,7 +965,7 @@ impl<T: Zeroize> Drop for SecureVec<T> {
       // owns (a `String`'s buffer) and the drop releases that allocation.
       unsafe {
          let ok = self.unlock_memory();
-         debug_assert!(ok, "SecureVec::drop: unlock_memory failed");
+         crate::abort_if_protected(ok, "SecureVec::drop");
 
          let ptr = self.ptr.as_ptr();
 
@@ -1060,7 +1067,7 @@ impl<'de> serde::Deserialize<'de> for SecureVec<u8> {
 
          /// Wipe the owned buffer the format handed over, including when the copy
          /// panics: a plain `v.zeroize()` after the call runs only on the success and
-         /// error arms, not on the unwind that a failed re-lock can start.
+         /// error arms, not on the unwind a `T::clone` inside the copy can start.
          fn visit_byte_buf<E>(self, v: Vec<u8>) -> Result<Self::Value, E>
          where
             E: serde::de::Error,

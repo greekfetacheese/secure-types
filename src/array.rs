@@ -21,7 +21,7 @@ struct UnlockGuard<'a, T: Zeroize, const LENGTH: usize> {
 impl<'a, T: Zeroize, const LENGTH: usize> UnlockGuard<'a, T, LENGTH> {
    fn new(array: &'a SecureArray<T, LENGTH>) -> Self {
       let ok = array.unlock_memory();
-      debug_assert!(ok, "UnlockGuard::new: unlock_memory failed");
+      crate::abort_if_protected(ok, "SecureArray::unlock");
       UnlockGuard { array }
    }
 }
@@ -31,7 +31,7 @@ impl<'a, T: Zeroize, const LENGTH: usize> Drop for UnlockGuard<'a, T, LENGTH> {
       let ok = self.array.lock_memory();
       // Failing to re-lock means the protection is silently gone while the value is
       // still alive, so this is a hard error in every profile.
-      assert!(ok, "UnlockGuard::drop: lock_memory failed");
+      crate::abort_if_protected(ok, "SecureArray::lock");
    }
 }
 
@@ -512,7 +512,7 @@ impl<T: Zeroize, const LENGTH: usize> Drop for SecureArray<T, LENGTH> {
       let _free = unsafe { FreeGuard::new(self.ptr, size) };
 
       let ok = self.unlock_memory();
-      debug_assert!(ok, "SecureArray::drop: unlock_memory failed");
+      crate::abort_if_protected(ok, "SecureArray::drop");
 
       // Only the initialized elements are zeroized and dropped. A
       // partially-initialized array (a panic during `from_slice*` /
@@ -694,7 +694,7 @@ impl<'de, const LENGTH: usize> serde::Deserialize<'de> for SecureArray<u8, LENGT
 
          /// Wipe the owned buffer the format handed over, including when the copy
          /// panics: a plain `v.zeroize()` after the call runs only on the success and
-         /// error arms, not on the unwind that a failed re-lock can start.
+         /// error arms, not on the unwind a `T::clone` inside the copy can start.
          fn visit_byte_buf<E>(self, v: Vec<u8>) -> Result<Self::Value, E>
          where
             E: serde::de::Error,
