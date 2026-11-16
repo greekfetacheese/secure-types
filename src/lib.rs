@@ -391,17 +391,26 @@ pub(crate) fn mprotect<T>(ptr: NonNull<T>, prot: Prot::Ty) -> bool {
 
 /// Aborts when a page-protection change failed.
 ///
-/// `Drop` and the guard types cannot report an error, and the pages are in an
-/// unknown protection state: writing through them can fault halfway through the
-/// drop, after the allocator has already been touched. Aborting with a diagnostic
-/// is deterministic and leaves no silently unprotected value behind.
+/// The guard types, `Drop` and the growth path in `SecureVec::try_reserve` cannot
+/// report an error, and a failed `mprotect` leaves the pages in an unknown
+/// protection state: continuing would touch them and fault halfway through the
+/// operation — mid-drop, or after the allocator has already been touched. Aborting
+/// with a diagnostic is deterministic and leaves no silently unprotected value
+/// behind.
+///
+/// The diagnostic is written with `write` rather than `eprintln!`, which panics when
+/// the write itself fails (a dead stderr pipe): a panic here would unwind out of the
+/// very path this helper exists to keep from unwinding.
 #[cfg(feature = "use_os")]
 pub(crate) fn abort_if_protected(ok: bool, what: &str) {
+   use std::io::Write as _;
+
    if ok {
       return;
    }
 
-   eprintln!(
+   let _ = writeln!(
+      std::io::stderr(),
       "secure-types: {what}: a memory-protection call failed; aborting rather than touching memory in an unknown protection state"
    );
    std::process::abort();
@@ -415,27 +424,44 @@ pub(crate) fn abort_if_protected(_ok: bool, _what: &str) {}
 #[cfg(all(test, feature = "use_os", unix))]
 mod abort_tests {
    use std::os::unix::process::ExitStatusExt;
+   use std::process::Stdio;
 
    #[test]
    fn abort_if_protected_aborts_the_process() {
       const CHILD: &str = "ST_ABORT_IF_PROTECTED_CHILD";
+      const DIAGNOSTIC: &str =
+         "aborting rather than touching memory in an unknown protection state";
 
       if std::env::args().any(|arg| arg == CHILD) {
          crate::abort_if_protected(false, "test");
-         unreachable!("abort_if_protected returned after a failed protection call");
+
+         // Not `unreachable!()`: under `panic = "abort"` a panic is a `SIGABRT` too, so
+         // a helper degraded to `panic!` would still satisfy the signal assertion
+         // below. Exit cleanly and let that assertion name the failure.
+         std::process::exit(1);
       }
 
-      let status = std::process::Command::new(std::env::current_exe().unwrap())
+      let output = std::process::Command::new(std::env::current_exe().unwrap())
          .arg("abort_if_protected_aborts_the_process")
          .arg(CHILD)
          .arg("--nocapture")
-         .status()
+         .stdin(Stdio::null())
+         .output()
          .expect("failed to spawn the child test binary");
 
       assert_eq!(
-         status.signal(),
+         output.status.signal(),
          Some(libc::SIGABRT),
-         "the child must abort with SIGABRT, not panic or exit cleanly: {status:?}"
+         "the child must abort with SIGABRT, not panic or exit cleanly: {:?}",
+         output.status
+      );
+
+      // Captured rather than inherited, so a green run stays quiet; asserting it also
+      // pins the diagnostic, which is the only thing the abort reports.
+      let stderr = String::from_utf8_lossy(&output.stderr);
+      assert!(
+         stderr.contains(DIAGNOSTIC),
+         "the child must print the abort diagnostic to stderr: {stderr:?}"
       );
    }
 }

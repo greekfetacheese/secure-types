@@ -24,7 +24,7 @@ Currently there are 3 types:
 - **Linux**: [memfd_secret](https://man.archlinux.org/man/memfd_secret.2.en) when the kernel supports it. Otherwise [mlock](https://man.archlinux.org/man/mlock.2) and [madvise](https://man.archlinux.org/man/madvise.2) (`MADV_DONTDUMP`) on the malloc path. A `memfd_secret` allocation is not `mlock`ed and is not marked `MADV_DONTDUMP` by `secure-alloc`. Every path still uses `mprotect(PROT_NONE)` whenever the value is idle.
 - **Other Unix** (macOS, FreeBSD, …): [mlock](https://man.archlinux.org/man/mlock.2) plus `mprotect(PROT_NONE)`. FreeBSD/DragonFly also use `madvise(MADV_NOCORE)`. No `memfd_secret`.
 
-`mlock` is best-effort: `secure-alloc` ignores its return value, so hitting `RLIMIT_MEMLOCK` still constructs. `mprotect` failure is `Error::LockFailed`. A protection call that fails while a value is being unlocked, re-locked or dropped aborts the process with a diagnostic instead of touching a page in an unknown protection state — a `Drop` cannot report an error. The one exception is the final re-lock in `SecureVec`'s internal `try_reserve`, which panics because that path is documented to do so.
+`mlock` is best-effort: `secure-alloc` ignores its return value, so hitting `RLIMIT_MEMLOCK` still constructs. `mprotect` failure is `Error::LockFailed` where a constructor can still report it. Every other protection call — unlock, re-lock, the re-lock after a buffer grows, and `Drop` — aborts the process with a diagnostic instead of touching a page in an unknown protection state, because none of those paths can report an error and continuing would leave a live value readable.
 
 ## Usage
 

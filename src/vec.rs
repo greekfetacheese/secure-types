@@ -724,6 +724,11 @@ impl<T: Zeroize> SecureVec<T> {
 
    /// Fallible [`reserve`](Self::reserve). The codec uses this so growth is an
    /// [`Error`] rather than a panic, matching [`EncodeError::Secure`].
+   ///
+   /// The one failure this cannot report is a protection call: the new region is
+   /// re-locked after `self.ptr` and `capacity` have been updated, and returning an
+   /// error there would hand back a live vector with readable pages, so it aborts
+   /// (see `abort_if_protected`).
    pub(crate) fn try_reserve(&mut self, additional: usize) -> Result<(), Error> {
       let required_capacity = self
          .len
@@ -786,11 +791,13 @@ impl<T: Zeroize> SecureVec<T> {
          }
       }
 
-      // Update pointer and capacity, then re-lock the new memory region
+      // Update pointer and capacity, then re-lock the new memory region. A failure
+      // here cannot be reported as an error either: returning `Err` would hand back a
+      // live vector whose pages are readable, so this aborts like `Drop` does.
       self.ptr = new_ptr;
       self.capacity = new_capacity;
       let ok = self.lock_memory();
-      assert!(ok, "SecureVec::try_reserve: lock_memory failed");
+      crate::abort_if_protected(ok, "SecureVec::try_reserve");
       Ok(())
    }
 
@@ -1060,7 +1067,7 @@ impl<'de> serde::Deserialize<'de> for SecureVec<u8> {
 
          /// Wipe the owned buffer the format handed over, including when the copy
          /// panics: a plain `v.zeroize()` after the call runs only on the success and
-         /// error arms, not on the unwind that a failed re-lock can start.
+         /// error arms, not on the unwind a `T::clone` inside the copy can start.
          fn visit_byte_buf<E>(self, v: Vec<u8>) -> Result<Self::Value, E>
          where
             E: serde::de::Error,

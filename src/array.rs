@@ -694,7 +694,7 @@ impl<'de, const LENGTH: usize> serde::Deserialize<'de> for SecureArray<u8, LENGT
 
          /// Wipe the owned buffer the format handed over, including when the copy
          /// panics: a plain `v.zeroize()` after the call runs only on the success and
-         /// error arms, not on the unwind that a failed re-lock can start.
+         /// error arms, not on the unwind a `T::clone` inside the copy can start.
          fn visit_byte_buf<E>(self, v: Vec<u8>) -> Result<Self::Value, E>
          where
             E: serde::de::Error,
