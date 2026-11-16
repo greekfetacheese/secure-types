@@ -85,6 +85,7 @@ fn test_drop_without_initialization_is_sound() {
       // `String` would dereference the allocator's poison bytes.
       let array: SecureArray<String, 4> = SecureArray::empty().unwrap();
       drop(array);
+      println!("ARRAY-CHILD-OK");
       std::process::exit(0);
    }
 
@@ -103,6 +104,12 @@ fn test_drop_without_initialization_is_sound() {
       output.status.success(),
       "Dropping a never-initialized SecureArray must be sound, but the child terminated with {:?}",
       output.status
+   );
+   assert!(
+      String::from_utf8_lossy(&output.stdout).contains("ARRAY-CHILD-OK"),
+      "the child never reported success, so the test filter may have missed: stdout: {}, stderr: {}",
+      String::from_utf8_lossy(&output.stdout),
+      String::from_utf8_lossy(&output.stderr)
    );
 }
 
@@ -130,13 +137,12 @@ fn test_panic_during_partial_init_is_sound() {
       })
       .is_err();
 
-      std::process::exit(
-         if panicked && ZEROIZED.load(Ordering::SeqCst) == 1 {
-            0
-         } else {
-            1
-         },
-      );
+      let sound = panicked && ZEROIZED.load(Ordering::SeqCst) == 1;
+      if sound {
+         println!("ARRAY-CHILD-OK");
+      }
+
+      std::process::exit(if sound { 0 } else { 1 });
    }
 
    let child = Command::new(std::env::current_exe().unwrap())
@@ -154,6 +160,12 @@ fn test_panic_during_partial_init_is_sound() {
       output.status.success(),
       "A panic during partial initialization must be sound, but the child terminated with {:?}",
       output.status
+   );
+   assert!(
+      String::from_utf8_lossy(&output.stdout).contains("ARRAY-CHILD-OK"),
+      "the child never reported success, so the test filter may have missed: stdout: {}, stderr: {}",
+      String::from_utf8_lossy(&output.stdout),
+      String::from_utf8_lossy(&output.stderr)
    );
 }
 
@@ -356,13 +368,14 @@ fn test_deserialize_from_owned_byte_buf() {
    use common::OwnedBytes;
    use serde::Deserialize;
 
-   // `visit_byte_buf`: copied into locked memory, then the owned buffer is wiped.
+   // `visit_byte_buf`: copied into locked memory. The owned buffer's wipe runs on
+   // this same path, but it is not observable in-process.
    let array = SecureArray::<u8, 3>::deserialize(OwnedBytes(vec![1, 2, 3])).unwrap();
 
    array.unlock(|slice| assert_eq!(slice, &[1, 2, 3]));
 
-   // Wrong length still has to return an error. The owned buffer is wiped on
-   // this path too; that wipe is not observable without reading freed memory.
+   // Wrong length still has to return an error. This path wipes the owned buffer
+   // as well, but the wipe is not observable in-process.
    assert!(SecureArray::<u8, 3>::deserialize(OwnedBytes(vec![1, 2])).is_err());
 }
 
@@ -385,13 +398,29 @@ fn test_deserialize_rejects_wrong_length() {
    assert!(from_short_seq.is_err());
 }
 
+/// Rejected as soon as the sequence exceeds `LENGTH`, so the locked buffer never
+/// grows. The reported length is what distinguishes that early return from the
+/// post-loop check: a five-element document into a two-element array reports
+/// `invalid length 3` (the refused third element), not `invalid length 5`.
 #[cfg(feature = "serde")]
 #[test]
 fn test_deserialize_rejects_overlong_seq_early() {
-   // Rejected as soon as it exceeds `LENGTH`, so the locked buffer never grows.
-   let result: Result<SecureArray<u8, 2>, _> = serde_json::from_str("[1,2,3]");
+   let result: Result<SecureArray<u8, 2>, _> = serde_json::from_str("[1,2,3,4,5]");
+   let error = result
+      .err()
+      .expect("an over-long byte sequence must be rejected");
+   assert!(
+      error.to_string().contains("invalid length 3"),
+      "the u8 visitor must reject the third element early, got: {error}"
+   );
 
-   assert!(result.is_err());
+   // The tuple visitor has the same early return, reached through `u16`.
+   let result: Result<SecureArray<u16, 2>, _> = serde_json::from_str("[1,2,3,4,5]");
+   let error = result.err().expect("an over-long tuple must be rejected");
+   assert!(
+      error.to_string().contains("invalid length 3"),
+      "the tuple visitor must reject the third element early, got: {error}"
+   );
 }
 
 // === Test helpers for variety of types (bigger than u8, complex) ===
@@ -647,7 +676,12 @@ fn test_a_panicking_destructor_still_frees_the_region() {
          std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(array))).is_err();
       let after = secretmem_mappings();
 
-      std::process::exit(if panicked && after <= before { 0 } else { 3 });
+      let sound = panicked && after <= before;
+      if sound {
+         println!("ARRAY-CHILD-OK");
+      }
+
+      std::process::exit(if sound { 0 } else { 3 });
    }
 
    let child = Command::new(std::env::current_exe().unwrap())
@@ -670,6 +704,12 @@ fn test_a_panicking_destructor_still_frees_the_region() {
       output.status.success(),
       "a panicking element destructor must still release the region, but the child exited with {:?}",
       output.status
+   );
+   assert!(
+      String::from_utf8_lossy(&output.stdout).contains("ARRAY-CHILD-OK"),
+      "the child never reported success, so the test filter may have missed: stdout: {}, stderr: {}",
+      String::from_utf8_lossy(&output.stdout),
+      String::from_utf8_lossy(&output.stderr)
    );
 }
 

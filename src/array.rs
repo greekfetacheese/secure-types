@@ -101,6 +101,11 @@ impl<T: Zeroize> Drop for SourceWipe<'_, T> {
 /// unlocking the same instance would race (one can relock while the other still
 /// holds a live slice). Share it as `Arc<Mutex<SecureArray<...>>>`.
 ///
+/// ```compile_fail,E0277
+/// fn assert_sync<T: Sync>() {}
+/// assert_sync::<secure_types::SecureArray<u8, 32>>();
+/// ```
+///
 /// # Notes
 ///
 /// If you return a new allocated `[T; LENGTH]` from one of the unlock methods you are responsible for zeroizing the memory.

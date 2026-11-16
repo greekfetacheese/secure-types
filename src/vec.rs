@@ -278,6 +278,11 @@ impl<T: Zeroize> Drop for ValueGuard<T> {
 /// the same instance would race (one can relock while the other still holds a
 /// live slice). Share it as `Arc<Mutex<SecureVec<T>>>`.
 ///
+/// ```compile_fail,E0277
+/// fn assert_sync<T: Sync>() {}
+/// assert_sync::<secure_types::SecureVec<u8>>();
+/// ```
+///
 /// # Notes
 ///
 /// If you return a new allocated `Vec` from one of the unlock methods you are responsible for zeroizing the memory.

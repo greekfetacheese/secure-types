@@ -332,6 +332,21 @@ where
    secure_types::encode(value).unwrap()
 }
 
+/// Appends `value` to `out` as the unsigned LEB128 varint the codec writes.
+fn varint(out: &mut Vec<u8>, mut value: usize) {
+   loop {
+      let byte = (value & 0x7F) as u8;
+      value >>= 7;
+
+      if value == 0 {
+         out.push(byte);
+         return;
+      }
+
+      out.push(byte | 0x80);
+   }
+}
+
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 struct Inner {
    label: String,
@@ -514,12 +529,27 @@ fn test_wire_names_never_reach_the_error_message() {
 /// A document built from nested zero-byte containers is what the visit budget exists
 /// for: without it every level could spend the whole buffer in element visits, so a
 /// document of D bytes drove O(D²) of them before the last count was rejected.
+///
+/// The document is built by hand rather than encoded so the visit budget is the only
+/// bound that stops it: `COUNT` inner vectors of `ELEMENTS` units each consume no
+/// payload bytes, so nothing but `count_visit` ends the decode early. Without the
+/// budget the same bytes drive hundreds of millions of visits before the final count
+/// is rejected.
 #[test]
 fn test_visit_budget_refuses_a_nested_zero_byte_container() {
-   let document = encode(&vec![vec![(); 1000]; 1000]);
-   let started = Instant::now();
+   const COUNT: usize = 20_000;
+   const ELEMENTS: usize = 20_000;
 
-   let error = document.unlock_slice(secure_types::decode_slice::<Vec<Vec<()>>>);
+   // `Vec<Vec<()>>` is the outer count followed by one count per inner vector. A
+   // 40 KB document, but a full unbudgeted decode performs COUNT * ELEMENTS visits.
+   let mut document = vec![FORMAT_VERSION];
+   varint(&mut document, COUNT);
+   for _ in 0..COUNT {
+      varint(&mut document, ELEMENTS);
+   }
+
+   let started = Instant::now();
+   let error = secure_types::decode_slice::<Vec<Vec<()>>>(&document);
    let elapsed = started.elapsed();
 
    assert!(
