@@ -87,9 +87,9 @@ unsafe fn alloc_init() {
 ///
 /// # Panics
 ///
-/// Panics on the first call if the platform page size is too small for the region
-/// layout or if the initial `getrandom` call fails. The failure poisons the `Once`,
-/// so every later call panics as well.
+/// Panics on the first call if the platform page size cannot be read, if it is too
+/// small for the region layout, or if the initial `getrandom` call fails. The failure
+/// poisons the `Once`, so every later call panics as well.
 #[inline]
 pub fn page_size() -> usize {
     ALLOC_INIT.call_once(|| unsafe { alloc_init() });
@@ -176,23 +176,72 @@ pub unsafe fn _mprotect(ptr: *mut u8, len: usize, prot: Prot::Ty) -> bool {
     windows_sys::Win32::System::Memory::VirtualProtect(ptr.cast(), len, prot, old.as_mut_ptr()) != 0
 }
 
-/// Abort when a protection change failed.
+/// Reports a protection change the platform rejected.
 ///
-/// The internal `_mprotect` calls are part of the allocation's safety contract: a
-/// guard page that must fault, a metadata page that must stay read-only, or the
-/// restore that makes the region writable again before `munlock`/`dealloc`. There
-/// is no error channel on those paths, and continuing with the old protection
-/// would silently weaken the allocation, so a failure is fatal like a canary
-/// mismatch.
+/// Best-effort: the write is discarded and cannot stand in the way of what the caller
+/// does next. `writeln!` is used rather than `eprintln!`, which panics when the write
+/// itself fails (a dead stderr pipe) and would turn a rejected protection change into
+/// an unwind.
+#[cfg(any(unix, windows))]
+#[cold]
+#[inline(never)]
+fn mprotect_failed(what: &'static str) {
+    use std::io::Write;
+    let _ = writeln!(std::io::stderr(), "secure-alloc: mprotect failed: {what}");
+}
+
+/// Applies a protection change the allocation paths can still refuse to go on with.
+///
+/// Returns `false` and reports the rejection. The region has not been handed out yet
+/// when these run, so the caller releases it and returns `None` — the same `Option`
+/// channel every other allocation failure uses. A rejected change here is often not a
+/// bug at all: `mprotect` answers `ENOMEM` when the change would split the region past
+/// `vm.max_map_count`, which a caller can recover from.
+#[cfg(any(unix, windows))]
+#[inline]
+unsafe fn mprotect_checked(ptr: *mut u8, len: usize, prot: Prot::Ty, what: &'static str) -> bool {
+    if _mprotect(ptr, len, prot) {
+        return true;
+    }
+
+    mprotect_failed(what);
+    false
+}
+
+/// Aborts when a protection change failed.
+///
+/// `free` and `free_memfd_secret` call this: they return no error, and the restore that
+/// makes the region readable again is a precondition for the canary check and the
+/// zeroization that follow. Continuing with the old protection would touch memory in an
+/// unknown protection state, so a failure is fatal like a tag or canary mismatch.
 #[cfg(any(unix, windows))]
 #[inline]
 unsafe fn mprotect_or_abort(ptr: *mut u8, len: usize, prot: Prot::Ty, what: &'static str) {
-    if !_mprotect(ptr, len, prot) {
-        // Best-effort diagnostic: a failed stderr write must not pre-empt the abort.
-        use std::io::Write;
-        let _ = writeln!(std::io::stderr(), "secure-alloc: mprotect failed: {what}");
+    if !mprotect_checked(ptr, len, prot, what) {
         abort();
     }
+}
+
+/// Releases a region whose protection could not be installed.
+///
+/// `dealloc` is handed the whole block, so no page in it may stay protected: the
+/// allocator may write anywhere in a freed block (a later allocation from that chunk
+/// zeroes it), and a write into a `PROT_NONE` page would fault. The restore covers the
+/// region in one call, which merges the mappings instead of splitting them and is
+/// therefore the least likely `mprotect` to be rejected in turn.
+///
+/// If even that restore is refused, the region is abandoned instead of released: the
+/// allocator never sees a block it cannot write to, and a fault is deferred rather than
+/// carried into whatever runs next. The allocation fails with `None` either way.
+#[cfg(any(unix, windows))]
+#[inline]
+unsafe fn release_region(base_ptr: *mut u8, total_size: usize) {
+    if _mprotect(base_ptr, total_size, Prot::ReadWrite) {
+        free_aligned(base_ptr, total_size);
+        return;
+    }
+
+    mprotect_failed("malloc release restore");
 }
 
 /// Secure `mprotect`.
@@ -267,19 +316,24 @@ unsafe fn _malloc(size: usize) -> Option<*mut u8> {
     let base_ptr = alloc_aligned(total_size)?.as_ptr();
     let unprotected_ptr = base_ptr.add(PAGE_SIZE * 2);
 
-    // mprotect ptr
-    mprotect_or_abort(
+    // A guard page that must fault is part of the allocation's contract, so a change the
+    // platform rejects means the region cannot be handed out. Nothing secret lives here
+    // yet, so release it and report an allocation failure instead of killing the process.
+    if !mprotect_checked(
         base_ptr.add(PAGE_SIZE),
         PAGE_SIZE,
         Prot::NoAccess,
         "malloc guard page",
-    );
-    mprotect_or_abort(
+    ) || !mprotect_checked(
         unprotected_ptr.add(unprotected_size),
         PAGE_SIZE,
         Prot::NoAccess,
         "malloc trailing guard",
-    );
+    ) {
+        release_region(base_ptr, total_size);
+        return None;
+    }
+
     crate::mlock(unprotected_ptr, unprotected_size);
 
     let canary_ptr = unprotected_ptr.add(unprotected_size - size_with_canary);
@@ -292,7 +346,10 @@ unsafe fn _malloc(size: usize) -> Option<*mut u8> {
     // `free_memfd_secret` reads uninitialised metadata or mistakes this header for
     // a `memfd_secret` one.
     ptr::write_unaligned(base_ptr.add(MEMFD_TAG_OFFSET) as *mut usize, NOT_MEMFD_TAG);
-    mprotect_or_abort(base_ptr, PAGE_SIZE, Prot::ReadOnly, "malloc metadata");
+    if !mprotect_checked(base_ptr, PAGE_SIZE, Prot::ReadOnly, "malloc metadata") {
+        release_region(base_ptr, total_size);
+        return None;
+    }
 
     assert_eq!(unprotected_ptr_from_user_ptr(user_ptr), unprotected_ptr);
 
@@ -347,7 +404,9 @@ pub unsafe fn malloc_sized(size: usize) -> Option<NonNull<[u8]>> {
 /// before its length is used rather than on the canary, so it never reaches
 /// `dealloc`; a pointer whose metadata page is unreadable also faults there. The
 /// data region is made readable again before the canary is checked, so an allocation
-/// the caller left `mprotect`ed `NoAccess` is freed normally.
+/// the caller left `mprotect`ed `NoAccess` is freed normally. A restore the platform
+/// rejects aborts: `free` returns no error, and the canary check and the zeroization
+/// must not run against memory in an unknown protection state.
 pub unsafe fn free<T: ?Sized>(memptr: NonNull<T>) {
     let memptr = memptr.as_ptr() as *mut u8;
 
