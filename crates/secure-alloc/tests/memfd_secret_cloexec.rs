@@ -91,7 +91,12 @@ fn secretmem_descriptor_is_close_on_exec() {
         fd
     );
 
+    // Run only this test in the child. Without the filter the whole binary runs there, and the
+    // sibling `memfd_secret_accepts_o_cloexec` opens a `secretmem` descriptor of its own: when
+    // that lands on `fd`, the child's "the descriptor is closed" check fails spuriously.
     let status = Command::new(std::env::current_exe().unwrap())
+        .arg("secretmem_descriptor_is_close_on_exec")
+        .arg("--exact")
         .env(CHILD_FD, fd.to_string())
         .status()
         .expect("failed to execute the test binary");
