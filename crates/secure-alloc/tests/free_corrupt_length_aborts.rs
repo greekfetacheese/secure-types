@@ -11,7 +11,7 @@
 #![cfg(all(unix, feature = "alloc"))]
 
 use std::os::unix::process::ExitStatusExt;
-use std::process::Command;
+use std::process::{Command, Output};
 
 /// Set in the child that corrupts a `malloc` allocation's data-region length.
 const CHILD_MALLOC: &str = "SECURE_ALLOC_FREE_CORRUPT_LENGTH_MALLOC";
@@ -24,22 +24,46 @@ const CHILD_MEMFD: &str = "SECURE_ALLOC_FREE_CORRUPT_LENGTH_MEMFD";
 #[cfg(all(target_os = "linux", feature = "alloc_ext"))]
 const EXIT_MEMFD_UNAVAILABLE: i32 = 77;
 
-fn run_child(test: &str, marker: &str) -> std::process::ExitStatus {
+/// The diagnostic a free writes before it aborts on a length it cannot total.
+///
+/// Built from `usize::MAX` rather than hardcoded so the expected line matches the width of the
+/// platform the suite runs on.
+fn corrupt_length_diagnostic() -> String {
+    let len = usize::MAX;
+    format!("secure-alloc: corrupt allocation header: len {len:#x} overflows the region total")
+}
+
+fn run_child(test: &str, marker: &str) -> Output {
     Command::new(std::env::current_exe().unwrap())
         .arg(test)
         .arg("--exact")
         .arg("--nocapture")
         .env(marker, "1")
-        .status()
+        .output()
         .expect("failed to execute the test binary")
 }
 
-fn assert_aborted(status: std::process::ExitStatus) {
+fn stderr_of(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+/// The child must abort *and* say why: the abort itself does not distinguish the length check
+/// from the tag and canary aborts, which print nothing.
+fn assert_aborted(output: &Output, expected: &str) {
+    let stderr = stderr_of(output);
+
     assert_eq!(
-        status.signal(),
+        output.status.signal(),
         Some(libc::SIGABRT),
-        "expected the child to abort, got {:?}",
-        status
+        "expected the child to abort, got {:?}: {}",
+        output.status,
+        stderr
+    );
+    assert!(
+        stderr.contains(expected),
+        "the child must report the length it rejected ({:?}): {}",
+        expected,
+        stderr
     );
 }
 
@@ -82,10 +106,12 @@ fn free_aborts_on_a_region_length_that_would_wrap() {
         std::process::exit(3);
     }
 
-    assert_aborted(run_child(
+    let output = run_child(
         "free_aborts_on_a_region_length_that_would_wrap",
         CHILD_MALLOC,
-    ));
+    );
+
+    assert_aborted(&output, &corrupt_length_diagnostic());
 }
 
 #[cfg(all(target_os = "linux", feature = "alloc_ext"))]
@@ -104,17 +130,17 @@ fn free_memfd_secret_aborts_on_a_region_length_that_would_wrap() {
         std::process::exit(3);
     }
 
-    let status = run_child(
+    let output = run_child(
         "free_memfd_secret_aborts_on_a_region_length_that_would_wrap",
         CHILD_MEMFD,
     );
 
     // The child makes its own allocation: if the kernel or the sandbox refuses
     // `memfd_secret`, it reports that instead of aborting and the parent skips.
-    if status.code() == Some(EXIT_MEMFD_UNAVAILABLE) {
+    if output.status.code() == Some(EXIT_MEMFD_UNAVAILABLE) {
         eprintln!("skipping: memfd_secret is unavailable in the child");
         return;
     }
 
-    assert_aborted(status);
+    assert_aborted(&output, &corrupt_length_diagnostic());
 }
