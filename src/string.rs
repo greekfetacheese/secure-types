@@ -83,7 +83,8 @@ impl SecureString {
    /// [`char_len`](Self::char_len) do reject the bytes, but
    /// [`unlock_str_unchecked`](Self::unlock_str_unchecked) and
    /// [`char_len_unchecked`](Self::char_len_unchecked) are safe functions that hand
-   /// them straight to `str::from_utf8_unchecked`.
+   /// them straight to `str::from_utf8_unchecked`, and so does the safe
+   /// [`delete_text_char_range`](Self::delete_text_char_range).
    pub unsafe fn from_utf8_unchecked(vec: SecureVec<u8>) -> SecureString {
       SecureString { vec }
    }
@@ -189,6 +190,8 @@ impl SecureString {
    /// when this call returns, so a nested unlock re-locks the memory while this
    /// closure is still reading it, and the read faults. Use the `&str` you were
    /// given instead, or measure before/after the call.
+   ///
+   /// Aborts with a diagnostic if the memory-protection call fails.
    pub fn unlock_str<F, R>(&self, f: F) -> R
    where
       F: FnOnce(&str) -> R,
@@ -208,6 +211,8 @@ impl SecureString {
    /// that are not valid UTF-8; keeping that promise is the caller's job.
    ///
    /// The re-entrancy rule of [`unlock_str`](Self::unlock_str) applies here too.
+   ///
+   /// Aborts with a diagnostic if the memory-protection call fails.
    pub fn unlock_str_unchecked<F, R>(&self, f: F) -> R
    where
       F: FnOnce(&str) -> R,
@@ -321,6 +326,11 @@ impl SecureString {
    ///
    /// `char_range` is a char range, not a byte range — unlike
    /// [`drain`](Self::drain), which takes byte offsets.
+   ///
+   /// An out-of-range index is clamped to the string's character length rather than
+   /// rejected: a range whose start is past the end is a no-op, and one whose end is
+   /// past the end deletes through the end of the string. This matches the
+   /// text-field behaviour the method was written for.
    ///
    /// # Example
    ///
@@ -503,8 +513,9 @@ impl<'de> serde::Deserialize<'de> for SecureString {
 /// Maps a character index to a byte index.
 ///
 /// An index at or past the end of the string resolves to the string's *length*, so callers
-/// clamp rather than fail: `insert_text_at_char_idx` appends and `delete_text_char_range`
-/// becomes a no-op. That has been the behaviour since the first release, and it matches what
+/// clamp rather than fail: `insert_text_at_char_idx` appends, an out-of-range start makes
+/// `delete_text_char_range` a no-op, and an out-of-range end makes it delete through the end
+/// of the string. That has been the behaviour since the first release, and it matches what
 /// the callers expect (Zeus's text field behaves the same way over egui's `TextEdit`), so it
 /// is kept deliberately. Revisit if an out-of-range index should be rejected instead.
 fn char_to_byte_idx(s_bytes: &[u8], char_idx: usize) -> usize {

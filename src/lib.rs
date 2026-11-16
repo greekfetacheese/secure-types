@@ -45,6 +45,10 @@ pub enum Error {
    SizeCannotBeZero,
    NullAllocation,
    LockFailed,
+   /// Kept for API compatibility: no operation returns this variant any more. A failed
+   /// unlock aborts the process with a diagnostic (see the crate README) rather than
+   /// reporting an error, because continuing would touch memory in an unknown protection
+   /// state.
    UnlockFailed,
    LengthMismatch,
    InvalidUtf8,

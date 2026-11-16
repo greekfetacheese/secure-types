@@ -76,6 +76,12 @@ unsafe fn alloc_init() {
 /// `malloc_sized` and `memfd_secret_sized` carry no such guarantee, and neither
 /// does an over-aligned `T`, so a result that needs a stronger alignment has to
 /// be checked.
+///
+/// # Panics
+///
+/// Panics on the first call if the platform page size is too small for the region
+/// layout or if the initial `getrandom` call fails. The failure poisons the `Once`,
+/// so every later call panics as well.
 #[inline]
 pub fn page_size() -> usize {
     ALLOC_INIT.call_once(|| unsafe { alloc_init() });

@@ -399,6 +399,15 @@ where
    /// The slice covers exactly the elements that have been initialized: `LENGTH`
    /// for any array built through a constructor or `unlock_mut`, and empty for
    /// an [`empty`](Self::empty) array that was never filled (see its contract).
+   ///
+   /// # Re-entrancy
+   ///
+   /// The closure must not call another `unlock*` method on this array: the pages
+   /// are unprotected once and re-protected when this call returns, so a nested
+   /// unlock re-locks the memory while this closure is still reading it, and the
+   /// read faults.
+   ///
+   /// Aborts with a diagnostic if the memory-protection call fails.
    pub fn unlock<F, R>(&self, f: F) -> R
    where
       F: FnOnce(&[T]) -> R,
@@ -424,6 +433,11 @@ where
    /// as a `T`, which is undefined behaviour. Build the array with
    /// [`from_slice`](Self::from_slice), [`from_slice_mut`](Self::from_slice_mut),
    /// [`from_fn`](Self::from_fn), `Clone` or `TryFrom` instead.
+   ///
+   /// The re-entrancy rule of [`unlock`](Self::unlock) applies here: the closure
+   /// must not call another `unlock*` method on this array.
+   ///
+   /// Aborts with a diagnostic if the memory-protection call fails.
    pub fn unlock_mut<F, R>(&mut self, f: F) -> R
    where
       F: FnOnce(&mut [T]) -> R,
@@ -442,6 +456,8 @@ where
    }
 
    /// Securely erases the contents of the array by zeroizing the initialized elements.
+   ///
+   /// Aborts with a diagnostic if the memory-protection call fails.
    pub fn erase(&mut self) {
       let _guard = UnlockGuard::new(self);
 
@@ -623,6 +639,11 @@ impl<T: Clone + Zeroize, const LENGTH: usize> TryFrom<Vec<T>> for SecureArray<T,
 /// `Deserialize` impl below. Formats that support byte buffers get the contents in one
 /// piece rather than element by element; `serde_json` renders either form as an array of
 /// numbers, so its output is unchanged.
+///
+/// An [`empty`](SecureArray::empty) array holds no initialized slots, so it serializes as
+/// an empty byte string; the `Deserialize` impl below requires exactly `LENGTH` bytes and
+/// refuses that document. Build the array with a constructor (or `Clone`) when it must
+/// round-trip; the tuple impl below documents the same asymmetry for non-`u8` element types.
 #[cfg(feature = "serde")]
 impl<const LENGTH: usize> serde::Serialize for SecureArray<u8, LENGTH> {
    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>

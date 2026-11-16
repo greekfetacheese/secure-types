@@ -10,9 +10,11 @@ use crate::SecureBytes;
 /// ordinary `String`/`Vec` that nothing zeroizes, and `impl Serialize` cannot wipe
 /// that buffer for you — a `Serialize` impl only ever sees a generic
 /// `serde::Serializer`. Building the serializer around this writer instead keeps the
-/// only heap copy of the plaintext in memory that is locked while unused and zeroized
-/// on drop. Growth cannot leave a stale copy behind either: `SecureVec::reserve`
-/// zeroizes the old allocation after moving the elements.
+/// plaintext it hands over out of ordinary memory: the bytes it receives are written
+/// straight into locked, zeroizing storage. Growth cannot leave a stale copy behind
+/// either: `SecureVec::reserve` zeroizes the old allocation after moving the elements.
+/// A serializer that materialises a plaintext copy before writing it is still its own
+/// exposure.
 ///
 /// # Example
 ///
@@ -32,6 +34,9 @@ use crate::SecureBytes;
 ///
 /// The `codec` feature's `encode` writes its own format into locked memory; this writer is
 /// for pointing some *other* serializer at locked memory.
+///
+/// This writer is compiled only with the `use_os` feature, like the rest of the OS-backed
+/// API.
 pub struct SecureBytesWriter<'a> {
    bytes: &'a mut SecureBytes,
 }
