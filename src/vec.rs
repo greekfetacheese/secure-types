@@ -155,6 +155,58 @@ impl<T> Drop for FreeGuard<T> {
       }
    }
 }
+/// Zeroizes and drops a `Drain`'s not-yet-moved tail if compaction unwinds first.
+///
+/// `Drain::compact` discards the unyielded drained elements before it copies the tail
+/// down. A destructor that panics in that loop unwinds past the copy, so without this
+/// guard the tail elements are owned by nobody: their `Drop` never runs and the buffers
+/// they own keep their plaintext. The guard is armed until the copy has moved them.
+struct TailGuard<T: Zeroize> {
+   base: *mut T,
+   start: usize,
+   len: usize,
+   armed: bool,
+}
+
+impl<T: Zeroize> TailGuard<T> {
+   /// # Safety
+   ///
+   /// `base.add(start .. start + len)` must be live, initialized `T` slots of the
+   /// allocation the caller has unprotected, and nothing else may drop them while this
+   /// guard is armed.
+   unsafe fn new(base: *mut T, start: usize, len: usize) -> Self {
+      TailGuard {
+         base,
+         start,
+         len,
+         armed: true,
+      }
+   }
+
+   /// Hands the tail to the caller once the copy has moved it.
+   fn disarm(&mut self) {
+      self.armed = false;
+   }
+}
+
+impl<T: Zeroize> Drop for TailGuard<T> {
+   fn drop(&mut self) {
+      if !self.armed {
+         return;
+      }
+
+      for offset in (0..self.len).rev() {
+         // SAFETY: the constructor proved the range live; the guard is declared after
+         // the `UnlockGuard`, so it is dropped while the pages are still open, and each
+         // slot is zeroized and dropped exactly once.
+         unsafe {
+            let slot = self.base.add(self.start + offset);
+            (*slot).zeroize();
+            ptr::drop_in_place(slot);
+         }
+      }
+   }
+}
 
 /// A securely allocated, growable vector, just like `std::vec::Vec`.
 ///
@@ -1305,11 +1357,18 @@ impl<'a, T: Zeroize> Drain<'a, T> {
       let _guard = UnlockGuard::new(&*self.vec_ref);
 
       // SAFETY: the guard unprotects the live vector. Every index is within the
-      // original length; unyielded drain-range elements are zeroized and then
-      // dropped exactly once, the tail is moved (not copied) into the hole, and
-      // the leftover slots hold only moved-from / duplicate bit patterns — wiped
-      // as bytes, never reinterpreted as a `T`.
+      // original length; unyielded drain-range elements and the not-yet-moved tail
+      // are zeroized and then dropped exactly once (each by its own guard), the tail
+      // is moved (not copied) into the hole, and the leftover slots hold only
+      // moved-from / duplicate bit patterns — wiped as bytes, never reinterpreted as
+      // a `T`.
       unsafe {
+         // The tail elements are still owned by nobody until the copy below moves them
+         // down: if a destructor in the discard loop panics, this guard zeroizes and
+         // drops them while the pages are open. The loop's `InitGuard` covers the
+         // drained range; this covers everything after it.
+         let mut tail = TailGuard::<T>::new(base, self.drain_end_index, self.tail_len);
+
          // Discard drain-range elements that were never yielded. `next` already
          // `ptr::read` them out to the caller; dropping those again would
          // double-free. Each unyielded element is zeroized before it is dropped,
@@ -1345,6 +1404,9 @@ impl<'a, T: Zeroize> Drain<'a, T> {
          if self.tail_len > 0 {
             ptr::copy(tail_src_ptr, hole_dst_ptr, self.tail_len);
          }
+
+         // The tail now lives at the front of the hole, so the guard must not drop it.
+         tail.disarm();
 
          let new_len = self.drain_start_index + self.tail_len;
 

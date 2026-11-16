@@ -1040,6 +1040,47 @@ fn test_drain_discards_the_rest_when_a_destructor_panics() {
    );
 }
 
+/// `Drain::compact` must also discard the tail it has not moved yet when the discard
+/// loop panics: the copy to the front has not run, so nobody else owns those elements.
+///
+/// Without a guard the tail's destructor never ran and the buffers it owned kept their
+/// plaintext forever — a drain range in front of the tail was enough to trigger it.
+#[test]
+fn test_drain_discards_the_tail_when_a_destructor_panics() {
+   DRAIN_ZEROIZED.store(0, Ordering::SeqCst);
+   DRAIN_DROPPED.store(0, Ordering::SeqCst);
+
+   let mut vec: SecureVec<DrainBomb> = SecureVec::new_with_capacity(4).unwrap();
+
+   for index in 0..4 {
+      vec.push(DrainBomb { index });
+   }
+
+   // Elements 0..2 stay unyielded and element 1's destructor panics; elements 2..4
+   // are the tail the compaction had not moved down yet.
+   let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+      drop(vec.drain(0..2));
+   }))
+   .is_err();
+
+   assert!(panicked, "the destructor was supposed to panic");
+   assert_eq!(
+      vec.len(),
+      0,
+      "the length stays at the drain start"
+   );
+   assert_eq!(
+      DRAIN_ZEROIZED.load(Ordering::SeqCst),
+      4,
+      "the unyielded range and the tail must both be zeroized"
+   );
+   assert_eq!(
+      DRAIN_DROPPED.load(Ordering::SeqCst),
+      4,
+      "the unyielded range and the tail must both be dropped"
+   );
+}
+
 static DROP_ZEROIZED: AtomicUsize = AtomicUsize::new(0);
 static DROP_DROPPED: AtomicUsize = AtomicUsize::new(0);
 
