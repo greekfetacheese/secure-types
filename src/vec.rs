@@ -208,6 +208,40 @@ impl<T: Zeroize> Drop for TailGuard<T> {
    }
 }
 
+/// Zeroizes an owned element that is dropped before the container takes it.
+///
+/// `push` moves its argument into the vector, but `reserve` runs first and panics
+/// when the growth allocation fails; the unwind would drop the value without
+/// zeroizing it. The guard owns the value across that call and is disarmed by
+/// `take` only once the value has been written into the allocation.
+///
+/// A `T::zeroize` that panics deterministically aborts through the double-panic rule:
+/// this guard drops during the unwind from `reserve`, so a second unwind is not
+/// possible.
+struct ValueGuard<T: Zeroize>(Option<T>);
+
+impl<T: Zeroize> ValueGuard<T> {
+   fn new(value: T) -> Self {
+      Self(Some(value))
+   }
+
+   /// Disarms the guard and hands the value back, exactly once.
+   fn take(mut self) -> T {
+      self
+         .0
+         .take()
+         .expect("ValueGuard::take: value already taken")
+   }
+}
+
+impl<T: Zeroize> Drop for ValueGuard<T> {
+   fn drop(&mut self) {
+      if let Some(value) = self.0.as_mut() {
+         value.zeroize();
+      }
+   }
+}
+
 /// A securely allocated, growable vector, just like `std::vec::Vec`.
 ///
 /// ## Security Model
@@ -716,8 +750,12 @@ impl<T: Zeroize> SecureVec<T> {
    ///
    /// Panics if the vector has to grow and the new capacity overflows `usize` or
    /// the allocation fails — the contract of [`reserve`](Self::reserve), which this
-   /// calls first.
+   /// calls first. The value that was moved in is zeroized before it is dropped, so
+   /// a failed growth leaves no plaintext in the freed buffer.
    pub fn push(&mut self, value: T) {
+      // The guard owns the value across `reserve`: a panic there would otherwise drop
+      // it un-zeroized, and a heap-owning element would free its plaintext with it.
+      let value = ValueGuard::new(value);
       self.reserve(1);
 
       let dst = self.ptr.as_ptr();
@@ -728,9 +766,10 @@ impl<T: Zeroize> SecureVec<T> {
 
          // SAFETY: `write_at == self.len` and `reserve(1)` above guaranteed
          // `len < capacity`, so the slot is in bounds; it is uninitialised, and
-         // `ptr::write` does not read it. `value` is moved in exactly once.
+         // `ptr::write` does not read it. `value.take()` hands the value over exactly
+         // once and disarms the guard before the write.
          unsafe {
-            core::ptr::write(dst.add(write_at), value);
+            core::ptr::write(dst.add(write_at), value.take());
          }
       }
 
@@ -1942,6 +1981,166 @@ mod tests {
          CLONE_DROPPED.load(Ordering::SeqCst),
          1,
          "the element appended before the panic must be dropped"
+      );
+   }
+
+   /// Set in the child that answers `mprotect` with `ENOMEM`, so the growing push fails
+   /// the allocation it makes before it unlocks.
+   #[cfg(all(target_os = "linux", feature = "use_os"))]
+   const PUSH_GUARD_CHILD: &str = "ST_PUSH_GUARD_CHILD";
+
+   /// Printed only after the child's assertions pass. The parent requires it: a
+   /// status-only check would accept a child that skipped the counters.
+   #[cfg(all(target_os = "linux", feature = "use_os"))]
+   const PUSH_GUARD_SENTINEL: &str = "PUSH-GUARD-CHILD-OK";
+
+   /// Exit code for a filter that could not be installed, so the parent can skip.
+   #[cfg(all(target_os = "linux", feature = "use_os"))]
+   const EXIT_SECCOMP_UNAVAILABLE: i32 = 77;
+
+   /// `SECCOMP_RET_ALLOW` and `SECCOMP_RET_ERRNO`, from `linux/seccomp.h`.
+   #[cfg(all(target_os = "linux", feature = "use_os"))]
+   const SECCOMP_RET_ALLOW: u32 = 0x7fff_0000;
+   #[cfg(all(target_os = "linux", feature = "use_os"))]
+   const SECCOMP_RET_ERRNO: u32 = 0x0005_0000;
+
+   /// `SECCOMP_MODE_FILTER`, from `linux/seccomp.h`.
+   #[cfg(all(target_os = "linux", feature = "use_os"))]
+   const SECCOMP_MODE_FILTER: libc::c_ulong = 2;
+
+   /// cBPF opcodes from `linux/filter.h`: `BPF_LD | BPF_W | BPF_ABS`,
+   /// `BPF_JMP | BPF_JEQ | BPF_K` and `BPF_RET | BPF_K`.
+   #[cfg(all(target_os = "linux", feature = "use_os"))]
+   const BPF_LD_ABS_W: u16 = 0x20;
+   #[cfg(all(target_os = "linux", feature = "use_os"))]
+   const BPF_JEQ_K: u16 = 0x15;
+   #[cfg(all(target_os = "linux", feature = "use_os"))]
+   const BPF_RET_K: u16 = 0x06;
+
+   /// Offset of the syscall number in `struct seccomp_data`.
+   #[cfg(all(target_os = "linux", feature = "use_os"))]
+   const SECCOMP_DATA_NR: u32 = 0;
+
+   #[cfg(all(target_os = "linux", feature = "use_os"))]
+   fn stmt(code: u16, k: u32) -> libc::sock_filter {
+      libc::sock_filter {
+         code,
+         jt: 0,
+         jf: 0,
+         k,
+      }
+   }
+
+   #[cfg(all(target_os = "linux", feature = "use_os"))]
+   fn jump(code: u16, k: u32, jt: u8, jf: u8) -> libc::sock_filter {
+      libc::sock_filter { code, jt, jf, k }
+   }
+
+   /// Installs a filter that answers `mprotect` with `ENOMEM`.
+   ///
+   /// Returns `false` when the kernel or the sandbox refuses the filter, rather than
+   /// asserting: the caller turns that into a skip.
+   #[cfg(all(target_os = "linux", feature = "use_os"))]
+   fn deny_mprotect() -> bool {
+      let rejected = SECCOMP_RET_ERRNO | libc::ENOMEM as u32;
+      let mprotect = libc::SYS_mprotect as u32;
+
+      let filter = [
+         stmt(BPF_LD_ABS_W, SECCOMP_DATA_NR),
+         jump(BPF_JEQ_K, mprotect, 0, 1),
+         stmt(BPF_RET_K, rejected),
+         stmt(BPF_RET_K, SECCOMP_RET_ALLOW),
+      ];
+
+      let prog = libc::sock_fprog {
+         len: filter.len() as u16,
+         filter: filter.as_ptr() as *mut libc::sock_filter,
+      };
+
+      // SAFETY: both calls take integers and a pointer to a filter that outlives them,
+      // and the filter is a well-formed four-statement cBPF program.
+      unsafe {
+         if libc::prctl(
+            libc::PR_SET_NO_NEW_PRIVS,
+            1 as libc::c_ulong,
+            0,
+            0,
+            0,
+         ) != 0
+         {
+            return false;
+         }
+
+         libc::prctl(
+            libc::PR_SET_SECCOMP,
+            SECCOMP_MODE_FILTER,
+            &prog as *const libc::sock_fprog,
+         ) == 0
+      }
+   }
+
+   /// A push that fails to grow must not drop its argument un-zeroized: the value was
+   /// moved into the call, so the unwind from `reserve` must zeroize it before it frees
+   /// a heap-owning element's buffer.
+   ///
+   /// The child installs a seccomp filter that answers `mprotect` with `ENOMEM` after the
+   /// vector exists — an unlock/lock pair is an `mprotect` too, and a rejected one aborts —
+   /// so the second push's allocation fails and its unwind owns the value.
+   #[cfg(all(target_os = "linux", feature = "use_os"))]
+   #[test]
+   fn test_push_zeroizes_value_when_growth_panics() {
+      if std::env::var_os(PUSH_GUARD_CHILD).is_some() {
+         let mut vec = SecureVec::<Owned>::new().unwrap();
+         vec.push(Owned(1));
+
+         if !deny_mprotect() {
+            std::process::exit(EXIT_SECCOMP_UNAVAILABLE);
+         }
+
+         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            vec.push(Owned(2))
+         }));
+         let (zeroized, dropped) = counts();
+
+         if result.is_err() && zeroized == 1 && dropped == 1 {
+            // The vector is deliberately leaked: its `Drop` re-locks under the filter,
+            // and a protection call that fails aborts.
+            println!("{PUSH_GUARD_SENTINEL}");
+            std::process::exit(0);
+         }
+
+         eprintln!(
+            "PUSH-GUARD-CHILD push_result_is_err={} zeroized={zeroized} dropped={dropped}",
+            result.is_err()
+         );
+         std::process::exit(3);
+      }
+
+      let output = Command::new(std::env::current_exe().unwrap())
+         .arg("vec::tests::test_push_zeroizes_value_when_growth_panics")
+         .arg("--exact")
+         .arg("--nocapture")
+         .env(PUSH_GUARD_CHILD, "1")
+         .stdin(Stdio::null())
+         .output()
+         .expect("failed to spawn the child test binary");
+
+      if output.status.code() == Some(EXIT_SECCOMP_UNAVAILABLE) {
+         eprintln!("skipping: the seccomp filter could not be installed");
+         return;
+      }
+
+      let stdout = String::from_utf8_lossy(&output.stdout);
+      let stderr = String::from_utf8_lossy(&output.stderr);
+
+      assert!(
+         output.status.success(),
+         "the child must report the zeroized value, got {:?}\nstdout: {stdout:?}\nstderr: {stderr:?}",
+         output.status
+      );
+      assert!(
+         stdout.contains(PUSH_GUARD_SENTINEL),
+         "the child must print {PUSH_GUARD_SENTINEL:?}, got stdout {stdout:?}\nstderr: {stderr:?}"
       );
    }
 }
