@@ -80,17 +80,43 @@ impl<B: Buffer> Drop for Encoder<'_, B> {
 ///
 /// A failure leaves nothing behind: whatever was appended before the error is
 /// erased by [`Buffer::rollback`], and `buffer` is left exactly as it was.
+/// Restores a buffer to its pre-encoding length when the encoding stops early.
+///
+/// The rollback has to be part of the unwind path: a caller `Serialize` impl that
+/// panics unwinds past a plain `if result.is_err()` check and leaves the version
+/// byte, the declared count and every field written so far in the sink. The guard
+/// owns the buffer for the whole encoding, so both `Err` and a panic reach the
+/// same rollback.
+struct RollbackGuard<'a, B: Buffer> {
+   buffer: &'a mut B,
+   start: usize,
+   armed: bool,
+}
+
+impl<B: Buffer> Drop for RollbackGuard<'_, B> {
+   fn drop(&mut self) {
+      if self.armed {
+         self.buffer.rollback(self.start);
+      }
+   }
+}
+
 pub(crate) fn encode_into<T, B>(buffer: &mut B, value: &T) -> Result<(), EncodeError>
 where
    T: ?Sized + Serialize,
    B: Buffer,
 {
    let start = buffer.len();
+   let mut rollback = RollbackGuard {
+      buffer,
+      start,
+      armed: true,
+   };
 
-   let result = encode_into_sink(buffer, value);
+   let result = encode_into_sink(&mut *rollback.buffer, value);
 
-   if result.is_err() {
-      buffer.rollback(start);
+   if result.is_ok() {
+      rollback.armed = false;
    }
 
    result
@@ -163,6 +189,19 @@ impl<'a, B: Buffer> Encoder<'a, B> {
       });
 
       Ok(())
+   }
+
+   /// Reserves room for one frame per declared struct field.
+   ///
+   /// The length is the `Serialize` impl's own claim, so it is not trusted with an
+   /// allocation: reserving it directly panicked (`capacity overflow`) on
+   /// `usize::MAX` and aborted the process on any large value, before the mismatch
+   /// could be reported as the error the contract promises.
+   fn reserve_frames(&mut self, len: usize) -> Result<(), EncodeError> {
+      self
+         .frames
+         .try_reserve(len)
+         .map_err(|_| EncodeError::ElementCountMismatch)
    }
 
    /// Finishes every frame opened by the struct scope starting at `scope`, then
@@ -376,7 +415,7 @@ impl<'a, 'b, B: Buffer> ser::Serializer for &'b mut Encoder<'a, B> {
       len: usize,
    ) -> Result<Self::SerializeStruct, Self::Error> {
       self.write_varint(len)?;
-      self.frames.reserve(len);
+      self.reserve_frames(len)?;
       Ok(StructEncoder::new(self, len))
    }
 
@@ -389,7 +428,7 @@ impl<'a, 'b, B: Buffer> ser::Serializer for &'b mut Encoder<'a, B> {
    ) -> Result<Self::SerializeStructVariant, Self::Error> {
       self.write_name(variant)?;
       self.write_varint(len)?;
-      self.frames.reserve(len);
+      self.reserve_frames(len)?;
       Ok(StructEncoder::new(self, len))
    }
 

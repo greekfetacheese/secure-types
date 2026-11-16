@@ -121,11 +121,18 @@ impl<'de> Decoder<'de> {
 
    /// Reads a container's element count.
    ///
-   /// A count larger than the bytes left cannot be satisfied by any element type
-   /// that occupies at least one byte, so it is rejected before it is handed to
-   /// a visitor as a `size_hint` or used to drive a loop. Without that, a
-   /// corrupt count could pre-allocate a huge locked buffer or spin through
-   /// zero-sized elements.
+   /// A count larger than the bytes left cannot be satisfied by any element type that
+   /// occupies at least one byte, so it is rejected before it is handed to a visitor as
+   /// a `size_hint` or used to drive a loop. Without that, a corrupt count could
+   /// pre-allocate a huge locked buffer.
+   ///
+   /// The bound is per container, so it does not bound the *total* work: nested
+   /// containers of zero-byte elements (`Vec<Vec<()>>`, a unit struct, `PhantomData`)
+   /// can each spend up to the document length in element visits, so a document of D
+   /// bytes can drive O(D²) of them before the last count is rejected — measured, a
+   /// 16 KB document performs 32 million visits (1.2 s in a debug build; the pure
+   /// zero-byte visit loops are folded away in release). Bounding it needs a
+   /// total-element budget, not a per-container one.
    fn read_count(&mut self) -> Result<usize, DecodeError> {
       let count = self.read_varint()?;
       if count > self.remaining() {

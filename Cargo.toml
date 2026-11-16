@@ -73,3 +73,6 @@ required-features = ["use_os"]
 [[example]]
 name = "secure_vec"
 required-features = ["use_os"]
+
+[package.metadata.docs.rs]
+features = ["serde", "codec"]

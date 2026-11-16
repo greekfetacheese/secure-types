@@ -4,11 +4,13 @@ use super::{
 };
 use core::ops::Range;
 use zeroize::Zeroize;
+#[cfg(feature = "serde")]
+use zeroize::Zeroizing;
 
 // `String` is only used by the serde visitor below; in a `no_std` build it has to come
 // from `alloc` (with `use_os` the prelude provides it).
 #[cfg(all(feature = "serde", not(feature = "use_os")))]
-use alloc::string::String;
+use alloc::{string::String, vec::Vec};
 
 /// A securely allocated, growable UTF-8 string, just like `std::string::String`.
 ///
@@ -415,6 +417,20 @@ impl serde::Serialize for SecureString {
    }
 }
 
+/// Builds a SecureString from a borrowed UTF-8 string through the fallible
+/// constructors, so a failed secure allocation is reported instead of unwinding
+/// out of a Deserialize impl (and out of a possessed buffer that still needs a wipe).
+#[cfg(feature = "serde")]
+fn secure_string_from_str<E>(s: &str) -> Result<SecureString, E>
+where
+   E: serde::de::Error,
+{
+   let mut vec = SecureVec::new_with_capacity(s.len())
+      .map_err(|_| E::custom("SecureString::deserialize: secure allocation failed"))?;
+   vec.init_from_clone(s.as_bytes());
+   Ok(SecureString { vec })
+}
+
 #[cfg(feature = "serde")]
 impl<'de> serde::Deserialize<'de> for SecureString {
    fn deserialize<D>(deserializer: D) -> Result<SecureString, D::Error>
@@ -434,16 +450,33 @@ impl<'de> serde::Deserialize<'de> for SecureString {
             Ok(SecureString::from(v))
          }
 
-         /// Formats that build an owned `String` (unescaping, normalization) hand it
-         /// over here. serde's default implementation would copy out of it and then
-         /// drop it with the plaintext still inside, so wipe it after the copy.
-         fn visit_string<E>(self, mut v: String) -> Result<Self::Value, E>
+         fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
          where
             E: serde::de::Error,
          {
-            let secure_string = SecureString::from(v.as_str());
-            v.zeroize();
-            Ok(secure_string)
+            let str = core::str::from_utf8(v)
+               .map_err(|_| E::custom("SecureString::deserialize: invalid UTF-8"))?;
+            secure_string_from_str(str)
+         }
+
+         /// Formats that hand over an owned byte buffer, or an owned String built
+         /// from bytes (unescaping, normalization). serde's default implementation
+         /// would copy out of it and then drop it with the plaintext still inside.
+         /// The guard wipes it on every arm, including a panic from the constructor.
+         fn visit_byte_buf<E>(self, v: Vec<u8>) -> Result<Self::Value, E>
+         where
+            E: serde::de::Error,
+         {
+            let v = Zeroizing::new(v);
+            self.visit_bytes(v.as_slice())
+         }
+
+         fn visit_string<E>(self, v: String) -> Result<Self::Value, E>
+         where
+            E: serde::de::Error,
+         {
+            let v = Zeroizing::new(v);
+            secure_string_from_str(v.as_str())
          }
       }
       deserializer.deserialize_string(SecureStringVisitor)

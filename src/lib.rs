@@ -114,9 +114,10 @@ const fn get_header_offset<T>() -> usize {
 
 /// Reports whether the kernel supports `memfd_secret`-backed allocations.
 ///
-/// `memfd_secret` is Linux-only, so this is always `false` on every other
-/// target (including non-Linux Unix like macOS and FreeBSD), where the crate
-/// falls back to [`secure_alloc::malloc_sized`].
+/// `memfd_secret` is Linux-only. On non-Linux Unix (macOS, FreeBSD, …) this is
+/// always `false` and the crate falls back to [`secure_alloc::malloc_sized`]. On
+/// Windows the function does not exist at all, and every allocation goes through
+/// [`secure_alloc::malloc_sized`] there.
 #[cfg(all(feature = "use_os", unix))]
 pub fn supports_memfd_secret() -> bool {
    #[cfg(target_os = "linux")]

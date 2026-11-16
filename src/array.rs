@@ -6,6 +6,8 @@ use super::{Error, SecureVec, alloc};
 use crate::vec::{FreeGuard, InitGuard};
 use core::{marker::PhantomData, mem, ptr::NonNull};
 use zeroize::Zeroize;
+#[cfg(feature = "serde")]
+use zeroize::Zeroizing;
 
 #[cfg(feature = "use_os")]
 use secure_alloc::Prot;
@@ -73,9 +75,10 @@ impl<T: Zeroize> Drop for SourceWipe<'_, T> {
 /// - **Zeroization on Drop**: The memory is zeroized and every element is dropped when the array
 ///   is dropped.
 /// - **Memory Locking**: the allocation is `mprotect`ed `PROT_NONE` outside an access scope —
-///   an `unlock*` call, or one of this type's own mutating methods (`erase`, `unlock_mut`, and
-///   `Drop`) — which stops accidental reads, this process's included, but is not a defence
-///   against `ptrace` or a debugger. On the malloc path it is also `mlock`ed on a best-effort
+///   an `unlock*` call, or one of this type's own operations that must touch the bytes
+///   (`erase`, `unlock_mut`, `Clone`, conversions, serde `Serialize`, and `Drop`) — which
+///   stops accidental reads, this process's included, but is not a defence against `ptrace`
+///   or a debugger. On the malloc path it is also `mlock`ed on a best-effort
 ///   basis (the call's result is discarded, so hitting `RLIMIT_MEMLOCK` still constructs;
 ///   Windows: `VirtualLock`) and, where the OS supports it, excluded from core dumps
 ///   (`MADV_DONTDUMP` on Linux, `MADV_NOCORE` on FreeBSD/DragonFly). Linux uses `memfd_secret`
@@ -521,11 +524,21 @@ impl<T: Zeroize, const LENGTH: usize> Drop for SecureArray<T, LENGTH> {
       // `initialized` written slots, and each is zeroized then dropped once.
       unsafe {
          let ptr = self.ptr.as_ptr();
-         for i in 0..self.initialized {
-            let slot = ptr.add(i);
-            (*slot).zeroize();
-            core::ptr::drop_in_place(slot);
+
+         // The loop runs backwards so the live set is a prefix of the guard's base:
+         // a destructor that panics leaves exactly the un-reached slots to the guard,
+         // which zeroizes and drops them while the pages are still open.
+         let mut discard = InitGuard::<T>::new(ptr);
+         discard.set_written(self.initialized);
+
+         for i in (0..self.initialized).rev() {
+            discard.set_written(i + 1);
+            (*ptr.add(i)).zeroize();
+            discard.set_written(i);
+            core::ptr::drop_in_place(ptr.add(i));
          }
+
+         discard.commit();
       }
 
       // `_free` releases the region here, or during the unwind if a destructor
@@ -679,15 +692,15 @@ impl<'de, const LENGTH: usize> serde::Deserialize<'de> for SecureArray<u8, LENGT
             SecureArray::from_slice(bytes).map_err(serde::de::Error::custom)
          }
 
-         /// Mirrors `SecureString`'s `visit_string`: wipe the owned buffer the format
-         /// handed over, instead of letting it drop with the plaintext inside.
-         fn visit_byte_buf<E>(self, mut v: Vec<u8>) -> Result<Self::Value, E>
+         /// Wipe the owned buffer the format handed over, including when the copy
+         /// panics: a plain `v.zeroize()` after the call runs only on the success and
+         /// error arms, not on the unwind that a failed re-lock can start.
+         fn visit_byte_buf<E>(self, v: Vec<u8>) -> Result<Self::Value, E>
          where
             E: serde::de::Error,
          {
-            let array = self.visit_bytes(&v);
-            v.zeroize();
-            array
+            let v = Zeroizing::new(v);
+            self.visit_bytes(v.as_slice())
          }
       }
 

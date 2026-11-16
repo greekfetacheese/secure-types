@@ -72,12 +72,14 @@ unsafe {
 | --- | --- | --- |
 | `malloc` | `unsafe fn malloc<T>() -> Option<NonNull<T>>` | Allocates one `T`, fills it with `0xd0`, returns `None` on allocation failure. |
 | `malloc_sized` | `unsafe fn malloc_sized(size: usize) -> Option<NonNull<[u8]>>` | Same for a byte slice of `size` bytes. |
-| `free` | `unsafe fn free<T: ?Sized>(memptr: NonNull<T>)` | Checks the allocator tag and the canary, restores read/write protection, zeroes through `munlock`, and releases the mapping. Accepts the pointer from `malloc` or `malloc_sized`; a pointer from `free_memfd_secret` aborts on the tag. |
+| `free` | `unsafe fn free<T: ?Sized>(memptr: NonNull<T>)` | Checks the allocator tag, restores read/write protection, checks the canary, zeroes through `munlock`, and releases the allocation (`dealloc`; the block returns to the global allocator, which decides whether the pages go back to the OS). Accepts the pointer from `malloc` or `malloc_sized`; a pointer from `free_memfd_secret` aborts on the tag. |
 | `mprotect` | `unsafe fn mprotect<T: ?Sized>(memptr: NonNull<T>, prot: Prot::Ty) -> bool` | Re-protects the whole allocation's data region. Aborts unless the metadata page carries an allocator tag: it is checked before the length is read, and both `malloc` and `memfd_secret` allocations are accepted. |
-| `page_size` | `fn page_size() -> usize` | Safe. The page size the regions above are laid out with: guard-page and `mprotect` granularity, and the unit the data region is rounded up to. It is not the alignment of the returned pointer (see *Layout* under [Security notes](#security-notes)). The first call initialises the allocator's page size and canary. |
+| `page_size` | `fn page_size() -> usize` | Safe. The page size the regions above are laid out with: guard-page and `mprotect` granularity, and the unit the data region is rounded up to. It is not a guarantee of the returned pointer's alignment (see *Layout* under [Security notes](#security-notes)). The first call initialises the allocator's page size and canary. |
 | `Prot` | module of constants | Unix: `NoAccess`, `ReadOnly`, `WriteOnly`, `ReadWrite`, `Execute`, `ReadExec`, `WriteExec`, `ReadWriteExec` (raw `libc::c_int`). Windows: `NoAccess`, `ReadOnly`, `ReadWrite`, `WriteCopy`, `Execute`, `ReadExec`, `ReadWriteExec`, `WriteCopyExec`, `Guard`, `NoCache`, `WriteCombine`, and the `PAGE_TARGETS_*` flags (`PAGE_PROTECTION_FLAGS`). |
 
 ```rust
+# #[cfg(feature = "alloc")]
+# {
 use secure_alloc::{free, malloc};
 
 unsafe {
@@ -89,6 +91,7 @@ unsafe {
 
     free(mem);
 }
+# }
 ```
 
 ### Linux `memfd_secret` allocation — gates `alloc_ext` **and** `target_os = "linux"`
@@ -123,16 +126,23 @@ unrelated descriptor. They are only compiled on Linux: on any other target the
 
 - **Layout.** An allocation is four page-aligned regions: a read-only metadata page
   holding the allocation's data-region length, an `PROT_NONE` guard page, the data
-  region (page-rounded, `mlock`ed, filled with `0xd0` for `malloc`/`malloc_sized`),
-  and a trailing `PROT_NONE` guard page. The 16-byte canary sits immediately below
-  the returned pointer, and the caller's bytes run from there to the end of the data
-  region; an overrun therefore faults on the trailing guard page instead of silently
-  corrupting adjacent memory, and an underrun hits the canary. The regions are
-  page-aligned, but the **returned pointer is not**: it sits `size` bytes below the
-  end of the data region, so only a page-multiple `size` lands on a page boundary.
-  `malloc::<T>` is aligned for `T` for that reason (its size is `size_of::<T>()`, a
-  multiple of `align_of::<T>()`); `malloc_sized`'s result carries no alignment
-  guarantee beyond a byte buffer's.
+  region (page-rounded, `mlock`ed and dump-excluded on the `malloc` path; the
+  caller's `size` bytes are filled with `0xd0` by `malloc`/`malloc_sized`, while the
+  canary and the slack below it are not), and a trailing `PROT_NONE` guard page. The
+  16-byte canary sits immediately below the returned pointer, and the caller's bytes
+  run from there to the end of the data region; an overrun therefore faults on the
+  trailing guard page instead of silently corrupting adjacent memory. An underrun
+  reaches the canary only for its first 16 bytes: below the canary the region has up to
+  a page of writable slack, so a deeper underrun passes the canary undetected until it
+  leaves the region. The regions are page-aligned, but the **returned pointer is not necessarily**:
+  it sits `size` bytes below the end of the data region, so only a page-multiple
+  `size` lands on a page boundary. `malloc::<T>` is aligned for `T` while
+  `align_of::<T>() <= page_size()`, because its size is `size_of::<T>()`, a multiple of
+  `align_of::<T>()` — and the offset above is a multiple of the alignment only when the
+  alignment divides the page. An over-aligned `T` is still page-aligned (its size is
+  a page multiple) but not promised its own alignment, so `malloc_sized`'s result
+  carries no alignment guarantee beyond a byte buffer's, and a strengthened `T`
+  carries no guarantee of `T`'s alignment.
 - **Canary and allocator tag.** The metadata page holds the data-region length at
   offset 0 and, next to it, an allocator tag: `MALL` for `malloc`/`malloc_sized`, and
   `MFDS` one `usize` further along for `memfd_secret` (that slot holds its descriptor).
@@ -173,6 +183,49 @@ unrelated descriptor. They are only compiled on Linux: on any other target the
   started with `exec` does not inherit the backing descriptor; a `fork` child still
   does, although it already shares the mapping, so `fork` is not a containment
   boundary for these allocations.
+
+## Provenance
+
+Forked from [quininer/memsec](https://github.com/quininer/memsec) by quininer kel, from the
+published `memsec` 0.7.0 release at upstream master commit `b4de7b9a` (2025-01-21).
+`LICENSE` is copied verbatim; the four `#[allow(static_mut_refs)]` attributes are
+upstream's, added after 0.7.0 was published. Upstream has been unmaintained since that
+release. This fork keeps the source close to upstream, so upstream fixes can still be
+carried over. The layout and the API are upstream's.
+
+## Changes from upstream
+
+Deliberately few; anything not listed here is upstream 0.7.0 code. These deviations are
+deliberate and have to survive any future sync:
+
+- every allocation carries an allocator tag in the metadata page (`MALL` / `MFDS`, with a
+  defined spare slot so neither check reads uninitialised metadata), and `free`,
+  `free_memfd_secret` and `mprotect` abort on a mismatch before they trust the length —
+  upstream aborts on the canary only;
+- the region total is computed with checked arithmetic and an `isize::MAX` ceiling, so a
+  size near `usize::MAX` is an allocation failure instead of a wrapped layout;
+- `src/lib.rs` — `#![doc = include_str!("../README.md")]`, so this README is the crate
+  front page and its examples are doctests;
+- `src/alloc/mod.rs`, `src/alloc/allocext/linux.rs` — `::core::usize::MAX` is written
+  `usize::MAX` (identical value; the deprecated spelling is gone), and the canary uses
+  `getrandom::fill`, the 0.4 spelling;
+- `Cargo.toml` — `getrandom` 0.4 and `windows-sys` 0.61 (were 0.2 and 0.45), and docs.rs
+  builds with `alloc_ext` instead of `--all-features`;
+- `src/lib.rs`, `src/mlock.rs`, `src/alloc/mod.rs`, `src/alloc/allocext/linux.rs` —
+  every public `unsafe fn` documents its contract in a `# Safety` section, and the
+  crate-wide `#![allow(clippy::missing_safety_doc)]` is gone (documentation only);
+- `memfd_secret` is created with `O_CLOEXEC`; `memfd_create`'s `MFD_CLOEXEC` is a
+  different value and that syscall rejects it, so passing it sent every allocation
+  through the `fcntl` fallback before this fork fixed it. The descriptor is closed
+  rather than leaked when `ftruncate` or `mmap` fails. Upstream: memsec#22;
+- `madvise` is given the page-aligned range covering the caller's bytes, so the dump
+  exclusion is not silently `EINVAL`ed, and the page size is read once with `sysconf`
+  and cached in `src/mlock.rs`. Upstream: memsec#19. The cached page size also lets
+  `use_os` without `alloc` build;
+- `page_size()` is public, and `mprotect` accepts either tag;
+- `tests/memfd_secret_cloexec.rs`, `tests/mlock_dump_exclusion.rs`,
+  `tests/wrong_free_aborts.rs` and the header-tag unit tests are new regression tests
+  for the deviations above.
 
 ## License
 

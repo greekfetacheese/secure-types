@@ -66,13 +66,16 @@ unsafe fn alloc_init() {
 /// The page size this allocator lays its regions out with.
 ///
 /// It is the unit the guard pages and `mprotect` work in, and the data region is
-/// rounded up to a multiple of it. It is **not** the alignment of the returned
-/// pointer: that pointer sits `size` bytes below the end of the page-rounded data
-/// region, so it only lands on a page boundary when `size` is a whole number of
-/// pages. `malloc::<T>` and `memfd_secret::<T>` are still aligned for `T`, because
-/// their size is `size_of::<T>()`, a multiple of `align_of::<T>()`;
-/// `malloc_sized` and `memfd_secret_sized` carry no such guarantee, so a result
-/// that needs a stronger alignment has to be checked.
+/// rounded up to a multiple of it. It is **not a guarantee** of the returned
+/// pointer's alignment: that pointer sits `size` bytes below the end of the
+/// page-rounded data region, so it only lands on a page boundary when `size` is
+/// a whole number of pages. `malloc::<T>` and `memfd_secret::<T>` are aligned
+/// for `T` while `align_of::<T>() <= page_size()`, because their size is
+/// `size_of::<T>()`, a multiple of `align_of::<T>()`, and the offset above is a
+/// multiple of the alignment only when the alignment divides the page.
+/// `malloc_sized` and `memfd_secret_sized` carry no such guarantee, and neither
+/// does an over-aligned `T`, so a result that needs a stronger alignment has to
+/// be checked.
 #[inline]
 pub fn page_size() -> usize {
     ALLOC_INIT.call_once(|| unsafe { alloc_init() });
@@ -294,7 +297,9 @@ pub unsafe fn malloc_sized(size: usize) -> Option<NonNull<[u8]>> {
 /// afterwards every pointer into the allocation is dangling. A pointer from
 /// `free_memfd_secret`, or any other foreign pointer, aborts on the allocator tag
 /// before its length is used rather than on the canary, so it never reaches
-/// `dealloc`; a pointer whose metadata page is unreadable also faults there.
+/// `dealloc`; a pointer whose metadata page is unreadable also faults there. The
+/// data region is made readable again before the canary is checked, so an allocation
+/// the caller left `mprotect`ed `NoAccess` is freed normally.
 pub unsafe fn free<T: ?Sized>(memptr: NonNull<T>) {
     let memptr = memptr.as_ptr() as *mut u8;
 
@@ -303,12 +308,21 @@ pub unsafe fn free<T: ?Sized>(memptr: NonNull<T>) {
     let unprotected_ptr = unprotected_ptr_from_user_ptr(memptr);
     let base_ptr = unprotected_ptr.sub(PAGE_SIZE * 2);
 
-    // Check the allocator tag before trusting the size.
+    // Check the allocator tag before trusting the size. The metadata page is not
+    // part of what the caller protects, so this reads even when the allocation is
+    // left `NoAccess`.
     if ptr::read(base_ptr.add(MALLOC_TAG_OFFSET) as *const usize) != MALLOC_TAG {
         abort();
     }
 
     let unprotected_size = ptr::read(base_ptr as *const usize);
+
+    // The canary lives in the data region, so restore access before reading it: the
+    // caller is allowed to leave the allocation protected until it is freed, and a
+    // check that faulted there would kill the process instead of reaching the
+    // diagnostic abort below.
+    let total_size = PAGE_SIZE + PAGE_SIZE + unprotected_size + PAGE_SIZE;
+    _mprotect(base_ptr, total_size, Prot::ReadWrite);
 
     // check
     #[allow(static_mut_refs)]
@@ -317,9 +331,6 @@ pub unsafe fn free<T: ?Sized>(memptr: NonNull<T>) {
     }
 
     // free
-    let total_size = PAGE_SIZE + PAGE_SIZE + unprotected_size + PAGE_SIZE;
-    _mprotect(base_ptr, total_size, Prot::ReadWrite);
-
     crate::munlock(unprotected_ptr, unprotected_size);
 
     free_aligned(base_ptr, total_size);

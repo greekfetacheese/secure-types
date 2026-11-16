@@ -450,6 +450,48 @@ fn test_element_count_mismatches_are_rejected() {
    ));
 }
 
+/// A length prefix that lies must be reported, never turned into an allocation.
+///
+/// The struct sink reserved one frame entry per *declared* field before it wrote any of
+/// them, so `usize::MAX` panicked with `capacity overflow` and a merely huge value
+/// aborted the process on a failed allocation — neither is catchable as an encode
+/// error, and both contradict the `ElementCountMismatch` contract.
+#[test]
+fn test_a_declared_struct_length_is_not_trusted_with_an_allocation() {
+   struct DeclaresAnImpossibleNumber(usize);
+
+   impl Serialize for DeclaresAnImpossibleNumber {
+      fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+      where
+         S: ser::Serializer,
+      {
+         let structure = serializer.serialize_struct("Lie", self.0)?;
+         structure.end()
+      }
+   }
+
+   for declared in [usize::MAX, 1 << 40, 3] {
+      assert!(
+         matches!(
+            secure_types::encode(&DeclaresAnImpossibleNumber(declared)),
+            Err(EncodeError::ElementCountMismatch)
+         ),
+         "a declared length of {declared} must be reported as a mismatch, not allocated"
+      );
+
+      assert!(
+         matches!(
+            secure_types::encode_into_vec(
+               &mut Vec::new(),
+               &DeclaresAnImpossibleNumber(declared)
+            ),
+            Err(EncodeError::ElementCountMismatch)
+         ),
+         "the Vec sink must reject a declared length of {declared} the same way"
+      );
+   }
+}
+
 /// `serde`'s default `collect_str` would build this string in a plain
 /// `String`; ours streams it into locked memory and encodes it as a `str`.
 #[test]
@@ -840,6 +882,42 @@ fn test_encode_into_vec_erases_its_partial_document_on_failure() {
    assert_eq!(
       buffer, PREFIX,
       "the failed encoding left bytes behind in the caller's buffer"
+   );
+}
+
+/// A panicking Serialize impl must roll back too, not just one that returns
+/// Err: the unwind used to skip the rollback and leave the version byte,
+/// the declared count and every field written so far in the caller's buffer.
+#[test]
+fn test_encode_into_vec_erases_its_partial_document_when_a_serialize_impl_panics() {
+   const PREFIX: &[u8] = b"tag";
+
+   struct PanicsAfterWriting;
+
+   impl Serialize for PanicsAfterWriting {
+      fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+      where
+         S: ser::Serializer,
+      {
+         let mut seq = serializer.serialize_seq(Some(2))?;
+         seq.serialize_element("SECRET")?;
+         panic!("serialize impl panics");
+      }
+   }
+
+   let mut buffer = PREFIX.to_vec();
+
+   let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+      secure_types::encode_into_vec(&mut buffer, &PanicsAfterWriting)
+   }));
+
+   assert!(
+      result.is_err(),
+      "the Serialize impl was supposed to panic"
+   );
+   assert_eq!(
+      buffer, PREFIX,
+      "a panicking Serialize impl left a partial document in the caller's buffer"
    );
 }
 
