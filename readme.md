@@ -2,7 +2,9 @@
 
 The goal of this crate is to provide a simple way to properly handle sensitive data in memory (e.g. passwords, private keys, etc).
 
-Currently there are 3 types:
+Currently there are three core types — `SecureBytes` is an alias for `SecureVec<u8>`,
+`SecureBytesWriter` adapts `io::Write` onto one, and `Drain` is the iterator
+`SecureVec::drain` returns:
 
 - `SecureString`: For working with strings.
 - `SecureVec`: For working with `Vec<T>`.
@@ -11,7 +13,7 @@ Currently there are 3 types:
 ## Features
 
 - **Zeroization on Drop**: Memory is wiped when dropped.
-- **Memory locking** (OS only): Pages are `mprotect`ed `PROT_NONE` while the value is idle. They are unprotected only for the operation that needs them — an `unlock*` call; an internal read (`char_len`/`char_len_unchecked`, `Clone`, the `SecureArray`↔`SecureVec` conversions and `TryFrom<SecureVec<u8>> for SecureString`, serde `Serialize`, `encode*`/`encoded_len`); or one of the type's own mutations (`push`, `push_str`, `insert_text_at_char_idx`, `delete_text_char_range`, `clear`/`erase`, `drain`, `reserve`, `Drop`). That stops accidental reads, including from this process; it is not a defence against `ptrace` or a debugger. On the malloc path the allocation is also `mlock`ed on a best-effort basis (the call's result is discarded, so hitting `RLIMIT_MEMLOCK` still constructs; Windows: `VirtualLock`) and, where the OS allows it, excluded from core dumps. Linux uses `memfd_secret` when the kernel supports it. See [How memory is locked](#how-memory-is-locked).
+- **Memory locking** (OS only): Pages are `mprotect`ed `PROT_NONE` while the value is idle. They are unprotected only while an operation that needs them runs — an `unlock*` call; an internal read (`char_len`/`char_len_unchecked`, `Clone`, the `SecureArray`↔`SecureVec` conversions and `TryFrom<SecureVec<u8>> for SecureString`, serde `Serialize`, `encode*`/`encoded_len`); the codec's `decode` (which unlocks the buffer for the parse); one of the type's own mutations (`push`, `push_str`, `insert_text_at_char_idx`, `delete_text_char_range`, `clear`/`erase`, `drain`, `reserve`, `Drop`); or a write through `SecureBytesWriter` (`write`/`write_all`, which append via `extend_from_slice`). That stops accidental reads, including from this process; it is not a defence against `ptrace` or a debugger. On the malloc path the allocation is also `mlock`ed on a best-effort basis (the call's result is discarded, so hitting `RLIMIT_MEMLOCK` still constructs; Windows: `VirtualLock`) and, where the OS allows it, excluded from core dumps. Linux uses `memfd_secret` when the kernel supports it. See [How memory is locked](#how-memory-is-locked).
 - **Scoped access**: No `Index`/`Deref` — `secret[0]` does not compile. The contents are read through the `unlock*` closures (the `expose-ptr` testing feature aside). They can still leave the type as an ordinary copy — `drain` yields owned elements, `Clone` duplicates them, and the conversions move them out — so treat those like any other copy of the secret.
 - **Send, not Sync**: Values can move to another thread. Sharing one instance needs an explicit lock (`Arc<Mutex<_>>`); concurrent `unlock` races on page protection.
 - **`no_std`**: Zeroization only. Disable the default features — see [Feature Flags](#feature-flags).
@@ -133,7 +135,7 @@ assert_eq!(payload[0], 0x07);
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-`encode` returns a `SecureBytes`. `encode_to_vec` / `encode_into_vec` produce the same document into a plain `Vec<u8>` the caller owns: not locked, and not zeroized on drop, but a *failed* encoding erases everything it appended rather than leaving a partial document behind. `encoded_len` reports how many bytes a document takes — measured by the same serializer, so a destination can be sized exactly and never grow (a growing `Vec` leaves a copy of the partial document in the allocation it abandons). `decode` unlocks only for the parse and re-locks afterwards, including on error. Types are raw binary — a `SecureArray<u8, 32>` is 32 payload bytes behind a one-byte length prefix — and strings are not escaped, so there is no scratch copy of an unescaped string.
+`encode` returns a `SecureBytes`. `encode_to_vec` / `encode_into_vec` produce the same document into a plain `Vec<u8>` the caller owns: not locked, and not zeroized on drop, but a *failed* encoding erases everything it appended, so no partial document survives in that buffer; growth can still leave a copy in an allocation the `Vec` abandons. `encoded_len` reports how many bytes a document takes — measured by the same serializer, so a destination can be sized exactly and never grow. `decode` unlocks only for the parse and re-locks afterwards, including on error. Types are raw binary — a `SecureArray<u8, 32>` is 32 payload bytes behind a one-byte length prefix — and strings are not escaped, so there is no scratch copy of an unescaped string.
 
 **Format evolution.** `FORMAT_VERSION` is the first byte. An unknown version is refused. Adding a field with `#[serde(default)]` does not need a bump: fields are named and length-prefixed, so unknown fields are skipped and missing ones take their default. Changing a field's type does need a bump.
 

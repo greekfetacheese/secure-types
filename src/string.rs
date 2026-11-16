@@ -184,13 +184,14 @@ impl SecureString {
    ///
    /// # Re-entrancy
    ///
-   /// The closure must not call another `unlock*` method on this string, nor
-   /// [`char_len`](Self::char_len), [`char_len_unchecked`](Self::char_len_unchecked) and
-   /// `Clone`, which all unlock internally — [`byte_len`](Self::byte_len)
-   /// does not unlock and is fine. The pages are unprotected once and re-protected
-   /// when this call returns, so a nested unlock re-locks the memory while this
-   /// closure is still reading it, and the read faults. Use the `&str` you were
-   /// given instead, or measure before/after the call.
+   /// The closure must not call any method that unlocks this string — in
+   /// particular another `unlock*` method,
+   /// [`char_len`](Self::char_len), [`char_len_unchecked`](Self::char_len_unchecked),
+   /// `Clone` or serde `Serialize`. [`byte_len`](Self::byte_len) does not unlock
+   /// and is fine. The pages are unprotected once and re-protected when this call
+   /// returns, so a nested unlock re-locks the memory while this closure is still
+   /// reading it, and the read faults. Use the `&str` you were given instead, or
+   /// measure before/after the call.
    ///
    /// Aborts with a diagnostic if the memory-protection call fails.
    pub fn unlock_str<F, R>(&self, f: F) -> R

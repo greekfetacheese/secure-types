@@ -92,7 +92,7 @@ impl<T: Zeroize> Drop for SourceWipe<'_, T> {
 /// We intentionally do **not** implement `Index` or `IndexMut`.
 /// `array[0]` is a compile error.
 ///
-/// Always use `.unlock()` / `.unlock_mut()` (or the slice variants) to access data.
+/// Always use `.unlock()` / `.unlock_mut()` to access data.
 ///
 /// # Thread Safety
 ///
@@ -335,8 +335,8 @@ where
       LENGTH
    }
 
-   /// Always `false`: [`empty`](Self::empty) rejects a zero length, so no
-   /// `SecureArray` can have `len() == 0`.
+   /// Always `false`: [`empty`](Self::empty) rejects a zero-sized allocation
+   /// (`LENGTH * size_of::<T>() == 0`), so no `SecureArray` can have `len() == 0`.
    pub fn is_empty(&self) -> bool {
       self.len() == 0
    }
@@ -403,10 +403,11 @@ where
    ///
    /// # Re-entrancy
    ///
-   /// The closure must not call another `unlock*` method on this array: the pages
-   /// are unprotected once and re-protected when this call returns, so a nested
-   /// unlock re-locks the memory while this closure is still reading it, and the
-   /// read faults.
+   /// The closure must not call any method that unlocks this array — in particular
+   /// another `unlock*` method, `Clone` or serde `Serialize`. The pages are
+   /// unprotected once and re-protected when this call returns, so a nested unlock
+   /// re-locks the memory while this closure is still reading it, and the read
+   /// faults.
    ///
    /// Aborts with a diagnostic if the memory-protection call fails.
    pub fn unlock<F, R>(&self, f: F) -> R
@@ -428,15 +429,16 @@ where
    /// # Panics
    ///
    /// Panics if any slot was never written. An [`empty`](Self::empty) array that
-   /// was not filled, or one left partial by a panic during construction, still
-   /// holds the allocator's poison bytes in those slots. Exposing them as
+   /// was not filled, or a `Clone` of one, still holds the allocator's poison bytes
+   /// in those slots. Exposing them as
    /// `&mut [T]` would make `drop` and [`erase`](Self::erase) zeroize those bytes
    /// as a `T`, which is undefined behaviour. Build the array with
    /// [`from_slice`](Self::from_slice), [`from_slice_mut`](Self::from_slice_mut),
    /// [`from_fn`](Self::from_fn), `Clone` or `TryFrom` instead.
    ///
    /// The re-entrancy rule of [`unlock`](Self::unlock) applies here: the closure
-   /// must not call another `unlock*` method on this array.
+   /// must not call any method that unlocks this array, in particular another
+   /// `unlock*` method, `Clone` or serde `Serialize`.
    ///
    /// Aborts with a diagnostic if the memory-protection call fails.
    pub fn unlock_mut<F, R>(&mut self, f: F) -> R
