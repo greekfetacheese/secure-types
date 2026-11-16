@@ -99,7 +99,8 @@ unsafe fn alloc_init() {
 /// # Panics
 ///
 /// Panics on the first call if the platform page size cannot be read, if it is too
-/// small for the region layout, or if the initial `getrandom` call fails. The failure
+/// small for the region layout, if it is not a power of two (a `debug_assert!`, and no
+/// supported target reports one), or if the initial `getrandom` call fails. The failure
 /// poisons the `Once`, so every later call panics as well.
 #[inline]
 pub fn page_size() -> usize {
@@ -190,10 +191,10 @@ pub unsafe fn _mprotect(ptr: *mut u8, len: usize, prot: Prot::Ty) -> bool {
 /// Reports a protection change the platform rejected.
 ///
 /// `error` is the OS error the failed call left behind, read at the failure site because
-/// the write below may overwrite it. Best-effort otherwise: the write is discarded and
-/// cannot stand in the way of what the caller does next. `writeln!` is used rather than
-/// `eprintln!`, which panics when the write itself fails (a dead stderr pipe) and would
-/// turn a rejected protection change into an unwind.
+/// the write below may overwrite it. Best-effort otherwise: the result is discarded, so a
+/// dead stderr cannot turn the failure into an unwind — `writeln!` is used rather than
+/// `eprintln!`, which panics when the write itself fails. The write is still blocking, so
+/// a full pipe whose reader has stopped postpones the abort that follows until it drains.
 #[cfg(any(unix, windows))]
 #[cold]
 #[inline(never)]
@@ -308,8 +309,8 @@ unsafe fn page_round(size: usize) -> Option<usize> {
 ///
 /// Returns `None` when the total would overflow. The allocation paths turn that into an
 /// allocation failure; the free paths abort, because there `unprotected_size` comes from
-/// the metadata page and a wrapped total would `mprotect` a short range, check the canary
-/// at a wild address and `dealloc` with a layout the allocation never had.
+/// the metadata page and a wrapped total would `mprotect` a short range, read the canary
+/// through a page it did not restore, and `dealloc` with a layout the allocation never had.
 ///
 /// The check is one-directional: it rejects a length that cannot produce a total at all,
 /// not one that produces a wrong but representable total. A metadata page corrupted toward

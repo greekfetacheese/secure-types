@@ -163,9 +163,10 @@ unrelated descriptor. They are only compiled on Linux: on any other target the
   that follow. A region that cannot even be restored to `ReadWrite` is abandoned instead
   of handed back to the global allocator, which may write into a freed block.
 - **`page_size` can panic while initialising.** The first call runs `alloc_init`: it panics
-  if `sysconf` fails or reports a page size too small for the region layout, and
-  `getrandom`'s failure is unwrapped; the failed `Once` is poisoned, so every later call
-  (and every allocation) panics too.
+  if `sysconf` fails or reports a page size too small for the region layout (or, in debug
+  builds, one that is not a power of two — a `debug_assert!` no supported target trips),
+  and `getrandom`'s failure is unwrapped; the failed `Once` is poisoned, so every later
+  call (and every allocation) panics too.
 - **`mlock` failure is ignored.** `malloc`/`malloc_sized` call `mlock` and discard its
   return value: the allocation succeeds even when the page could not be locked (for
   example when `RLIMIT_MEMLOCK` is exhausted). Call `mlock` yourself, or check
@@ -199,8 +200,9 @@ unrelated descriptor. They are only compiled on Linux: on any other target the
 
 ## Provenance
 
-Forked from [quininer/memsec](https://github.com/quininer/memsec) by quininer kel, from the
-published `memsec` 0.7.0 release at upstream master commit `b4de7b9a` (2025-01-21).
+Forked from [quininer/memsec](https://github.com/quininer/memsec) by quininer kel. The base is
+upstream master commit `b4de7b9a` (2025-01-21), the lint commit immediately after the published
+`memsec` 0.7.0 release, which was cut from `7fae500` (2024-06-06).
 `LICENSE` is copied verbatim; the four `#[allow(static_mut_refs)]` attributes this fork
 still carries are upstream's, added after 0.7.0 was published. (Upstream master has five:
 the one on the `getrandom` call in `alloc_init` went away when that call stopped borrowing
@@ -220,8 +222,8 @@ deliberate and have to survive any future sync:
   size near `usize::MAX` is an allocation failure instead of a wrapped layout;
 - the free paths check the total they derive from the metadata page too, and abort with a
   diagnostic when the data-region length cannot produce one, instead of `mprotect`ing a
-  short range, checking the canary at a wild address and `dealloc`ing a layout the
-  allocation never had. Only the overflow direction is covered: a corrupted length that is
+  short range, reading the canary through a page it did not restore, and `dealloc`ing a
+  layout the allocation never had. Only the overflow direction is covered: a corrupted length that is
   merely *short* is still trusted, because that page is read-only for the life of the
   allocation and closing that direction needs a value `free` can verify rather than
   re-derive from the length itself;
@@ -235,9 +237,14 @@ deliberate and have to survive any future sync:
   result and carries on with the old protection. The page size is validated the same way:
   a failed `sysconf` panics instead of becoming `usize::MAX`, and the floor covers the
   metadata header rather than one word;
+- a region whose metadata page is rejected after the data region was already locked is
+  `munlock`ed before it is released, so the pages do not stay locked and dump-excluded
+  inside the global allocator's heap;
 - the canary is checked *after* the data region is restored to `ReadWrite` in `free` and
   `free_memfd_secret`, so an allocation the caller left protected is freeable; upstream
   checks it first and faults (SIGSEGV) on the usage `secure-types` relies on;
+- a canary mismatch wipes the data region before it aborts, so the plaintext does not
+  outlive the process; upstream aborts with the region still readable;
 - `src/lib.rs` — `#![doc = include_str!("../README.md")]`, so this README is the crate
   front page and its examples are doctests;
 - `src/alloc/mod.rs`, `src/alloc/allocext/linux.rs` — `::core::usize::MAX` is written
@@ -258,11 +265,14 @@ deliberate and have to survive any future sync:
   `use_os` without `alloc` build;
 - `page_size()` is public, and `mprotect` accepts either tag;
 - `tests/memfd_secret_cloexec.rs`, `tests/mlock_dump_exclusion.rs`,
+  `tests/mlock_release_leak.rs`, `tests/free_locked_allocation.rs`,
   `tests/wrong_free_aborts.rs`, `tests/protect_failure.rs`,
   `tests/free_corrupt_length_aborts.rs` and the header-tag unit tests are new regression
   tests for the deviations above; `protect_failure.rs` forces `mprotect` to fail with a
-  seccomp filter and with a punched-out guard page, and `free_corrupt_length_aborts.rs`
-  overwrites a live allocation's data-region length and requires the free to abort.
+  seccomp filter and with a punched-out guard page; `free_corrupt_length_aborts.rs`
+  overwrites a live allocation's data-region length and requires the free to abort;
+  `mlock_release_leak.rs` rejects the metadata-page change and reads `VmLck` back; and
+  `free_locked_allocation.rs` frees an allocation the caller left `NoAccess`.
 
 ## License
 
