@@ -43,7 +43,11 @@ static mut CANARY: [u8; CANARY_SIZE] = [0; CANARY_SIZE];
 unsafe fn alloc_init() {
     #[cfg(unix)]
     {
-        PAGE_SIZE = libc::sysconf(libc::_SC_PAGESIZE) as usize;
+        let page_size = libc::sysconf(libc::_SC_PAGESIZE);
+        if page_size <= 0 {
+            panic!("page size unavailable");
+        }
+        PAGE_SIZE = page_size as usize;
     }
 
     #[cfg(windows)]
@@ -53,7 +57,11 @@ unsafe fn alloc_init() {
         PAGE_SIZE = (*si.as_ptr()).dwPageSize as usize;
     }
 
-    if PAGE_SIZE < CANARY_SIZE || PAGE_SIZE < mem::size_of::<usize>() {
+    // Every byte up to `MEMFD_TAG_OFFSET + size_of::<usize>()` is written into the
+    // metadata header; a page smaller than that would put the tag store into a
+    // `PROT_NONE` guard page.
+    let header_size = MEMFD_TAG_OFFSET + mem::size_of::<usize>();
+    if PAGE_SIZE < CANARY_SIZE || PAGE_SIZE < header_size {
         panic!("page size too small");
     }
 
@@ -168,6 +176,25 @@ pub unsafe fn _mprotect(ptr: *mut u8, len: usize, prot: Prot::Ty) -> bool {
     windows_sys::Win32::System::Memory::VirtualProtect(ptr.cast(), len, prot, old.as_mut_ptr()) != 0
 }
 
+/// Abort when a protection change failed.
+///
+/// The internal `_mprotect` calls are part of the allocation's safety contract: a
+/// guard page that must fault, a metadata page that must stay read-only, or the
+/// restore that makes the region writable again before `munlock`/`dealloc`. There
+/// is no error channel on those paths, and continuing with the old protection
+/// would silently weaken the allocation, so a failure is fatal like a canary
+/// mismatch.
+#[cfg(any(unix, windows))]
+#[inline]
+unsafe fn mprotect_or_abort(ptr: *mut u8, len: usize, prot: Prot::Ty, what: &'static str) {
+    if !_mprotect(ptr, len, prot) {
+        // Best-effort diagnostic: a failed stderr write must not pre-empt the abort.
+        use std::io::Write;
+        let _ = writeln!(std::io::stderr(), "secure-alloc: mprotect failed: {what}");
+        abort();
+    }
+}
+
 /// Secure `mprotect`.
 ///
 /// # Safety
@@ -241,11 +268,17 @@ unsafe fn _malloc(size: usize) -> Option<*mut u8> {
     let unprotected_ptr = base_ptr.add(PAGE_SIZE * 2);
 
     // mprotect ptr
-    _mprotect(base_ptr.add(PAGE_SIZE), PAGE_SIZE, Prot::NoAccess);
-    _mprotect(
+    mprotect_or_abort(
+        base_ptr.add(PAGE_SIZE),
+        PAGE_SIZE,
+        Prot::NoAccess,
+        "malloc guard page",
+    );
+    mprotect_or_abort(
         unprotected_ptr.add(unprotected_size),
         PAGE_SIZE,
         Prot::NoAccess,
+        "malloc trailing guard",
     );
     crate::mlock(unprotected_ptr, unprotected_size);
 
@@ -259,7 +292,7 @@ unsafe fn _malloc(size: usize) -> Option<*mut u8> {
     // `free_memfd_secret` reads uninitialised metadata or mistakes this header for
     // a `memfd_secret` one.
     ptr::write_unaligned(base_ptr.add(MEMFD_TAG_OFFSET) as *mut usize, NOT_MEMFD_TAG);
-    _mprotect(base_ptr, PAGE_SIZE, Prot::ReadOnly);
+    mprotect_or_abort(base_ptr, PAGE_SIZE, Prot::ReadOnly, "malloc metadata");
 
     assert_eq!(unprotected_ptr_from_user_ptr(user_ptr), unprotected_ptr);
 
@@ -337,7 +370,7 @@ pub unsafe fn free<T: ?Sized>(memptr: NonNull<T>) {
     // check that faulted there would kill the process instead of reaching the
     // diagnostic abort below.
     let total_size = PAGE_SIZE + PAGE_SIZE + unprotected_size + PAGE_SIZE;
-    _mprotect(base_ptr, total_size, Prot::ReadWrite);
+    mprotect_or_abort(base_ptr, total_size, Prot::ReadWrite, "free restore");
 
     // check
     #[allow(static_mut_refs)]

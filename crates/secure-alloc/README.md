@@ -154,11 +154,13 @@ unrelated descriptor. They are only compiled on Linux: on any other target the
   the first allocation (`Once`). `free` and `free_memfd_secret` compare it with the
   constant-time `memeq` and call `abort()` on a mismatch; a pointer whose page-aligned
   base is not a plausible allocation also aborts. A corrupted or foreign pointer
-  therefore kills the process, it does not return an error.
+  therefore kills the process, it does not return an error. A failed protection change
+  inside the allocator — a guard page, the read-only metadata page, or the restore
+  before `munlock` — aborts the same way rather than continuing with the old protection.
 - **`page_size` can panic while initialising.** The first call runs `alloc_init`: it panics
-  if `sysconf` reports a page size smaller than the canary/word size, and `getrandom`'s
-  failure is unwrapped; the failed `Once` is poisoned, so every later call (and every
-  allocation) panics too.
+  if `sysconf` fails or reports a page size smaller than the metadata header, and
+  `getrandom`'s failure is unwrapped; the failed `Once` is poisoned, so every later call
+  (and every allocation) panics too.
 - **`mlock` failure is ignored.** `malloc`/`malloc_sized` call `mlock` and discard its
   return value: the allocation succeeds even when the page could not be locked (for
   example when `RLIMIT_MEMLOCK` is exhausted). Call `mlock` yourself, or check

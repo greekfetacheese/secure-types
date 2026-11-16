@@ -93,11 +93,17 @@ unsafe fn _memfd_secret(size: usize) -> Option<*mut u8> {
 
     // mprotect can be used to change protection flag after mmap setup
     // https://www.gnu.org/software/libc/manual/html_node/Memory-Protection.html#index-mprotect
-    _mprotect(base_ptr.add(PAGE_SIZE), PAGE_SIZE, Prot::NoAccess);
-    _mprotect(
+    mprotect_or_abort(
+        base_ptr.add(PAGE_SIZE),
+        PAGE_SIZE,
+        Prot::NoAccess,
+        "memfd guard page",
+    );
+    mprotect_or_abort(
         unprotected_ptr.add(unprotected_size),
         PAGE_SIZE,
         Prot::NoAccess,
+        "memfd trailing guard",
     );
 
     let canary_ptr = unprotected_ptr.add(unprotected_size - size_with_canary);
@@ -116,7 +122,7 @@ unsafe fn _memfd_secret(size: usize) -> Option<*mut u8> {
         0,
     );
     ptr::write_unaligned(base_ptr.add(MEMFD_TAG_OFFSET) as *mut usize, MEMFD_TAG);
-    _mprotect(base_ptr, PAGE_SIZE, Prot::ReadOnly);
+    mprotect_or_abort(base_ptr, PAGE_SIZE, Prot::ReadOnly, "memfd metadata");
 
     assert_eq!(unprotected_ptr_from_user_ptr(user_ptr), unprotected_ptr);
 
@@ -197,7 +203,7 @@ pub unsafe fn free_memfd_secret<T: ?Sized>(memptr: NonNull<T>) {
     // the descriptor here both come from the metadata page, which the caller does not
     // protect.
     let total_size = PAGE_SIZE + PAGE_SIZE + unprotected_size + PAGE_SIZE;
-    _mprotect(base_ptr, total_size, Prot::ReadWrite);
+    mprotect_or_abort(base_ptr, total_size, Prot::ReadWrite, "memfd free restore");
 
     // check
     #[allow(static_mut_refs)]
