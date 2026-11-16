@@ -304,9 +304,37 @@ unsafe fn page_round(size: usize) -> Option<usize> {
 /// allocation failure; the free paths abort, because there `unprotected_size` comes from
 /// the metadata page and a wrapped total would `mprotect` a short range, check the canary
 /// at a wild address and `dealloc` with a layout the allocation never had.
+///
+/// The check is one-directional: it rejects a length that cannot produce a total at all,
+/// not one that produces a wrong but representable total. A metadata page corrupted toward
+/// a *shorter* length still restores too short a range and releases a layout the allocation
+/// never had. Nothing in the crate writes that page after allocation — it is read-only, and
+/// a `memfd_secret` header is not in the kernel's direct map either — so that direction
+/// needs an external writer, and closing it would take a value `free` can verify rather
+/// than re-derive from the length itself.
 #[inline]
 unsafe fn region_total(unprotected_size: usize) -> Option<usize> {
     PAGE_SIZE.checked_mul(3)?.checked_add(unprotected_size)
+}
+
+/// Reports a metadata header the region total cannot be computed from, then aborts.
+///
+/// `region_total` only returns `None` for a length the allocator never wrote into the
+/// metadata page, so this is a corrupt or foreign header rather than a caller error. The
+/// write is best-effort for the reason given on `mprotect_failed`, and the abort matches the
+/// tag and canary mismatches: a free that cannot trust the header kills the process instead
+/// of guessing at a layout.
+#[cold]
+#[inline(never)]
+fn corrupt_region_length(unprotected_size: usize) -> ! {
+    use std::io::Write;
+
+    let _ = writeln!(
+        std::io::stderr(),
+        "secure-alloc: corrupt allocation header: len {unprotected_size:#x} overflows the region total"
+    );
+
+    abort()
 }
 
 #[inline]
@@ -452,7 +480,7 @@ pub unsafe fn free<T: ?Sized>(memptr: NonNull<T>) {
     // check that faulted there would kill the process instead of reaching the
     // diagnostic abort below.
     let Some(total_size) = region_total(unprotected_size) else {
-        abort();
+        corrupt_region_length(unprotected_size);
     };
     mprotect_or_abort(base_ptr, total_size, Prot::ReadWrite, "free restore");
 
@@ -590,7 +618,7 @@ mod tests {
         {
             let pad = unsafe {
                 ptr::read_unaligned(
-                    base.add(MALLOC_TAG_OFFSET + mem::size_of::<libc::c_int>()) as *const u32,
+                    base.add(MALLOC_TAG_OFFSET + mem::size_of::<libc::c_int>()) as *const u32
                 )
             };
             assert_eq!(pad, 0);

@@ -226,7 +226,7 @@ pub unsafe fn free_memfd_secret<T: ?Sized>(memptr: NonNull<T>) {
     // the descriptor here both come from the metadata page, which the caller does not
     // protect.
     let Some(total_size) = region_total(unprotected_size) else {
-        abort();
+        corrupt_region_length(unprotected_size);
     };
     mprotect_or_abort(base_ptr, total_size, Prot::ReadWrite, "memfd free restore");
 

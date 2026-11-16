@@ -201,9 +201,10 @@ unrelated descriptor. They are only compiled on Linux: on any other target the
 
 Forked from [quininer/memsec](https://github.com/quininer/memsec) by quininer kel, from the
 published `memsec` 0.7.0 release at upstream master commit `b4de7b9a` (2025-01-21).
-`LICENSE` is copied verbatim; the five `#[allow(static_mut_refs)]` attributes are
-upstream's, added after 0.7.0 was published. Upstream has been unmaintained since that
-release. This fork keeps the source close to upstream, so upstream fixes can still be
+`LICENSE` is copied verbatim; the four `#[allow(static_mut_refs)]` attributes this fork
+still carries are upstream's, added after 0.7.0 was published. (Upstream master has five:
+the one on the `getrandom` call in `alloc_init` went away when that call stopped borrowing
+the static.) Upstream has been unmaintained since that release. This fork keeps the source close to upstream, so upstream fixes can still be
 carried over. The layout and the API are upstream's.
 
 ## Changes from upstream
@@ -217,6 +218,17 @@ deliberate and have to survive any future sync:
   upstream aborts on the canary only;
 - the region total is computed with checked arithmetic and an `isize::MAX` ceiling, so a
   size near `usize::MAX` is an allocation failure instead of a wrapped layout;
+- the free paths check the total they derive from the metadata page too, and abort with a
+  diagnostic when the data-region length cannot produce one, instead of `mprotect`ing a
+  short range, checking the canary at a wild address and `dealloc`ing a layout the
+  allocation never had. Only the overflow direction is covered: a corrupted length that is
+  merely *short* is still trusted, because that page is read-only for the life of the
+  allocation and closing that direction needs a value `free` can verify rather than
+  re-derive from the length itself;
+- `alloc_init` validates the page size and generates the canary before it publishes
+  `PAGE_SIZE`, `PAGE_MASK` and `CANARY`, so an init that panics leaves every static
+  untouched instead of a page size that failed validation, a mask of 0 and an all-zero
+  canary that would make every comparison pass;
 - every `mprotect` result is checked. A guard page, the read-only metadata page or the
   restore before `munlock`/`munmap` that the platform rejects is an allocation failure
   (`None`) on the allocation paths and fatal on the free paths; upstream discards every
@@ -246,9 +258,11 @@ deliberate and have to survive any future sync:
   `use_os` without `alloc` build;
 - `page_size()` is public, and `mprotect` accepts either tag;
 - `tests/memfd_secret_cloexec.rs`, `tests/mlock_dump_exclusion.rs`,
-  `tests/wrong_free_aborts.rs`, `tests/protect_failure.rs` and the header-tag unit tests
-  are new regression tests for the deviations above; `protect_failure.rs` forces
-  `mprotect` to fail with a seccomp filter and with a punched-out guard page.
+  `tests/wrong_free_aborts.rs`, `tests/protect_failure.rs`,
+  `tests/free_corrupt_length_aborts.rs` and the header-tag unit tests are new regression
+  tests for the deviations above; `protect_failure.rs` forces `mprotect` to fail with a
+  seccomp filter and with a punched-out guard page, and `free_corrupt_length_aborts.rs`
+  overwrites a live allocation's data-region length and requires the free to abort.
 
 ## License
 
