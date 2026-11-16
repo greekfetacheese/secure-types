@@ -94,18 +94,32 @@ fn secretmem_descriptor_is_close_on_exec() {
     // Run only this test in the child. Without the filter the whole binary runs there, and the
     // sibling `memfd_secret_accepts_o_cloexec` opens a `secretmem` descriptor of its own: when
     // that lands on `fd`, the child's "the descriptor is closed" check fails spuriously.
-    let status = Command::new(std::env::current_exe().unwrap())
+    //
+    // The child is judged by more than its exit status: a `--exact` filter that matches no test
+    // also exits 0, so a rename would let this regression test pass without running anything.
+    let output = Command::new(std::env::current_exe().unwrap())
         .arg("secretmem_descriptor_is_close_on_exec")
         .arg("--exact")
+        .arg("--nocapture")
         .env(CHILD_FD, fd.to_string())
-        .status()
+        .output()
         .expect("failed to execute the test binary");
 
     unsafe { secure_alloc::free_memfd_secret(allocation) };
 
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let ran_once = stdout.contains("1 passed");
+
     assert!(
-        status.success(),
-        "descriptor {} was inherited across exec",
-        fd
+        output.status.success(),
+        "descriptor {} was inherited across exec: {}",
+        fd,
+        stderr
+    );
+    assert!(
+        ran_once,
+        "the child must run secretmem_descriptor_is_close_on_exec exactly once: {}",
+        stdout
     );
 }

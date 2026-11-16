@@ -3,23 +3,92 @@
 
 // `memfd_secret` is Linux-only, so this test is gated to Linux as well as to OS
 // support; non-Linux Unix gets `test_memfd_secret_is_unavailable_off_linux` instead.
+
+/// Set in the child that allocates and releases the probe alone.
+#[cfg(all(target_os = "linux", feature = "use_os"))]
+const CHILD: &str = "SECURE_TYPES_MEMFD_PROBE_CHILD";
+
+/// Open descriptors and `secretmem` mappings of this process, per `/proc/self`.
+#[cfg(all(target_os = "linux", feature = "use_os"))]
+fn secretmem_state() -> (usize, usize) {
+   let descriptors = std::fs::read_dir("/proc/self/fd")
+      .expect("/proc/self/fd")
+      .count();
+   let maps = std::fs::read_to_string("/proc/self/maps").expect("/proc/self/maps");
+   let mappings = maps
+      .lines()
+      .filter(|line| line.contains("secretmem"))
+      .count();
+
+   (descriptors, mappings)
+}
+
+/// Allocates the probe, requires the allocation to move the process state, frees it and
+/// requires the state to come back.
+#[cfg(all(target_os = "linux", feature = "use_os"))]
+fn probe_allocates_and_releases() {
+   use secure_types::secure_alloc;
+
+   let before = secretmem_state();
+   let size = std::mem::size_of::<u8>();
+   let ptr = unsafe { secure_alloc::memfd_secret_sized(size) }.expect("allocation");
+   let during = secretmem_state();
+
+   assert!(
+      during.1 > before.1,
+      "the probe must add a secretmem mapping: {:?} -> {:?}",
+      before,
+      during
+   );
+   assert!(
+      during.0 > before.0,
+      "the probe must open a secretmem descriptor: {:?} -> {:?}",
+      before,
+      during
+   );
+
+   // SAFETY: `ptr` is the allocation made just above, and it is released exactly once here.
+   unsafe { secure_alloc::free_memfd_secret(ptr) };
+
+   assert_eq!(
+      secretmem_state(),
+      before,
+      "the probe must not outlive the test"
+   );
+}
+
 #[cfg(all(target_os = "linux", feature = "use_os"))]
 #[test]
 fn test_supports_memfd_secret() {
-   use secure_types::{secure_alloc, supports_memfd_secret};
+   use secure_types::supports_memfd_secret;
 
-   let supports = supports_memfd_secret();
-
-   if supports {
-      print!("memfd_secret is supported");
-      let size = std::mem::size_of::<u8>();
-      let ptr = unsafe { secure_alloc::memfd_secret_sized(size) }.expect("allocation");
-      // The probe is a live allocation: release it, or its region and descriptor outlive the
-      // test's `memfd_secret` use.
-      unsafe { secure_alloc::free_memfd_secret(ptr) };
-   } else {
+   if !supports_memfd_secret() {
       print!("memfd_secret is not supported");
+      return;
    }
+   print!("memfd_secret is supported");
+
+   // The probe is a live allocation: release it, or its region and descriptor outlive the
+   // test. The release is pinned, not assumed: the counts are taken in a child that runs this
+   // test alone, so no sibling test opens a `secretmem` descriptor while they are read.
+   if std::env::var_os(CHILD).is_some() {
+      probe_allocates_and_releases();
+      return;
+   }
+
+   let output = std::process::Command::new(std::env::current_exe().unwrap())
+      .arg("test_supports_memfd_secret")
+      .arg("--exact")
+      .arg("--nocapture")
+      .env(CHILD, "1")
+      .output()
+      .expect("failed to execute the test binary");
+
+   assert!(
+      output.status.success(),
+      "the memfd_secret probe must release its region and descriptor: {}",
+      String::from_utf8_lossy(&output.stderr)
+   );
 }
 
 /// `memfd_secret` is Linux-only, so every other Unix reports it as unavailable
