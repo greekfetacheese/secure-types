@@ -398,6 +398,15 @@ unsafe fn _malloc(size: usize) -> Option<*mut u8> {
     // a `memfd_secret` one.
     ptr::write_unaligned(base_ptr.add(MEMFD_TAG_OFFSET) as *mut usize, NOT_MEMFD_TAG);
     if !mprotect_checked(base_ptr, PAGE_SIZE, Prot::ReadOnly, "malloc metadata") {
+        // `mlock` above already locked the data region, and `release_region` only restores the
+        // protection and frees. Unlocking first keeps the released pages out of the state
+        // they would otherwise be left in: locked and dump-excluded inside the global
+        // allocator's heap, with the `RLIMIT_MEMLOCK` charge never returned, so a later
+        // ordinary allocation in the same chunk would inherit the dump exclusion. It runs
+        // before the release, so the pages are unlocked even on the arm where the restore is
+        // refused and the region is abandoned.
+        crate::munlock(unprotected_ptr, unprotected_size);
+
         release_region(base_ptr, total_size);
         return None;
     }
