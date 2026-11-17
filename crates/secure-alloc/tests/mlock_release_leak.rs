@@ -16,6 +16,10 @@ use std::process::{Command, Output};
 /// Set in the child that makes the failed allocations.
 const CHILD: &str = "SECURE_ALLOC_MLOCK_RELEASE_LEAK";
 
+/// Exit code the child uses when `mlock` cannot succeed here, so the parent can skip: with
+/// nothing lockable the leak check would pass no matter what the code does.
+const EXIT_SKIP: i32 = 77;
+
 /// `SECCOMP_RET_ALLOW` and `SECCOMP_RET_ERRNO`, from `linux/seccomp.h`.
 const SECCOMP_RET_ALLOW: u32 = 0x7fff_0000;
 const SECCOMP_RET_ERRNO: u32 = 0x0005_0000;
@@ -122,6 +126,33 @@ fn a_failed_allocation_does_not_keep_its_lock() {
     if std::env::var_os(CHILD).is_some() {
         deny_read_only_mprotect();
 
+        // Positive control: the assertion below is only meaningful when a lock can
+        // succeed and move `VmLck`. At `RLIMIT_MEMLOCK=0` (or under a stricter limit) the
+        // failing allocations never lock anything, so a leak cannot show up at all.
+        let page = secure_alloc::page_size();
+        let layout = std::alloc::Layout::from_size_align(page, page).expect("control layout");
+        // SAFETY: the layout is non-zero and this is the matching deallocator below.
+        let control = unsafe { std::alloc::alloc(layout) };
+        assert!(!control.is_null(), "control allocation failed");
+
+        let before_control = vmlck_kb();
+        // SAFETY: `control` is a live page-aligned allocation of at least a page.
+        let locked = unsafe { secure_alloc::mlock(control, page) };
+        let after_control = vmlck_kb();
+
+        // SAFETY: same allocation, released exactly once here.
+        unsafe {
+            secure_alloc::munlock(control, page);
+            std::alloc::dealloc(control, layout);
+        }
+
+        if !locked || after_control == before_control {
+            eprintln!(
+                "skipping: mlock cannot succeed here (VmLck {before_control} -> {after_control} kB)"
+            );
+            std::process::exit(EXIT_SKIP);
+        }
+
         let before = vmlck_kb();
 
         for _ in 0..4 {
@@ -140,6 +171,12 @@ fn a_failed_allocation_does_not_keep_its_lock() {
     }
 
     let output = run_child("a_failed_allocation_does_not_keep_its_lock");
+
+    if output.status.code() == Some(EXIT_SKIP) {
+        eprintln!("skipping: mlock cannot succeed in the child here");
+        return;
+    }
+
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
 
     assert!(

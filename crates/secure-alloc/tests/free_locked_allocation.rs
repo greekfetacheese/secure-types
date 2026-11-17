@@ -21,13 +21,13 @@ const CHILD_MEMFD: &str = "SECURE_ALLOC_FREE_LOCKED_MEMFD";
 #[cfg(all(target_os = "linux", feature = "alloc_ext"))]
 const EXIT_MEMFD_UNAVAILABLE: i32 = 77;
 
-fn run_child(test: &str, marker: &str) -> std::process::ExitStatus {
+fn run_child(test: &str, marker: &str) -> std::process::Output {
     Command::new(std::env::current_exe().unwrap())
         .arg(test)
         .arg("--exact")
         .arg("--nocapture")
         .env(marker, "1")
-        .status()
+        .output()
         .expect("failed to execute the test binary")
 }
 
@@ -38,15 +38,26 @@ fn free_of_a_locked_malloc_allocation_succeeds() {
         assert!(unsafe { secure_alloc::mprotect(mem, secure_alloc::Prot::NoAccess) });
 
         unsafe { secure_alloc::free(mem) };
-        std::process::exit(0);
+        // Fall out of the test so the harness prints its summary; the parent also
+        // requires that summary, which a renamed `--exact` filter never produces.
+        return;
     }
 
-    let status = run_child("free_of_a_locked_malloc_allocation_succeeds", CHILD_MALLOC);
+    let output = run_child("free_of_a_locked_malloc_allocation_succeeds", CHILD_MALLOC);
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
 
     assert!(
-        status.success(),
+        output.status.success(),
         "freeing an allocation left NoAccess must succeed, but the child exited with {:?}",
-        status
+        output.status
+    );
+    // A `--exact` filter that matches no test also exits 0, so a rename must not let this
+    // regression test pass without running the body.
+    assert!(
+        stdout.contains("1 passed"),
+        "the child must run free_of_a_locked_malloc_allocation_succeeds exactly once: {}",
+        stdout
     );
 }
 
@@ -60,22 +71,29 @@ fn free_of_a_locked_memfd_secret_allocation_succeeds() {
         assert!(unsafe { secure_alloc::mprotect(mem, secure_alloc::Prot::NoAccess) });
 
         unsafe { secure_alloc::free_memfd_secret(mem) };
-        std::process::exit(0);
+        return;
     }
 
-    let status = run_child(
+    let output = run_child(
         "free_of_a_locked_memfd_secret_allocation_succeeds",
         CHILD_MEMFD,
     );
 
-    if status.code() == Some(EXIT_MEMFD_UNAVAILABLE) {
+    if output.status.code() == Some(EXIT_MEMFD_UNAVAILABLE) {
         eprintln!("skipping: memfd_secret is unavailable on this kernel");
         return;
     }
 
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
     assert!(
-        status.success(),
+        output.status.success(),
         "freeing a memfd_secret allocation left NoAccess must succeed, but the child exited with {:?}",
-        status
+        output.status
+    );
+    assert!(
+        stdout.contains("1 passed"),
+        "the child must run free_of_a_locked_memfd_secret_allocation_succeeds exactly once: {}",
+        stdout
     );
 }
