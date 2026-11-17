@@ -808,13 +808,10 @@ impl<T: Zeroize> SecureVec<T> {
    /// Appends every element of `src` using a single unlock/lock cycle.
    ///
    /// A loop of [`push`](Self::push) costs an `mprotect` pair per element, so bulk
-   /// copies (the serde writer feeding this vector, and the binary codec's encoder)
-   /// need this instead. The length is committed only after every write succeeded,
-   /// so a panic from `T::clone` leaves the vector at its previous length.
-   ///
-   /// Gated on `use_os` or `codec`: those are the two features that call it, and
-   /// compiling it for neither would only produce a `dead_code` warning.
-   #[cfg(any(feature = "use_os", feature = "codec"))]
+   /// copies (the serde writer feeding this vector, the binary codec's encoder, and
+   /// `SecureString::push_str`) need this instead. The length is committed only after
+   /// every write succeeded, so a panic from `T::clone` leaves the vector at its
+   /// previous length.
    pub(crate) fn extend_from_slice(&mut self, src: &[T]) -> Result<(), Error>
    where
       T: Clone,

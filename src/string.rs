@@ -154,6 +154,8 @@ impl SecureString {
 
    /// Push a `&str` into the `SecureString`
    ///
+   /// The whole slice is appended under a single unlock window, rather than one per byte.
+   ///
    /// # Panics
    ///
    /// Panics if the buffer has to grow and the new capacity overflows `usize` or the
@@ -172,9 +174,16 @@ impl SecureString {
       // invariant every reader relies on.
       self.vec.reserve(slice.len());
 
-      for s in slice.iter() {
-         self.vec.push(*s);
-      }
+      // The reservation above covers the whole slice, so this appends it under one
+      // unlock window where the `push` loop it replaces opened one per byte. The error
+      // is the growth failure `reserve` just ruled out; it is mapped rather than
+      // ignored so a future change to either call reports instead of leaving a partial
+      // append behind.
+      self.vec.extend_from_slice(slice).unwrap_or_else(|error| {
+         panic!(
+            "secure-types: SecureString::push_str append failed after the reservation ({error}); string unchanged"
+         )
+      });
    }
 
    /// Immutable access as `&str`
