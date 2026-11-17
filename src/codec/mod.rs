@@ -173,6 +173,10 @@ const DEFAULT_CAPACITY: usize = 1024;
 /// allocation. Use [`encode_with_capacity`] when the payload size is known, so
 /// the buffer does not have to be reallocated and re-locked.
 ///
+/// Encoding does not bound the value's nesting depth. [`decode`] refuses a document
+/// nested deeper than 128 depth units, so a recursive value nested past that limit
+/// round-trips into a document this crate will not read back.
+///
 /// # Errors
 ///
 /// Returns [`EncodeError::Secure`] if the locked buffer cannot be allocated or
@@ -386,7 +390,8 @@ where
 /// Recursive types are bounded at 128 depth units and return
 /// [`DecodeError::DepthLimit`]. A struct field is framed by its own sub-decoder and an
 /// `Option` adds a level of its own, so a recursive struct costs two units per level —
-/// about 64 levels — while an enum/newtype chain reaches 128.
+/// about 64 levels — while an enum/newtype chain reaches 128. The bound is on this side
+/// only: [`encode`] writes a deeper value without refusing it.
 ///
 /// Element visits are bounded too: a document may drive at most a small multiple of
 /// its own byte length in element visits, so a small document built from zero-byte

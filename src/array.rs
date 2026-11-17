@@ -119,10 +119,13 @@ impl<T: Zeroize> Drop for SourceVec<T> {
 
 /// Zeroizes a vector's elements and its whole capacity.
 ///
-/// [`Vec::zeroize`] zeroizes the elements and then clears the length, so the bytes a
-/// spare slot still holds — one a reused, truncated or drained buffer left behind — are
-/// untouched: they sit past the new length and are no longer reachable as a `&mut [T]`.
-/// The allocation is therefore also wiped as bytes.
+/// [`Vec::zeroize`] already does the whole job at the zeroize version this crate pins
+/// (1.9.0): it zeroizes the elements, clears the length, and then wipes
+/// `spare_capacity_mut()`, which holds exactly what a reused, truncated or drained
+/// buffer leaves behind. The byte wipe below is therefore belt-and-braces: the property
+/// this file relies on is "the whole allocation is wiped", and that is one dependency
+/// version away from being untrue, for the price of one volatile pass over memory the
+/// caller is about to free.
 pub(crate) fn wipe_vec<T: Zeroize>(vec: &mut Vec<T>) {
    vec.zeroize();
 
@@ -230,7 +233,8 @@ where
    /// not fully initialized, and [`from_fn`](Self::from_fn) builds its own. Treat
    /// this as a reservation, and build a usable array with
    /// [`from_slice`](Self::from_slice), [`from_slice_mut`](Self::from_slice_mut),
-   /// [`from_fn`](Self::from_fn), `Clone` or `TryFrom`.
+   /// [`from_fn`](Self::from_fn) or `TryFrom`. `Clone` carries the source's state, so a
+   /// clone of an empty array is another empty one.
    ///
    /// Only elements that are actually written are tracked as initialized: `drop`
    /// and `erase` zeroize just those, so dropping an array that was never filled is
@@ -1046,9 +1050,11 @@ mod tests {
       assert_eq!(DROP_COUNT.load(Ordering::SeqCst), 3);
    }
 
-   /// A caller's `Vec` keeps what a reused buffer held in its spare capacity, and
-   /// `Vec::zeroize` never reaches those bytes: it zeroizes the live elements and then
-   /// clears the length. The wipe therefore has to cover the whole allocation.
+   /// A caller's `Vec` keeps what a reused buffer held in its spare capacity, so the wipe
+   /// has to cover the whole allocation. At the pinned zeroize version `Vec::zeroize` also
+   /// reaches those bytes (`spare_capacity_mut`), so this pins `wipe_vec`'s contract —
+   /// every byte of the allocation zero after the call — rather than the belt-and-braces
+   /// pass on top of it.
    #[test]
    fn test_wipe_vec_zeroizes_elements_and_spare_capacity() {
       let mut vec: Vec<[u8; 4]> = Vec::with_capacity(3);

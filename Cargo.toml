@@ -60,7 +60,10 @@ expose-ptr = []
 
 # `access_violation` dereferences the raw pointer of a locked array to
 # demonstrate the SIGSEGV, so it needs the `expose-ptr` testing feature and the
-# OS-backed protection: with `no_os` the lock is a no-op and the read succeeds.
+# OS-backed protection. `no_os` cannot turn the lock off — it cannot disable the
+# default `use_os` and is a documented no-op — so what a `--no-default-features`
+# tree is missing is `use_os` itself: there the lock is a no-op and the read
+# succeeds.
 [[example]]
 name = "access_violation"
 required-features = ["expose-ptr", "use_os"]
