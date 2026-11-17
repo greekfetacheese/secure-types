@@ -743,3 +743,15 @@ fn test_header_errors_from_a_slice() {
       Err(DecodeError::TrailingBytes { extra: 1 })
    ));
 }
+/// A sequence long enough to cross several append blocks must still round-trip, and the
+/// decoded length has to be the document's own count rather than the last block's.
+#[test]
+fn test_a_long_sequence_round_trips_across_append_blocks() {
+   let plain: Vec<u32> = (0..10_000u32).collect();
+   let value = SecureVec::<u32>::from_slice(&plain).expect("secure sequence");
+   let document = encode(&value).expect("encode");
+
+   let decoded = decode::<SecureVec<u32>>(&document).expect("decode");
+   assert_eq!(decoded.len(), plain.len());
+   decoded.unlock_slice(|slice| assert!(slice.iter().eq(plain.iter())));
+}
