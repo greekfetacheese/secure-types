@@ -1,6 +1,7 @@
 # secure-alloc
 
-Secure memory allocation, locking and zeroing for Rust, in `no_std`.
+Secure memory allocation, locking and zeroing for Rust, in `no_std` apart from the
+default `alloc` feature's global allocator.
 
 This crate is a vendored fork of [quininer/memsec](https://github.com/quininer/memsec),
 republished as `secure-alloc` so it can evolve on its own release cadence. It provides:
@@ -14,9 +15,9 @@ republished as `secure-alloc` so it can evolve on its own release cadence. It pr
 - Linux-only allocations backed by `memfd_secret` (`memfd_secret`,
   `memfd_secret_sized`, `free_memfd_secret`).
 
-The crate is `#![no_std]`. The `alloc` feature is what pulls in `std` (for the global
-allocator) and `getrandom` (for the canary); with `--no-default-features` only the four
-free-standing memory helpers remain, with no dependencies at all.
+The crate carries `#![no_std]`; the default `alloc` feature is what pulls in `std` (for
+the global allocator) and `getrandom` (for the canary). With `--no-default-features`
+only the four free-standing memory helpers remain, with no dependencies at all.
 
 ```toml
 [dependencies]
@@ -64,7 +65,7 @@ unsafe {
 | Item | Signature | Notes |
 | --- | --- | --- |
 | `mlock` | `unsafe fn mlock(addr: *mut u8, len: usize) -> bool` | Unix: `mlock(2)`, plus `madvise(MADV_DONTDUMP)` on Linux or `MADV_NOCORE` on FreeBSD/DragonFly. Windows: `VirtualLock`. |
-| `munlock` | `unsafe fn munlock(addr: *mut u8, len: usize) -> bool` | Zeroes the range first, then unlocks and reverses the core-dump exclusion (`MADV_DODUMP` / `MADV_CORE` / `VirtualUnlock`). |
+| `munlock` | `unsafe fn munlock(addr: *mut u8, len: usize) -> bool` | Zeroes the range first, then unlocks; on Unix it also reverses the core-dump exclusion (`MADV_DODUMP` / `MADV_CORE`). Windows uses `VirtualUnlock`. |
 
 ### Guard-paged allocation — gate `alloc` (on by default; pulls in `getrandom`)
 
@@ -75,7 +76,7 @@ unsafe {
 | `free` | `unsafe fn free<T: ?Sized>(memptr: NonNull<T>)` | Checks the allocator tag, restores read/write protection, checks the canary, zeroes through `munlock`, and releases the allocation (`dealloc`; the block returns to the global allocator, which decides whether the pages go back to the OS). Accepts the pointer from `malloc` or `malloc_sized`; a pointer from `free_memfd_secret` aborts on the tag. |
 | `mprotect` | `unsafe fn mprotect<T: ?Sized>(memptr: NonNull<T>, prot: Prot::Ty) -> bool` | Re-protects the whole allocation's data region. Aborts unless the metadata page carries an allocator tag: it is checked before the length is read, and both `malloc` and `memfd_secret` allocations are accepted. |
 | `page_size` | `fn page_size() -> usize` | Safe, but the first call can panic while initialising (see [Security notes](#security-notes)). The page size the regions above are laid out with: guard-page and `mprotect` granularity, and the unit the data region is rounded up to. It is not a guarantee of the returned pointer's alignment (see *Layout* under [Security notes](#security-notes)). |
-| `Prot` | module of constants | Unix: `NoAccess`, `ReadOnly`, `WriteOnly`, `ReadWrite`, `Execute`, `ReadExec`, `WriteExec`, `ReadWriteExec` (raw `libc::c_int`). Windows: `NoAccess`, `ReadOnly`, `ReadWrite`, `WriteCopy`, `Execute`, `ReadExec`, `ReadWriteExec`, `WriteCopyExec`, `Guard`, `NoCache`, `WriteCombine`, and the `PAGE_TARGETS_*` flags (`PAGE_PROTECTION_FLAGS`). |
+| `Prot` | module of constants | Unix: `NoAccess`, `ReadOnly`, `WriteOnly`, `ReadWrite`, `Execute`, `ReadExec`, `WriteExec`, `ReadWriteExec` (raw `libc::c_int`). Windows: `NoAccess`, `ReadOnly`, `ReadWrite`, `WriteCopy`, `Execute`, `ReadExec`, `ReadWriteExec`, `WriteCopyExec`, `Guard`, `NoCache`, `WriteCombine`, `RevertToFileMap`, and the `PAGE_TARGETS_*` flags; the constants have the type `PAGE_PROTECTION_FLAGS`. |
 
 ```rust
 # #[cfg(feature = "alloc")]
@@ -108,6 +109,12 @@ plus `close` on free. `free_memfd_secret` checks the allocator tag before it rea
 descriptor, so a `malloc`/`malloc_sized` pointer aborts instead of closing an
 unrelated descriptor. They are only compiled on Linux: on any other target the
 `alloc_ext` feature adds nothing.
+
+`memfd_secret_sized(size)` fills the region with `0xd0` as part of the allocation, and a
+`secretmem` page is only backed when it is first touched. A `size` larger than the pages
+the system can commit therefore dies with `SIGBUS` inside that fill instead of returning
+`None`; bound the request before calling it. (The `malloc` path allocates real memory
+first, so its fill cannot run out from under it.)
 
 ## Feature flags
 
@@ -142,7 +149,10 @@ unrelated descriptor. They are only compiled on Linux: on any other target the
   alignment divides the page. An over-aligned `T` is still page-aligned (its size is
   a page multiple) but not promised its own alignment, so `malloc_sized`'s result
   carries no alignment guarantee beyond a byte buffer's, and a strengthened `T`
-  carries no guarantee of `T`'s alignment.
+  carries no guarantee of `T`'s alignment. A zero-byte allocation (`malloc_sized(0)`,
+  `memfd_secret_sized(0)`, a zero-sized `T`) places the returned pointer one byte past
+  the data region, at the start of the trailing guard page: it is a valid zero-length
+  pointer, `free`/`mprotect` accept it, and nothing may be read or written through it.
 - **Canary and allocator tag.** The metadata page holds the data-region length at
   offset 0 and, next to it, an allocator tag: `MALL` for `malloc`/`malloc_sized`, and
   `MFDS` one `usize` further along for `memfd_secret` (that slot holds its descriptor).
@@ -207,7 +217,7 @@ upstream master commit `b4de7b9a` (2025-01-21), the lint commit immediately afte
 still carries are upstream's, added after 0.7.0 was published. (Upstream master has five:
 the one on the `getrandom` call in `alloc_init` went away when that call stopped borrowing
 the static.) Upstream has been unmaintained since that release. This fork keeps the source close to upstream, so upstream fixes can still be
-carried over. The layout and the API are upstream's.
+carried over. The layout is upstream's; the only public API this fork adds is `page_size`.
 
 ## Changes from upstream
 
@@ -223,10 +233,13 @@ deliberate and have to survive any future sync:
 - the free paths check the total they derive from the metadata page too, and abort with a
   diagnostic when the data-region length cannot produce one, instead of `mprotect`ing a
   short range, reading the canary through a page it did not restore, and `dealloc`ing a
-  layout the allocation never had. Only the overflow direction is covered: a corrupted length that is
-  merely *short* is still trusted, because that page is read-only for the life of the
-  allocation and closing that direction needs a value `free` can verify rather than
-  re-derive from the length itself;
+  layout the allocation never had. Only the overflow is caught: a corrupted length that
+  is merely *shorter* or *longer* than the real one is still trusted, because that page
+  is read-only for the life of the allocation and closing it needs a value `free` can
+  verify rather than re-derive from the length itself. A longer length is the sharper
+  direction: `free` then zeroes past the end of the data region and hands `dealloc` a
+  layout the allocation never had. Reaching either needs a writer that first re-protects
+  the metadata page, which is outside this crate's contract;
 - `alloc_init` validates the page size and generates the canary before it publishes
   `PAGE_SIZE`, `PAGE_MASK` and `CANARY`, so an init that panics leaves every static
   untouched instead of a page size that failed validation, a mask of 0 and an all-zero
@@ -242,27 +255,35 @@ deliberate and have to survive any future sync:
   inside the global allocator's heap;
 - the canary is checked *after* the data region is restored to `ReadWrite` in `free` and
   `free_memfd_secret`, so an allocation the caller left protected is freeable; upstream
-  checks it first and faults (SIGSEGV) on the usage `secure-types` relies on;
+  checks it first and faults (SIGSEGV) instead;
 - a canary mismatch wipes the data region before it aborts, so the plaintext does not
   outlive the process; upstream aborts with the region still readable;
 - `src/lib.rs` — `#![doc = include_str!("../README.md")]`, so this README is the crate
   front page and its examples are doctests;
-- `src/alloc/mod.rs`, `src/alloc/allocext/linux.rs` — `::core::usize::MAX` is written
-  `usize::MAX` (identical value; the deprecated spelling is gone), and the canary uses
-  `getrandom::fill`, the 0.4 spelling;
+- `src/alloc/mod.rs`, `src/alloc/allocext/linux.rs` — the `::core::usize::MAX` size
+  guards are gone with the checked arithmetic above (`usize::MAX` survives only in the
+  tests and comments), the canary uses `getrandom::fill` (the 0.4 spelling), both
+  allocation functions return their slice through `core::ptr::slice_from_raw_parts_mut`
+  instead of building a reference to it with `core::slice::from_raw_parts_mut`, and
+  `alloc_init` carries a `debug_assert!` that the page size is a power of two;
 - `Cargo.toml` — `getrandom` 0.4 and `windows-sys` 0.61 (were 0.2 and 0.45), and docs.rs
   builds with `alloc_ext` instead of `--all-features`;
 - `src/lib.rs`, `src/mlock.rs`, `src/alloc/mod.rs`, `src/alloc/allocext/linux.rs` —
   every public `unsafe fn` documents its contract in a `# Safety` section, and the
   crate-wide `#![allow(clippy::missing_safety_doc)]` is gone (documentation only);
-- `memfd_secret` is created with `O_CLOEXEC`; `memfd_create`'s `MFD_CLOEXEC` is a
-  different value and that syscall rejects it, so passing it sent every allocation
-  through the `fcntl` fallback before this fork fixed it. The descriptor is closed
-  rather than leaked when `ftruncate` or `mmap` fails. Upstream: memsec#22;
-- `madvise` is given the page-aligned range covering the caller's bytes, so the dump
-  exclusion is not silently `EINVAL`ed, and the page size is read once with `sysconf`
-  and cached in `src/mlock.rs`. Upstream: memsec#19. The cached page size also lets
-  `use_os` without `alloc` build;
+- `memfd_secret` is created with `O_CLOEXEC`, which sets `FD_CLOEXEC` at creation;
+  upstream created the descriptor with no flag at all, so every `exec` child inherited a
+  handle to the secret memory (memsec#22). `memfd_create`'s `MFD_CLOEXEC` is a different
+  value and this syscall rejects it with `EINVAL`, so a call that passed it would fall
+  back to `memfd_secret(0)` followed by `fcntl(F_SETFD, FD_CLOEXEC)`, narrowing the
+  window to those two calls; on the kernels this has been tried on the flagged call
+  succeeds and the fallback is not reached. The descriptor is closed rather than leaked
+  when `ftruncate` or `mmap` fails. Upstream: memsec#22;
+- `madvise` is given the page-aligned range covering the caller's bytes, so a direct
+  `mlock`/`munlock` call on an unaligned range is not silently `EINVAL`ed, and the page
+  size is read once with `sysconf` and cached in `src/mlock.rs`. Upstream: memsec#19.
+  The cache is local to `mlock.rs`, so `use_os` still builds without `alloc`, as it did
+  upstream;
 - `page_size()` is public, and `mprotect` accepts either tag;
 - `tests/memfd_secret_cloexec.rs`, `tests/mlock_dump_exclusion.rs`,
   `tests/mlock_release_leak.rs`, `tests/free_locked_allocation.rs`,
