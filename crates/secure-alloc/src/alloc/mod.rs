@@ -605,11 +605,16 @@ mod tests {
         unsafe { free(mem) };
     }
 
-    /// The spare tag slot must be defined, so `free_memfd_secret` and `mprotect`
-    /// never read uninitialised metadata and cannot mistake this header for a
+    /// Pins the header layout: the second `usize` of a `malloc` metadata page must never
+    /// read as `MEMFD_TAG`, so `free_memfd_secret` cannot mistake this header for a
     /// `memfd_secret` one.
+    ///
+    /// A fresh page is zero-filled, so this does not pin the store that writes
+    /// `NOT_MEMFD_TAG`; it fails when the layout changes. The store's behavioural
+    /// consequence is pinned by `tests/wrong_free_aborts.rs`, where a cross-allocator free
+    /// must abort.
     #[test]
-    fn malloc_header_defines_the_memfd_tag_slot() {
+    fn malloc_header_spare_slot_is_not_the_memfd_tag() {
         let mem = unsafe { malloc_sized(32) }.expect("allocation");
         let base = unsafe { unprotected_ptr_from_user_ptr(mem.as_ptr() as *const u8) };
         let tag =
@@ -626,10 +631,11 @@ mod tests {
     ///
     /// The kernel zero-fills a fresh `secretmem` mapping, so this pins the header
     /// invariant rather than reproducing the pre-fix read; it fails if the layout
-    /// changes, not if the zeroing store is removed.
+    /// changes, not if the pad store is removed. A cleared tag is covered by
+    /// `tests/wrong_free_aborts.rs`.
     #[cfg(all(feature = "alloc_ext", target_os = "linux"))]
     #[test]
-    fn memfd_secret_header_defines_the_malloc_tag_slot() {
+    fn memfd_secret_header_does_not_look_like_a_malloc_header() {
         let Some(mem) = (unsafe { crate::memfd_secret_sized(32) }) else {
             return;
         };

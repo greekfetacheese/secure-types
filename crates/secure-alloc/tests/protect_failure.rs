@@ -22,6 +22,10 @@ use std::process::{Command, Output};
 #[cfg(feature = "alloc_ext")]
 const EXIT_MEMFD_UNAVAILABLE: i32 = 77;
 
+/// Exit code a child uses when the process cannot install a seccomp filter, so the parent
+/// can skip instead of reporting a red suite on a sandbox that forbids it.
+const EXIT_SECCOMP_UNAVAILABLE: i32 = 78;
+
 /// Set in the child whose guard page cannot be installed.
 const CHILD_GUARD_PAGE: &str = "SECURE_ALLOC_PROTECT_GUARD_PAGE";
 /// Set in the child whose read-only metadata page cannot be installed.
@@ -96,7 +100,10 @@ fn jump(code: u16, k: u32, jt: u8, jf: u8) -> libc::sock_filter {
 ///
 /// `allow_prot_none` lets the guard-page calls through, so the filter reaches the
 /// read-only metadata page instead of stopping at the first guard.
-fn deny_mprotect(allow_prot_none: bool) {
+///
+/// Returns `false` when the process cannot install a seccomp filter, so the caller can
+/// skip instead of failing on a host that forbids it.
+fn deny_mprotect(allow_prot_none: bool) -> bool {
     let rejected = SECCOMP_RET_ERRNO | libc::ENOMEM as u32;
 
     let mprotect = libc::SYS_mprotect as u32;
@@ -126,22 +133,21 @@ fn deny_mprotect(allow_prot_none: bool) {
 
     // SAFETY: both calls take integers and a pointer to a filter that outlives the
     // calls, and the filter is a well-formed four-statement cBPF program.
-    unsafe {
-        assert_eq!(
-            libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1 as libc::c_ulong, 0, 0, 0),
-            0,
-            "failed to set no_new_privs"
-        );
-        assert_eq!(
-            libc::prctl(
+    let installed = unsafe {
+        libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1 as libc::c_ulong, 0, 0, 0) == 0
+            && libc::prctl(
                 libc::PR_SET_SECCOMP,
                 SECCOMP_MODE_FILTER,
                 &prog as *const libc::sock_fprog,
-            ),
-            0,
-            "failed to install the seccomp filter"
-        );
+            ) == 0
+    };
+
+    if !installed {
+        let error = std::io::Error::last_os_error();
+        eprintln!("skipping: cannot install a seccomp filter: {error}");
     }
+
+    installed
 }
 
 /// The guard page is the first protection change an allocation makes. A rejected one
@@ -149,7 +155,9 @@ fn deny_mprotect(allow_prot_none: bool) {
 #[test]
 fn allocation_returns_none_when_the_guard_page_is_rejected() {
     if std::env::var_os(CHILD_GUARD_PAGE).is_some() {
-        deny_mprotect(false);
+        if !deny_mprotect(false) {
+            std::process::exit(EXIT_SECCOMP_UNAVAILABLE);
+        }
 
         // Every internal `mprotect` is refused from here on, so the guard page cannot be
         // installed and the region must not be handed out.
@@ -164,6 +172,11 @@ fn allocation_returns_none_when_the_guard_page_is_rejected() {
         "allocation_returns_none_when_the_guard_page_is_rejected",
         CHILD_GUARD_PAGE,
     );
+    if output.status.code() == Some(EXIT_SECCOMP_UNAVAILABLE) {
+        eprintln!("skipping: this process cannot install a seccomp filter");
+        return;
+    }
+
     let stderr = stderr_of(&output);
 
     assert!(
@@ -177,6 +190,14 @@ fn allocation_returns_none_when_the_guard_page_is_rejected() {
         stderr
     );
     assert_protection_detail(&stderr, "malloc guard page");
+    // The guard page is the first change; a rejected one must end the allocation there.
+    // If the guard results were discarded, the code would go on and also report the
+    // metadata change, which this pins.
+    assert!(
+        !stderr.contains("secure-alloc: mprotect failed: malloc metadata"),
+        "a rejected guard page must not be followed by the metadata change: {:?}",
+        stderr
+    );
 }
 
 /// A metadata page left writable would let the caller rewrite the length and the tag.
@@ -186,7 +207,9 @@ fn allocation_returns_none_when_the_metadata_page_is_rejected() {
     if std::env::var_os(CHILD_METADATA_PAGE).is_some() {
         // `PROT_NONE` is allowed, so both guards are installed and only the read-only
         // metadata page is refused.
-        deny_mprotect(true);
+        if !deny_mprotect(true) {
+            std::process::exit(EXIT_SECCOMP_UNAVAILABLE);
+        }
 
         if unsafe { secure_alloc::malloc_sized(32) }.is_some() {
             std::process::exit(3);
@@ -199,6 +222,12 @@ fn allocation_returns_none_when_the_metadata_page_is_rejected() {
         "allocation_returns_none_when_the_metadata_page_is_rejected",
         CHILD_METADATA_PAGE,
     );
+
+    if output.status.code() == Some(EXIT_SECCOMP_UNAVAILABLE) {
+        eprintln!("skipping: this process cannot install a seccomp filter");
+        return;
+    }
+
     let stderr = stderr_of(&output);
 
     assert!(
