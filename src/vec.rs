@@ -2383,4 +2383,57 @@ mod tests {
          "the two slots the open block wrote are zeroized and dropped"
       );
    }
+
+   /// A source that ends exactly on a block boundary fills its last block completely, so
+   /// the loop doubles once more and opens an empty block before it learns the source is
+   /// exhausted. That empty block must not change the length or discard anything: the four
+   /// elements belong to the vector, and they are zeroized and dropped once, on drop.
+   #[cfg(all(feature = "serde", feature = "use_os"))]
+   #[test]
+   fn test_extend_from_iter_ends_on_an_exact_block_boundary() {
+      let zeroized = std::sync::Arc::new(AtomicUsize::new(0));
+      let dropped = std::sync::Arc::new(AtomicUsize::new(0));
+      let mut vec = SecureVec::<Counted>::new_with_capacity(1).unwrap();
+      let mut produced = 0u8;
+
+      let counter = |id| Counted {
+         id,
+         zeroized: zeroized.clone(),
+         dropped: dropped.clone(),
+      };
+
+      // Exactly one block of four, then `None` at the top of the next one.
+      let result: Result<(), &'static str> = vec.extend_from_iter(
+         4,
+         || {
+            if produced == 4 {
+               return Ok(None);
+            }
+            produced += 1;
+            Ok(Some(counter(produced)))
+         },
+         |_| "the reservation failed",
+      );
+
+      assert_eq!(result, Ok(()));
+      assert_eq!(vec.len(), 4, "the empty block must not count");
+      assert_eq!(
+         (
+            zeroized.load(Ordering::SeqCst),
+            dropped.load(Ordering::SeqCst)
+         ),
+         (0, 0),
+         "an exhausted source discards nothing"
+      );
+
+      drop(vec);
+      assert_eq!(
+         (
+            zeroized.load(Ordering::SeqCst),
+            dropped.load(Ordering::SeqCst)
+         ),
+         (4, 4),
+         "each of the four is zeroized and dropped exactly once"
+      );
+   }
 }

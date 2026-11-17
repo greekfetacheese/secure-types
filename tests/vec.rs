@@ -216,6 +216,25 @@ fn test_deserialize_from_json_array() {
    secure.unlock_slice(|slice| assert_eq!(slice, &[1, 2, 3]));
 }
 
+#[cfg(feature = "serde")]
+#[test]
+fn test_deserialize_a_long_json_array_grows_from_an_unknown_hint() {
+   // `serde_json` sends a JSON array to `deserialize_bytes`'s array arm, i.e. to
+   // `visit_seq`, and reports no `size_hint`: the append block starts at one and
+   // doubles, which is the only path that walks every block size on the way up.
+   let plain: Vec<u8> = (0..5000u32).map(|i| i as u8).collect();
+   let json = serde_json::to_string(&plain).unwrap();
+
+   let secure: SecureVec<u8> = serde_json::from_str(&json).unwrap();
+
+   assert_eq!(secure.len(), plain.len());
+   secure.unlock_slice(|slice| assert!(slice.iter().eq(plain.iter())));
+
+   // An empty array never fills a block at all.
+   let empty: SecureVec<u8> = serde_json::from_str("[]").unwrap();
+   assert!(empty.is_empty());
+}
+
 /// A `size_hint` is a hint, not an allocation size. A format that advertises an absurd
 /// one must not make us lock that much memory up front.
 ///
