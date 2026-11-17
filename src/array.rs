@@ -273,7 +273,9 @@ where
    /// Creates a new SecureArray from a `&mut [T; LENGTH]`.
    ///
    /// The passed slice is zeroized afterwards — including when a `T::clone`
-   /// panics while the array is being filled.
+   /// panics while the array is being filled. The clone is materialised as a temporary
+   /// before it is moved into the allocation; like [`from_fn`](Self::from_fn)'s, that
+   /// temporary is not wiped.
    pub fn from_slice_mut(content: &mut [T; LENGTH]) -> Result<Self, Error>
    where
       T: Clone,
@@ -318,7 +320,9 @@ where
 
    /// Creates a new SecureArray from a `&[T; LENGTH]`.
    ///
-   /// The array is not zeroized, you are responsible for zeroizing it
+   /// The array is not zeroized, you are responsible for zeroizing it. The clone is
+   /// materialised as a temporary before it is moved into the allocation; like
+   /// [`from_fn`](Self::from_fn)'s, that temporary is not wiped.
    pub fn from_slice(content: &[T; LENGTH]) -> Result<Self, Error>
    where
       T: Clone,

@@ -214,12 +214,12 @@ impl<T: Zeroize> Drop for TailGuard<T> {
 ///
 /// `push` moves its argument into the vector, but `reserve` runs first and panics
 /// when the growth allocation fails; the unwind would drop the value without
-/// zeroizing it, and the serde visitors hold an element across the same kind of
-/// fallible reservation. The guard owns the value across that call and is disarmed by
+/// zeroizing it. `SecureArray`'s sequence visitor holds an element the same way, across
+/// its over-long length check. The guard owns the value across that step and is disarmed by
 /// `take` as it hands the value to the store: `take` runs as an argument of
 /// `ptr::write`, which cannot unwind, so nothing unwinds between the disarm and the
-/// write. Where the value goes to `push` instead, `push` arms a guard of its own
-/// before its own reservation.
+/// write. `SecureVec`'s serde visitors do not need it: `extend_from_iter` reserves before
+/// it asks the format for an element, so the value never exists across a fallible call.
 ///
 /// A `T::zeroize` that panics deterministically aborts through the double-panic rule:
 /// this guard drops during the unwind from `reserve`, so a second unwind is not

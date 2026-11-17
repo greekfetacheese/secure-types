@@ -704,6 +704,9 @@ impl<'de> de::MapAccess<'de> for StructMapAccess<'de, '_> {
       framed.leave();
       let value = value?;
 
+      // `value` is dropped by the `return` below, and nothing here can zeroize an
+      // arbitrary `V::Value`. `FrameMismatch`'s doc records that residual: a field
+      // type that owns plaintext in the ordinary allocator leaves the copy behind.
       if framed.pos != framed.buf.len() {
          return Err(DecodeError::FrameMismatch {
             unconsumed: framed.buf.len() - framed.pos,

@@ -15,9 +15,10 @@ use crate::{Error, SecureBytes};
 
 /// The buffer an encoded document is appended to.
 ///
-/// - [`SecureBytes`] locks its pages while unused, zeroizes on drop, and wipes
-///   the previous allocation when it grows. [`encode`](crate::encode) and
-///   [`encode_with_capacity`](crate::encode_with_capacity) write here.
+/// - [`SecureBytes`] locks its pages while unused with `use_os` (without it the lock is
+///   a no-op), zeroizes on drop, and wipes the previous allocation when it grows.
+///   [`encode`](crate::encode) and [`encode_with_capacity`](crate::encode_with_capacity)
+///   write here.
 /// - `Vec<u8>` does none of that. [`encode_into_vec`](crate::encode_into_vec)
 ///   writes here so a caller who is going to hold the document in an ordinary
 ///   buffer anyway — to prefix it with a codec tag, say, or to hand it to
@@ -42,6 +43,9 @@ pub(crate) trait Buffer {
    /// Panics if `offset + bytes.len()` exceeds the current length. The encoder
    /// only ever patches the `u32` length frame it wrote itself, so this is a
    /// broken-invariant check rather than a reachable runtime error.
+   ///
+   /// The [`SecureBytes`] sink also aborts with a diagnostic if the destination cannot
+   /// be re-locked; the `Vec<u8>` and [`Counter`] sinks never touch protection.
    fn patch_at(&mut self, offset: usize, bytes: &[u8]);
 
    /// Erases everything written after the first `len` bytes where the sink can

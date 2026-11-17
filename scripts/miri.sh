@@ -17,6 +17,11 @@
 #   rustup component add --toolchain nightly miri
 #
 # Usage: scripts/miri.sh [cargo miri test arguments...]
+#
+# Arguments are appended to a `--no-default-features` run: they select what is run,
+# they do not re-enable the default `use_os` build. Forwarding them on their own would
+# make `scripts/miri.sh --test no_std` run zero tests and exit 0, because all of
+# tests/no_std.rs is gated on the absence of `use_os`.
 
 set -euo pipefail
 
@@ -29,7 +34,11 @@ cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 export MIRIFLAGS="${MIRIFLAGS:--Zmiri-strict-provenance}"
 
 if [ "$#" -gt 0 ]; then
-   exec cargo +nightly miri test "$@"
+   # `--no-default-features` is not optional here: the default build's allocator calls
+   # libc, which Miri does not execute, and the suite it would select is gated on the
+   # absence of `use_os`. Without it the run selects nothing and exits 0.
+   echo "==> cargo +nightly miri test --no-default-features $*"
+   exec cargo +nightly miri test --no-default-features "$@"
 fi
 
 echo "==> no_std + alloc: containers"

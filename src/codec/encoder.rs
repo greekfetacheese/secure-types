@@ -2,8 +2,8 @@
 //!
 //! Every byte goes through [`Buffer::append`], so where the document ends up is
 //! the buffer's business: [`encode`](crate::encode) writes into a
-//! [`SecureBytes`] — locked while unused, zeroized on drop, and with the previous
-//! allocation wiped on growth — while
+//! [`SecureBytes`] — locked while unused with `use_os`, zeroized on drop, and with the
+//! previous allocation wiped on growth — while
 //! [`encode_into_vec`](crate::encode_into_vec) writes into a plain `Vec<u8>` the
 //! caller owns. Its document-byte scratch is always [`SecureBytes`], so no partial
 //! document is left in un-wiped memory either way; the frame table is separate

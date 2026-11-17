@@ -16,11 +16,11 @@
 //! None of those are serde's trait layer — they belong to `serde_json`. A
 //! format we own needs no escaping pass and no `Value`: it builds every error from
 //! a length, an index or a `&'static str`, and the only buffers it allocates for
-//! document bytes are locked `SecureBytes` (`collect_str`, and containers whose
-//! length is not known up front), which are zeroized on drop. The struct-field
-//! frame table is bookkeeping rather than document bytes: an ordinary `Vec<Frame>`
-//! whose entries are zeroized when a struct scope closes and when the encoder
-//! drops. The one message an impl can influence is discarded rather than
+//! document bytes are `SecureBytes` (`collect_str`, and containers whose length is not
+//! known up front): locked while unused with `use_os`, zeroized on drop either way. The
+//! struct-field frame table is bookkeeping rather than document bytes: an ordinary
+//! `Vec<Frame>` whose entries are zeroized when a struct scope closes and when the
+//! encoder drops. The one message an impl can influence is discarded rather than
 //! rendered in both directions — serde's own `unknown_variant` / `unknown_field`
 //! helpers format the offending name into it, and a hand-written `Serialize` impl
 //! can format payload into it. Errors are then safe to log, and a test pins that.
@@ -167,12 +167,12 @@ pub use format::{DecodeError, EncodeError, FORMAT_VERSION};
 /// pages for nothing.
 const DEFAULT_CAPACITY: usize = 1024;
 
-/// Encodes `value` into a fresh locked buffer.
+/// Encodes `value` into a fresh [`SecureBytes`].
 ///
 /// The returned [`SecureBytes`] holds the only copy of the encoded value: it is
-/// locked while unused and zeroized on drop, and growth wipes the previous
-/// allocation. Use [`encode_with_capacity`] when the payload size is known, so
-/// the buffer does not have to be reallocated and re-locked.
+/// locked while unused with `use_os` and zeroized on drop either way, and growth wipes
+/// the previous allocation. Use [`encode_with_capacity`] when the payload size is
+/// known, so the buffer does not have to be reallocated (and, with `use_os`, re-locked).
 ///
 /// Encoding does not bound the value's nesting depth. [`decode`] refuses a document
 /// nested deeper than 128 depth units, so a recursive value nested past that limit
@@ -180,7 +180,7 @@ const DEFAULT_CAPACITY: usize = 1024;
 ///
 /// # Errors
 ///
-/// Returns [`EncodeError::Secure`] if the locked buffer cannot be allocated or
+/// Returns [`EncodeError::Secure`] if the destination buffer cannot be allocated or
 /// grown, [`EncodeError::LengthOverflow`] if a value does not fit its length
 /// field, and [`EncodeError::ElementCountMismatch`] if a hand-written
 /// `Serialize` impl writes a different number of elements than it declared. A
@@ -348,10 +348,10 @@ where
    Ok(counter.count())
 }
 
-/// Decodes `value` out of a locked buffer.
+/// Decodes `value` out of a [`SecureBytes`].
 ///
-/// The buffer is unlocked only for the duration of the decode, and put back
-/// under protection afterwards — including if the decode fails.
+/// With `use_os` the buffer is unlocked only for the duration of the decode, and put
+/// back under protection afterwards — including if the decode fails.
 ///
 /// `T: DeserializeOwned` is load-bearing rather than decoration: it statically
 /// forbids any type that would borrow out of the buffer, which is what keeps a

@@ -112,7 +112,7 @@ pub(crate) fn read_varint(buf: &[u8], pos: &mut usize) -> Result<usize, DecodeEr
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum EncodeError {
-   /// The locked destination buffer could not be allocated or locked.
+   /// The destination buffer could not be allocated or locked.
    Secure(Error),
    /// A length did not fit its wire representation, such as a struct field body
    /// longer than the `u32` frame that precedes it.
@@ -225,6 +225,15 @@ pub enum DecodeError {
       extra: usize,
    },
    /// A length-framed value did not consume exactly its frame.
+   ///
+   /// The value decoded before the frame was checked is dropped here rather than
+   /// handed to the caller, and the decoder cannot wipe it: the trait layer has no
+   /// `Zeroize` bound on `V::Value`. A field type that owns plaintext in the ordinary
+   /// allocator — a `String`, a `Vec<u8>` — therefore leaves that copy behind (freed,
+   /// but un-wiped) when this is returned. Keep a secret field body in a `u8`
+   /// container, or in a type that zeroizes on drop.
+   ///
+   /// The bytes the error itself carries are a count only.
    FrameMismatch {
       /// Bytes the value left unconsumed inside its frame.
       unconsumed: usize,
