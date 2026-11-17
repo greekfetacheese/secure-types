@@ -9,6 +9,9 @@ readme = "readme.md"
 keywords = ["security", "secure", "memory", "zeroize", "no_std"]
 categories = ["memory-management", "no-std", "security"]
 license = "MIT"
+# `fuzz/` is its own workspace (`cargo fuzz` builds it with nightly and a sanitizer) and
+# `scripts/` is developer tooling: neither belongs in the published crate.
+exclude = ["/fuzz", "/scripts"]
 
 [workspace]
 members = ["crates/secure-alloc"]
