@@ -239,6 +239,12 @@ impl SecureString {
 
    /// Inserts text at the given character index
    ///
+   /// An index at or past the character length appends rather than panicking: it
+   /// resolves to the end of the buffer, so there is no tail to shift and the text
+   /// goes on the end. This is the same clamp
+   /// [`delete_text_char_range`](Self::delete_text_char_range) documents for its own
+   /// range, and it matches the text-field behaviour the method was written for.
+   ///
    /// # Returns
    ///
    /// The number of characters inserted

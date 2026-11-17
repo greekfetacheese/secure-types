@@ -68,18 +68,6 @@ impl<B: Buffer> Drop for Encoder<'_, B> {
    }
 }
 
-/// Encodes `value` into `buffer`, preceded by [`FORMAT_VERSION`].
-///
-/// The document is appended to whatever `buffer` already holds, so a caller can
-/// size it for the payload up front, or put something ahead of the document —
-/// [`encode_into_vec`](crate::encode_into_vec) exists for the latter case.
-///
-/// # Errors
-///
-/// Fails if the locked buffer cannot grow, if a value does not fit the format,
-/// or if a container's `Serialize` impl writes a different number of elements
-/// than the length it declared.
-///
 /// A failure restores `buffer` to its pre-encoding length only where the sink can
 /// do that in place: [`Buffer::rollback`] truncates a `Vec<u8>` or a `Counter`.
 /// The `SecureBytes` sink's rollback is a no-op, safe only because its owner
@@ -105,6 +93,17 @@ impl<B: Buffer> Drop for RollbackGuard<'_, B> {
    }
 }
 
+/// Encodes `value` into `buffer`, preceded by [`FORMAT_VERSION`].
+///
+/// The document is appended to whatever `buffer` already holds, so a caller can
+/// size it for the payload up front, or put something ahead of the document —
+/// [`encode_into_vec`](crate::encode_into_vec) exists for the latter case.
+///
+/// # Errors
+///
+/// Fails if the locked buffer cannot grow, if a value does not fit the format,
+/// or if a container's `Serialize` impl writes a different number of elements
+/// than the length it declared.
 pub(crate) fn encode_into<T, B>(buffer: &mut B, value: &T) -> Result<(), EncodeError>
 where
    T: ?Sized + Serialize,

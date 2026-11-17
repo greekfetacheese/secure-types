@@ -2,13 +2,14 @@
 
 The goal of this crate is to provide a simple way to properly handle sensitive data in memory (e.g. passwords, private keys, etc).
 
-Currently there are three core types — `SecureBytes` is an alias for `SecureVec<u8>`,
-`SecureBytesWriter` adapts `io::Write` onto one, and `Drain` is the iterator
-`SecureVec::drain` returns:
+Currently there are three core types:
 
 - `SecureString`: For working with strings.
 - `SecureVec`: For working with `Vec<T>`.
 - `SecureArray`: For working with `&[T; LENGTH]`.
+
+`SecureBytes` is an alias for `SecureVec<u8>`, `SecureBytesWriter` adapts `io::Write`
+onto one, and `Drain` is the iterator `SecureVec::drain` returns.
 
 ## Features
 
@@ -123,9 +124,10 @@ assert_eq!(decoded.wallet_state_key, Some(7));
 assert!(decoded.contacts.is_empty()); // `skip_serializing` -> `default`
 
 // When the caller is going to hold the document in a `Vec<u8>` anyway,
-// `encode_into_vec` appends it straight into that buffer — a codec tag first,
-// the document after it — so there is no `SecureBytes` to allocate and nothing
-// copied twice. `encode_to_vec` is the same into a fresh buffer.
+// `encode_into_vec` appends the document after whatever the buffer already holds,
+// so there is no `SecureBytes` to allocate and nothing copied twice. The `0x07`
+// below is the caller's own byte, pushed before the call; `encode_to_vec` is the
+// same document into a fresh buffer.
 //
 // That buffer is ordinary memory: not locked, and not wiped on drop.
 let mut payload = vec![0x07];

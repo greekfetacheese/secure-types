@@ -399,8 +399,12 @@ pub(crate) fn mprotect<T>(ptr: NonNull<T>, prot: Prot::Ty) -> bool {
 /// report an error, and a failed `mprotect` leaves the pages in an unknown
 /// protection state: continuing would touch them and fault halfway through the
 /// operation — mid-drop, or after the allocator has already been touched. Aborting
-/// with a diagnostic is deterministic and leaves no silently unprotected value
-/// behind.
+/// keeps the process off them: it never continues past the failed protection call,
+/// and nothing touches the value afterwards.
+///
+/// The diagnostic itself is best-effort, not deterministic: it is a blocking `write`
+/// to stderr, so a stderr pipe whose reader has stopped postpones the abort until the
+/// pipe drains. Only the abort is unconditional.
 ///
 /// The diagnostic is written with `write` rather than `eprintln!`, which panics when
 /// the write itself fails (a dead stderr pipe): a panic here would unwind out of the

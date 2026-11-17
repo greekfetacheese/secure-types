@@ -790,9 +790,10 @@ impl<'de, const LENGTH: usize> serde::Deserialize<'de> for SecureArray<u8, LENGT
             SecureArray::from_slice(bytes).map_err(serde::de::Error::custom)
          }
 
-         /// Wipe the owned buffer the format handed over, including when the copy
-         /// panics: a plain `v.zeroize()` after the call runs only on the success and
-         /// error arms, not on the unwind a `T::clone` inside the copy can start.
+         /// Wipe the owned buffer the format handed over, including on an unwind. The
+         /// guard is belt-and-braces for the `u8` copy into the array below: `u8`'s
+         /// `Clone` cannot panic, so nothing in this visitor can actually unwind, and the
+         /// guard is what would cover a future element type whose `Clone` can.
          fn visit_byte_buf<E>(self, v: Vec<u8>) -> Result<Self::Value, E>
          where
             E: serde::de::Error,

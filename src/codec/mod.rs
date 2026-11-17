@@ -178,7 +178,10 @@ const DEFAULT_CAPACITY: usize = 1024;
 /// Returns [`EncodeError::Secure`] if the locked buffer cannot be allocated or
 /// grown, [`EncodeError::LengthOverflow`] if a value does not fit its length
 /// field, and [`EncodeError::ElementCountMismatch`] if a hand-written
-/// `Serialize` impl writes a different number of elements than it declared.
+/// `Serialize` impl writes a different number of elements than it declared. A
+/// `Display` impl that fails while `collect_str` is formatting it is
+/// [`EncodeError::Unsupported`], and a hand-written `Serialize` impl that returns an
+/// error of its own is [`EncodeError::Custom`], which deliberately drops the message.
 ///
 /// # Example
 ///
