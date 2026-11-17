@@ -78,7 +78,7 @@ dependencies = [
 
 [[package]]
 name = "secure-types"
-version = "0.5.16"
+version = "0.6.0"
 dependencies = [
  "libc",
  "secure-alloc",
