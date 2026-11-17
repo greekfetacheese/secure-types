@@ -854,6 +854,93 @@ impl<T: Zeroize> SecureVec<T> {
       Ok(())
    }
 
+   /// Appends the elements a serde sequence yields, holding one unlock window per block.
+   ///
+   /// [`push`](Self::push) takes an unlock/lock pair per element, and each pair covers the
+   /// whole allocation, so a decode that appends N elements paid N protection transitions
+   /// over a region that grows with N: measured in release, 4 096 elements took 27 ms and
+   /// 65 536 took 930 ms, quadratic in the element count. This writes each element into
+   /// the reserved slot it will keep, under one guard per block, and doubles the block as
+   /// it goes, so those decodes cost 0.26 ms and 2.9 ms. `push_str` (one pair per byte) is
+   /// the sibling of this problem, not part of it.
+   ///
+   /// The price is the width of the window: it now covers the elements of one block,
+   /// including the format's `Deserialize` for them, where a `push` opened it for the
+   /// duration of one `ptr::write`. The allocation is `PROT_NONE` again before this
+   /// returns or unwinds, so a value that is not being appended to is protected exactly as
+   /// it was. `block_hint` seeds the block from the format's advisory `size_hint`, so a
+   /// short sequence reserves no more than the `push` loop it replaces.
+   ///
+   /// # Errors
+   ///
+   /// Returns the closure's error, keeping the elements written before it. A failed growth
+   /// is mapped through `reserve_error` rather than panicking, because a `Deserialize` impl
+   /// has to report it.
+   #[cfg(feature = "serde")]
+   pub(crate) fn extend_from_iter<E>(
+      &mut self,
+      block_hint: usize,
+      mut next: impl FnMut() -> Result<Option<T>, E>,
+      mut reserve_error: impl FnMut(Error) -> E,
+   ) -> Result<(), E> {
+      let mut block = block_hint.clamp(1, MAX_PREALLOCATION_FROM_SIZE_HINT);
+
+      loop {
+         self.try_reserve(block).map_err(&mut reserve_error)?;
+
+         let write_at = self.len;
+         let mut wrote = 0;
+         let mut failure = None;
+
+         {
+            // One window for the whole block, and the elements go straight into the
+            // slots they will keep: nothing is copied out of the secure allocation.
+            let _guard = UnlockGuard::new(self);
+
+            // SAFETY: `try_reserve` above made room for `block` more elements, so every
+            // slot below `write_at + block` is in bounds and uninitialised. The guard is
+            // declared first, so this discards while the pages are still open, and it
+            // covers only the slots this call wrote.
+            let mut init = unsafe { InitGuard::new(self.ptr.as_ptr().add(write_at)) };
+
+            while wrote < block {
+               match next() {
+                  Ok(Some(value)) => {
+                     // SAFETY: in bounds of the reservation and uninitialised;
+                     // `ptr::write` does not read the slot, and `wrote` records it as
+                     // live immediately after the write.
+                     unsafe {
+                        core::ptr::write(self.ptr.as_ptr().add(write_at + wrote), value);
+                     }
+                     init.wrote(wrote);
+                     wrote += 1;
+                  }
+                  Ok(None) => break,
+                  Err(error) => {
+                     failure = Some(error);
+                     break;
+                  }
+               }
+            }
+
+            init.commit();
+         }
+
+         self.len = write_at + wrote;
+
+         if let Some(error) = failure {
+            return Err(error);
+         }
+         if wrote < block {
+            return Ok(());
+         }
+
+         block = block
+            .saturating_mul(2)
+            .min(MAX_PREALLOCATION_FROM_SIZE_HINT);
+      }
+   }
+
    /// Ensures that the vector has enough capacity for at least `additional` more elements.
    ///
    /// If more capacity is needed, it will reallocate. This may cause the buffer location to change.
@@ -1152,15 +1239,16 @@ impl<T: Zeroize> Drop for SecureVec<T> {
 // access locked memory, causing a segfault. This is by design.
 // Always use unlock_slice() / unlock_slice_mut().
 
-/// Upper bound on how many elements a `Deserialize` impl will reserve up front from a
+/// Upper bound on how many elements a `Deserialize` impl reserves at once from a
 /// format-supplied `size_hint`.
 ///
 /// The hint is advisory and comes from the format, so trusting a huge one would mean
 /// locking that much memory before a single element has been read. What the cap limits is
-/// the element count handed to [`SecureVec::new_with_capacity`], which multiplies it by
-/// `size_of::<T>()`: 4096 elements pin 4 KiB for a `u8`, 64 KiB for a `u128`, and more
-/// for a user [`SeqElement`] with a large body. The vector still grows to whatever the
-/// real length turns out to be, so a low cap costs nothing but reallocation.
+/// the element count handed to [`SecureVec::new_with_capacity`] and the block
+/// `extend_from_iter` appends at a time, both of which multiply it by `size_of::<T>()`:
+/// 4096 elements pin 4 KiB for a `u8`, 64 KiB for a `u128`, and more for a user
+/// [`SeqElement`] with a large body. The vector still grows to whatever the real length
+/// turns out to be, so a low cap costs nothing but reallocation.
 #[cfg(feature = "serde")]
 const MAX_PREALLOCATION_FROM_SIZE_HINT: usize = 4096;
 
@@ -1196,24 +1284,21 @@ impl<'de> serde::Deserialize<'de> for SecureVec<u8> {
          where
             A: serde::de::SeqAccess<'de>,
          {
-            // Reserve what the format advertises, so the locked buffer is not grown
-            // (re-allocated and re-`mprotect`ed) once per element — but cap it. The hint
-            // comes from the format, and a huge one would otherwise have us lock that
-            // much memory before reading a single byte.
-            let capacity = seq
-               .size_hint()
-               .unwrap_or(0)
-               .min(MAX_PREALLOCATION_FROM_SIZE_HINT);
-            let mut vec =
-               SecureVec::new_with_capacity(capacity).map_err(serde::de::Error::custom)?;
+            // One reservation and one protection window per block instead of per element:
+            // a `push` loop grew the locked buffer and paid an `mprotect` pair for every
+            // element. The hint is advisory and comes from the format, so it is capped;
+            // `extend_from_iter` grows its block from it, which keeps a short sequence as
+            // small as the `push` loop left it.
+            let hint = seq.size_hint().unwrap_or(0);
+            let mut vec: SecureVec<u8> =
+               SecureVec::new_with_capacity(hint.min(MAX_PREALLOCATION_FROM_SIZE_HINT))
+                  .map_err(serde::de::Error::custom)?;
 
-            while let Some(byte) = seq.next_element::<u8>()? {
-               // Reserved fallibly first, for the same reason as the SeqElement
-               // visitor below: push would panic out of a decode if the growth
-               // failed, and a Deserialize impl has to report the failure instead.
-               vec.try_reserve(1).map_err(serde::de::Error::custom)?;
-               vec.push(byte);
-            }
+            vec.extend_from_iter(
+               hint,
+               || seq.next_element::<u8>(),
+               serde::de::Error::custom,
+            )?;
 
             Ok(vec)
          }
@@ -1357,25 +1442,19 @@ where
          where
             A: serde::de::SeqAccess<'de>,
          {
-            // The same capped reservation as the byte-buffer visitor: the hint comes from
-            // the format and is only advisory.
-            let capacity = seq
-               .size_hint()
-               .unwrap_or(0)
-               .min(MAX_PREALLOCATION_FROM_SIZE_HINT);
-            let mut vec =
-               SecureVec::new_with_capacity(capacity).map_err(serde::de::Error::custom)?;
+            // The same capped reservation and one window per block as the byte-buffer
+            // visitor: a `push` loop paid an `mprotect` pair for every element, over a
+            // region that grows with them, which is quadratic in the element count.
+            let hint = seq.size_hint().unwrap_or(0);
+            let mut vec: SecureVec<T> =
+               SecureVec::new_with_capacity(hint.min(MAX_PREALLOCATION_FROM_SIZE_HINT))
+                  .map_err(serde::de::Error::custom)?;
 
-            while let Some(item) = seq.next_element::<T>()? {
-               // The guard owns the element across the fallible reservation: a growth
-               // failure returns through `?` and would otherwise drop it un-zeroized.
-               let item = ValueGuard::new(item);
-
-               // Reserved fallibly first: `push` would panic out of a decode if the
-               // growth failed, and `decode_slice` promises a `DecodeError`.
-               vec.try_reserve(1).map_err(serde::de::Error::custom)?;
-               vec.push(item.take());
-            }
+            vec.extend_from_iter(
+               hint,
+               || seq.next_element::<T>(),
+               serde::de::Error::custom,
+            )?;
 
             Ok(vec)
          }
@@ -2180,6 +2259,131 @@ mod tests {
       assert!(
          stdout.contains(PUSH_GUARD_SENTINEL),
          "the child must print {PUSH_GUARD_SENTINEL:?}, got stdout {stdout:?}\nstderr: {stderr:?}"
+      );
+   }
+
+   /// A batch element that reports its lifecycle to per-test counters.
+   ///
+   /// The module statics above are shared by every test in this file, which makes them
+   /// unusable for a test that has to observe a partial count while other tests run.
+   #[cfg(all(feature = "serde", feature = "use_os"))]
+   struct Counted {
+      id: u8,
+      zeroized: std::sync::Arc<AtomicUsize>,
+      dropped: std::sync::Arc<AtomicUsize>,
+   }
+
+   #[cfg(all(feature = "serde", feature = "use_os"))]
+   impl Zeroize for Counted {
+      fn zeroize(&mut self) {
+         self.id.zeroize();
+         self.zeroized.fetch_add(1, Ordering::SeqCst);
+      }
+   }
+
+   #[cfg(all(feature = "serde", feature = "use_os"))]
+   impl Drop for Counted {
+      fn drop(&mut self) {
+         self.dropped.fetch_add(1, Ordering::SeqCst);
+      }
+   }
+
+   /// A failure part-way through a batch keeps the elements it already wrote and leaves
+   /// nothing un-owned: the slots below `len` are live, the ones above it were never
+   /// written, and `InitGuard` has nothing left to discard.
+   #[cfg(all(feature = "serde", feature = "use_os"))]
+   #[test]
+   fn test_extend_from_iter_keeps_the_written_prefix_when_the_source_fails() {
+      let zeroized = std::sync::Arc::new(AtomicUsize::new(0));
+      let dropped = std::sync::Arc::new(AtomicUsize::new(0));
+      let mut vec = SecureVec::<Counted>::new_with_capacity(1).unwrap();
+      let mut produced = 0u8;
+
+      let counter = |id| Counted {
+         id,
+         zeroized: zeroized.clone(),
+         dropped: dropped.clone(),
+      };
+
+      // Blocks of 4 then 8, so the failure lands inside the second block.
+      let result: Result<(), &'static str> = vec.extend_from_iter(
+         4,
+         || {
+            produced += 1;
+            if produced == 7 {
+               return Err("the source failed");
+            }
+            Ok(Some(counter(produced)))
+         },
+         |_| "the reservation failed",
+      );
+
+      assert_eq!(result, Err("the source failed"));
+      assert_eq!(
+         vec.len(),
+         6,
+         "the elements written before the failure stay"
+      );
+      assert_eq!(
+         zeroized.load(Ordering::SeqCst),
+         0,
+         "no live value is discarded"
+      );
+      assert_eq!(dropped.load(Ordering::SeqCst), 0);
+
+      drop(vec);
+      assert_eq!(
+         (
+            zeroized.load(Ordering::SeqCst),
+            dropped.load(Ordering::SeqCst)
+         ),
+         (6, 6),
+         "every element the batch committed is zeroized and dropped"
+      );
+   }
+
+   /// A panic from the source unwinds through both guards: `InitGuard` zeroizes and drops
+   /// what the open block had written, the window closes, and `len` never counts it.
+   #[cfg(all(feature = "serde", feature = "use_os"))]
+   #[test]
+   fn test_extend_from_iter_zeroizes_an_open_block_when_the_source_panics() {
+      let zeroized = std::sync::Arc::new(AtomicUsize::new(0));
+      let dropped = std::sync::Arc::new(AtomicUsize::new(0));
+      let mut vec = SecureVec::<Counted>::new_with_capacity(1).unwrap();
+      let mut produced = 0u8;
+
+      let counter = |id| Counted {
+         id,
+         zeroized: zeroized.clone(),
+         dropped: dropped.clone(),
+      };
+
+      let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+         let _: Result<(), ()> = vec.extend_from_iter(
+            4,
+            || {
+               produced += 1;
+               if produced == 3 {
+                  panic!("the source panicked");
+               }
+               Ok(Some(counter(produced)))
+            },
+            |_| (),
+         );
+      }));
+
+      assert!(
+         unwound.is_err(),
+         "the closure was supposed to panic"
+      );
+      assert_eq!(vec.len(), 0, "the batch was never committed");
+      assert_eq!(
+         (
+            zeroized.load(Ordering::SeqCst),
+            dropped.load(Ordering::SeqCst)
+         ),
+         (2, 2),
+         "the two slots the open block wrote are zeroized and dropped"
       );
    }
 }
