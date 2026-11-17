@@ -862,18 +862,88 @@ fn test_encode_into_vec_appends_after_a_prefix() {
    );
 }
 
+/// The byte a [`patterned_buffer`] puts in the spare capacity: nothing the encoder
+/// writes is expected to be this, so a survivor is recognisable.
+const UNTOUCHED: u8 = 0xAA;
+
+/// The only other value the spare capacity may hold after a rollback: what the wipe
+/// itself writes.
+const WIPED: u8 = 0x00;
+
+/// A buffer with `prefix` live and its spare capacity filled with [`UNTOUCHED`].
+///
+/// `assert_eq!(buffer, prefix)` compares only what is inside `len`, so on its own it
+/// cannot tell a wipe from a `truncate`: both restore the length. Filling the capacity
+/// first makes every byte the encoder wrote visible after the call, which is what pins
+/// `rollback`'s wipe.
+fn patterned_buffer(prefix: &[u8], spare: usize) -> Vec<u8> {
+   let mut buffer = Vec::with_capacity(prefix.len() + spare);
+   buffer.extend_from_slice(prefix);
+
+   let capacity = buffer.capacity();
+   // SAFETY (test-only): `capacity` is this `Vec`'s own allocation, the first
+   // `prefix.len()` bytes hold the live prefix, and the rest is spare capacity holding no
+   // element — writing `u8`s there is in bounds and initialises nothing owned.
+   unsafe {
+      core::ptr::write_bytes(
+         buffer.as_mut_ptr().add(prefix.len()),
+         UNTOUCHED,
+         capacity - prefix.len(),
+      );
+   }
+
+   buffer
+}
+
+/// The bytes past the buffer's length, up to `capacity`.
+///
+/// The buffer must have come from [`patterned_buffer`] (or been wiped by `rollback`) and
+/// must not have reallocated since, so that every byte of the range is initialised.
+fn spare_capacity(buffer: &[u8], capacity: usize) -> &[u8] {
+   assert!(
+      buffer.len() <= capacity,
+      "a buffer cannot hold more bytes than its capacity"
+   );
+
+   // SAFETY (test-only): `len <= capacity`, the range `len..capacity` of the allocation
+   // was initialised by `patterned_buffer` or by the wipe, and `u8` has no invalid values.
+   unsafe {
+      core::slice::from_raw_parts(
+         buffer.as_ptr().add(buffer.len()),
+         capacity - buffer.len(),
+      )
+   }
+}
+
+/// Requires every byte of the spare capacity to be either wiped or untouched, and names
+/// the first survivor when it is not: a surviving byte is one the encoder wrote and
+/// `rollback` failed to wipe.
+fn assert_spare_capacity_wiped(tail: &[u8], what: &str) {
+   if let Some(at) = tail
+      .iter()
+      .position(|&byte| byte != WIPED && byte != UNTOUCHED)
+   {
+      panic!(
+         "{what}: the first un-wiped byte sits at spare offset {at} ({:#04x}), inside the",
+         tail[at],
+      );
+   }
+}
+
 /// A failed encoding must not leave a partial document in a buffer this crate
 /// cannot wipe — and must leave whatever the caller already had in it alone.
 ///
 /// `DeclaresTooMany` fails at `end()`, after the version byte and two of its
 /// three declared elements have already been written, so there is always
 /// something to erase. `rollback` wipes those bytes and restores the length;
-/// a bare `truncate` would only forget them.
+/// a bare `truncate` would only forget them, and the length assertion alone passes
+/// either way — the spare-capacity check below is what tells them apart.
 #[test]
 fn test_encode_into_vec_erases_its_partial_document_on_failure() {
    const PREFIX: &[u8] = b"tag";
 
-   let mut buffer = PREFIX.to_vec();
+   let mut buffer = patterned_buffer(PREFIX, 512);
+   let capacity = buffer.capacity();
 
    let error = secure_types::encode_into_vec(&mut buffer, &DeclaresTooMany)
       .expect_err("a mismatched element count should fail the encoding");
@@ -882,6 +952,16 @@ fn test_encode_into_vec_erases_its_partial_document_on_failure() {
    assert_eq!(
       buffer, PREFIX,
       "the failed encoding left bytes behind in the caller's buffer"
+   );
+   assert_eq!(
+      buffer.capacity(),
+      capacity,
+      "the buffer reallocated, so the patterned spare capacity is gone"
+   );
+
+   assert_spare_capacity_wiped(
+      spare_capacity(&buffer, capacity),
+      "`rollback` must wipe the partial document, not only truncate it",
    );
 }
 
@@ -905,7 +985,8 @@ fn test_encode_into_vec_erases_its_partial_document_when_a_serialize_impl_panics
       }
    }
 
-   let mut buffer = PREFIX.to_vec();
+   let mut buffer = patterned_buffer(PREFIX, 512);
+   let capacity = buffer.capacity();
 
    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
       secure_types::encode_into_vec(&mut buffer, &PanicsAfterWriting)
@@ -918,6 +999,16 @@ fn test_encode_into_vec_erases_its_partial_document_when_a_serialize_impl_panics
    assert_eq!(
       buffer, PREFIX,
       "a panicking Serialize impl left a partial document in the caller's buffer"
+   );
+   assert_eq!(
+      buffer.capacity(),
+      capacity,
+      "the buffer reallocated, so the patterned spare capacity is gone"
+   );
+
+   assert_spare_capacity_wiped(
+      spare_capacity(&buffer, capacity),
+      "the unwind path must wipe the partial document, not only truncate it",
    );
 }
 
