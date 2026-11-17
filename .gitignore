@@ -1,2 +1,8 @@
 /target
 /examples/target
+
+# `cargo fuzz`: build output, the corpus it accumulates, and the inputs it saves.
+/fuzz/target
+/fuzz/corpus
+/fuzz/artifacts
+/fuzz/coverage

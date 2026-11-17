@@ -177,6 +177,32 @@ cargo test --features serde,expose-ptr
 cargo test --no-default-features --features codec    # no_std + alloc, codec only
 ```
 
+### Miri
+
+Miri cannot run the default build: it does not execute the `libc` calls the allocator makes (`mmap`, `mlock`, `mprotect`, `memfd_secret`). The `no_std` + `alloc` build keeps the same raw-pointer container code on the plain allocator, and `tests/no_std.rs` is the suite written for it — construction, growth, `clear`/`erase`, `drain`, drop, and (with `codec`) a small encode/decode round trip, all through the public API and with an element type that owns heap memory, so a mishandled move shows up as a leak rather than as a slot that still reads back. Strict provenance is on, so a pointer that goes through `usize` and back is a finding rather than a warning.
+
+The codec integration suites run on that build too, but they are sized for native throughput — a 10 000-element round trip, a 2 000-mutation corruption sweep, a two-second wall-clock bound — and measured they do not finish in minutes under Miri, so they are not part of the default run.
+
+```bash
+scripts/miri.sh                            # the container suite, alloc-only then with codec
+cargo test --no-default-features           # the same suite, natively
+cargo test --no-default-features --features codec
+```
+
+Needs `rustup component add --toolchain nightly miri`.
+
+### Fuzzing
+
+`fuzz/` is a `cargo-fuzz` package: its own workspace, built against `no_std` + `codec` so one case costs a plain allocation rather than an `mlock`/`mprotect` pair. Five targets — three on the codec reader (`SecureString`, `SecureBytes`, and a struct/enum shape that checks decode → encode → decode is stable) and two differential ones that drive `SecureVec` and `SecureString` through an arbitrary op sequence against a plain `Vec`/`String` model.
+
+```bash
+scripts/fuzz.sh          # smoke: 10 000 runs per target
+scripts/fuzz.sh vec_ops  # one target, unbounded
+scripts/fuzz.sh --list
+```
+
+A crash lands in `fuzz/artifacts/<target>/`; hand it back to `scripts/fuzz.sh <target>` to reproduce it. Needs `cargo install cargo-fuzz`.
+
 ## License
 Licensed under the [MIT license](LICENSE-MIT).
 

@@ -1,0 +1,61 @@
+# The fuzz package is its own workspace on purpose: cargo fuzz builds it with nightly
+# and a sanitizer, and nothing in secure-types' own build depends on it.
+[package]
+name = "secure-types-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde = { version = "1", features = ["derive"] }
+
+# no_std + codec: the decoder is the part that reads attacker-controlled bytes, and this
+# build keeps it on the plain allocator. With use_os every allocation is an mlock'ed,
+# mprotect'ed region, which is orders of magnitude slower per case and runs into
+# RLIMIT_MEMLOCK after a few thousand of them.
+[dependencies.secure-types]
+path = ".."
+default-features = false
+features = ["codec"]
+
+[[bin]]
+name = "decode_secure_string"
+path = "fuzz_targets/decode_secure_string.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_secure_bytes"
+path = "fuzz_targets/decode_secure_bytes.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_vault"
+path = "fuzz_targets/decode_vault.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "vec_ops"
+path = "fuzz_targets/vec_ops.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "string_ops"
+path = "fuzz_targets/string_ops.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]
