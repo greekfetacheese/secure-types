@@ -194,7 +194,7 @@ Needs `rustup component add --toolchain nightly miri`.
 
 ### Fuzzing
 
-`fuzz/` is a `cargo-fuzz` package: its own workspace, built against `no_std` + `codec` so one case costs a plain allocation rather than an `mlock`/`mprotect` pair. Five targets — three on the codec reader (`SecureString`, `SecureBytes`, and a struct/enum shape that checks decode → encode → decode is stable) and two differential ones that drive `SecureVec` and `SecureString` through an arbitrary op sequence against a plain `Vec`/`String` model.
+`fuzz/` is a `cargo-fuzz` package: its own workspace, built against `no_std` + `codec` so one case costs a plain allocation rather than an `mlock`/`mprotect` pair. Five targets — three on the codec reader (`SecureString`, `SecureBytes`, and a struct/enum shape that checks decode → encode → decode is stable on a document it builds from the input, so that check runs on every case) and two differential ones that drive `SecureVec` and `SecureString` through an arbitrary op sequence against a plain `Vec`/`String` model.
 
 ```bash
 scripts/fuzz.sh          # smoke: 10 000 runs per target
