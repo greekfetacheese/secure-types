@@ -615,7 +615,7 @@ fn test_visit_budget_refuses_a_nested_zero_byte_container() {
 #[test]
 fn test_swallowed_key_error_is_refused_not_panicked() {
    #[derive(Debug)]
-   struct Sloppy(u8);
+   struct Sloppy;
 
    impl<'de> Deserialize<'de> for Sloppy {
       fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -641,9 +641,10 @@ fn test_swallowed_key_error_is_refused_not_panicked() {
                // The second read fails, and this visitor throws the error away.
                let _ignored = map.next_key::<String>();
 
-               let value: u8 = map.next_value()?;
+               // The value itself is not what this test is about; asking for it is.
+               let _value: u8 = map.next_value()?;
 
-               Ok(Sloppy(value))
+               Ok(Sloppy)
             }
          }
 
