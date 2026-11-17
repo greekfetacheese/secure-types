@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use secure_types::{
-   DecodeError, FORMAT_VERSION, SecureArray, SecureBytes, SecureString, SecureVec,
+   DecodeError, FORMAT_VERSION, SecureArray, SecureBytes, SecureString, SecureVec, decode_slice,
 };
 use serde::de::{self, DeserializeOwned};
 use serde::{Deserialize, Serialize};
@@ -606,4 +606,72 @@ fn test_visit_budget_refuses_a_nested_zero_byte_container() {
 
    // A legitimate zero-byte value costs no visits and still round-trips.
    assert_eq!(round_trip(&vec![vec![(); 0]]), vec![vec![(); 0]]);
+}
+
+/// A visitor that drops the error from a second `next_key` must not make the decoder cut a
+/// field body backwards. The first key's frame is still recorded as pending; the failed
+/// read has advanced the position past it, and `next_value` used to slice
+/// `buf[start..end]` with `start > end` and panic instead of refusing the document.
+#[test]
+fn test_swallowed_key_error_is_refused_not_panicked() {
+   #[derive(Debug)]
+   struct Sloppy;
+
+   impl<'de> Deserialize<'de> for Sloppy {
+      fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+      where
+         D: serde::Deserializer<'de>,
+      {
+         struct SloppyVisitor;
+
+         impl<'de> serde::de::Visitor<'de> for SloppyVisitor {
+            type Value = Sloppy;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+               write!(formatter, "a struct decoded by a sloppy visitor")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+               A: serde::de::MapAccess<'de>,
+            {
+               // The first key reads cleanly, so its frame is the pending one.
+               let _first: String = map.next_key()?.ok_or_else(|| de::Error::custom("no key"))?;
+
+               // The second read fails, and this visitor throws the error away.
+               let _ignored = map.next_key::<String>();
+
+               // The value itself is not what this test is about; asking for it is.
+               let _value: u8 = map.next_value()?;
+
+               Ok(Sloppy)
+            }
+         }
+
+         deserializer.deserialize_struct("Sloppy", &["a"], SloppyVisitor)
+      }
+   }
+
+   // version, field count 2, name "a", a zero-length frame, then a name whose declared
+   // length of 3 overruns the two bytes left in the document.
+   let document = [
+      FORMAT_VERSION,
+      0x02,
+      0x01,
+      b'a',
+      0,
+      0,
+      0,
+      0,
+      0x03,
+      b'A',
+      b'B',
+   ];
+
+   let result = decode_slice::<Sloppy>(&document);
+
+   assert!(
+      matches!(result, Err(DecodeError::Custom)),
+      "a stale field frame must be refused, not sliced: {result:?}"
+   );
 }

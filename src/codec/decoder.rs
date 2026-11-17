@@ -636,6 +636,12 @@ impl<'de> de::MapAccess<'de> for StructMapAccess<'de, '_> {
       if self.remaining == 0 {
          return Ok(None);
       }
+
+      // A key that fails to read must not leave the previous key's frame pending: the
+      // reads below advance `pos` on error (see `read_varint`), so the stale `value_end`
+      // would be behind the position `next_value_seed` slices from.
+      self.value_pending = false;
+
       self.decoder.count_visit()?;
 
       let name = self.decoder.read_str()?;
@@ -672,6 +678,13 @@ impl<'de> de::MapAccess<'de> for StructMapAccess<'de, '_> {
 
       let start = self.decoder.pos;
       let end = self.value_end;
+
+      // Defence in depth: clearing `value_pending` in `next_key_seed` is what makes this
+      // unreachable, but the range is built from two raw offsets and slicing it backwards
+      // panics instead of reporting a bad document.
+      if start > end {
+         return Err(DecodeError::InvalidLength);
+      }
 
       // Bound the field to its frame. A decoder over just the frame body gets
       // the frame's end as a hard upper bound for free, and `framed` is what
