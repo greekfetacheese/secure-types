@@ -270,7 +270,8 @@ unsafe fn release_region(base_ptr: *mut u8, total_size: usize) {
 /// `memfd_secret` or `memfd_secret_sized` and not yet freed, and the caller must
 /// hold up whatever flags it installs: no access may violate them until they are
 /// changed again or the allocation is freed. A pointer whose metadata page does
-/// not carry either allocator tag aborts rather than being re-protected. A
+/// not carry either allocator tag aborts rather than being re-protected; one whose
+/// derived metadata page is unmapped faults instead (SIGSEGV), as on [`free`]. A
 /// `false` return means the platform rejected the call; do not assume the
 /// requested flags are in place.
 #[cfg(any(unix, windows))]
@@ -315,10 +316,11 @@ unsafe fn page_round(size: usize) -> Option<usize> {
 /// The check is one-directional: it rejects a length that cannot produce a total at all,
 /// not one that produces a wrong but representable total. A metadata page corrupted toward
 /// a *shorter* length still restores too short a range and releases a layout the allocation
-/// never had. Nothing in the crate writes that page after allocation — it is read-only, and
-/// a `memfd_secret` header is not in the kernel's direct map either — so that direction
-/// needs an external writer, and closing it would take a value `free` can verify rather
-/// than re-derive from the length itself.
+/// never had; corrupted toward a *longer* one it zeroes past the end of the data region and
+/// releases that same wrong layout. Nothing in the crate writes that page after allocation —
+/// it is read-only, and a `memfd_secret` header is not in the kernel's direct map either —
+/// so either direction needs an external writer, and closing it would take a value `free`
+/// can verify rather than re-derive from the length itself.
 #[inline]
 unsafe fn region_total(unprotected_size: usize) -> Option<usize> {
     PAGE_SIZE.checked_mul(3)?.checked_add(unprotected_size)
@@ -437,6 +439,9 @@ unsafe fn _malloc(size: usize) -> Option<*mut u8> {
 /// is a multiple of the alignment only when the alignment divides a page — so an
 /// over-aligned `T` gets a misaligned pointer, and writing through it is undefined
 /// behaviour.
+///
+/// A zero-sized `T` allocates no data bytes: the returned pointer is the first byte of
+/// the trailing guard page, valid only as a zero-length pointer (see [`malloc_sized`]).
 #[inline]
 pub unsafe fn malloc<T>() -> Option<NonNull<T>> {
     _malloc(mem::size_of::<T>()).map(|memptr| {
@@ -451,6 +456,10 @@ pub unsafe fn malloc<T>() -> Option<NonNull<T>> {
 ///
 /// The returned bytes are filled with `0xd0`. Release the allocation exactly
 /// once with `free` — not `dealloc`, and not `free_memfd_secret`.
+///
+/// A zero `size` returns a zero-length slice whose pointer is the first byte of the
+/// trailing guard page. It may be passed to `free` or `mprotect`, but nothing may be
+/// read or written through it.
 #[inline]
 pub unsafe fn malloc_sized(size: usize) -> Option<NonNull<[u8]>> {
     _malloc(size).map(|memptr| {

@@ -144,6 +144,10 @@ unsafe fn _memfd_secret(size: usize) -> Option<*mut u8> {
 /// once with `free_memfd_secret` — not `free` — and do not read or write outside
 /// the region it was allocated for.
 ///
+/// A zero-sized `T` allocates no data bytes: the returned pointer is the first byte of
+/// the trailing guard page, valid only as a zero-length pointer (see
+/// [`memfd_secret_sized`]).
+///
 /// The pointer is aligned for `T` only while `align_of::<T>() <= page_size()`, for
 /// the reason given on [`malloc`](crate::malloc): an over-aligned `T` lands on a
 /// misaligned address, and writing through it is undefined behaviour.
@@ -161,6 +165,11 @@ pub unsafe fn memfd_secret<T>() -> Option<NonNull<T>> {
 ///
 /// The returned bytes are filled with `0xd0`. Release the allocation exactly
 /// once with `free_memfd_secret` — not `free`.
+///
+/// A zero `size` returns a zero-length slice whose pointer is the first byte of the
+/// trailing guard page; it may be passed to `free_memfd_secret` or `mprotect`, but
+/// nothing may be read or written through it. A `size` larger than the pages the system
+/// can commit dies with `SIGBUS` during the fill instead of returning `None`.
 #[inline]
 pub unsafe fn memfd_secret_sized(size: usize) -> Option<NonNull<[u8]>> {
     _memfd_secret(size).map(|memptr| {
