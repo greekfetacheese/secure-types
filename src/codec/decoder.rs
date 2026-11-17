@@ -8,6 +8,7 @@
 //! forbids such borrowing statically.
 
 use serde::de::{self, DeserializeOwned, DeserializeSeed, Visitor};
+use zeroize::Zeroize;
 
 use super::format::{DecodeError, FORMAT_VERSION, read_varint};
 
@@ -111,6 +112,22 @@ impl<'de> Decoder<'de> {
       array.copy_from_slice(self.take(N)?);
 
       Ok(array)
+   }
+
+   /// Reads `N` document bytes, maps them to a value, and wipes the copy.
+   ///
+   /// The mirror of the encoder's `write_scalar`: a scalar's little-endian form *is*
+   /// the plaintext, and [`read_array`](Self::read_array) hands back a stack copy that
+   /// would otherwise outlive the call un-wiped.
+   fn read_scalar<const N: usize, R>(
+      &mut self,
+      map: impl FnOnce([u8; N]) -> R,
+   ) -> Result<R, DecodeError> {
+      let mut bytes = self.read_array::<N>()?;
+      let value = map(bytes);
+      bytes.zeroize();
+
+      Ok(value)
    }
 
    fn read_varint(&mut self) -> Result<usize, DecodeError> {
@@ -231,95 +248,93 @@ impl<'de> de::Deserializer<'de> for &mut Decoder<'de> {
    where
       V: Visitor<'de>,
    {
-      visitor.visit_i8(i8::from_le_bytes(self.read_array::<1>()?))
+      visitor.visit_i8(self.read_scalar(i8::from_le_bytes)?)
    }
 
    fn deserialize_i16<V>(self, visitor: V) -> Result<V::Value, DecodeError>
    where
       V: Visitor<'de>,
    {
-      visitor.visit_i16(i16::from_le_bytes(self.read_array::<2>()?))
+      visitor.visit_i16(self.read_scalar(i16::from_le_bytes)?)
    }
 
    fn deserialize_i32<V>(self, visitor: V) -> Result<V::Value, DecodeError>
    where
       V: Visitor<'de>,
    {
-      visitor.visit_i32(i32::from_le_bytes(self.read_array::<4>()?))
+      visitor.visit_i32(self.read_scalar(i32::from_le_bytes)?)
    }
 
    fn deserialize_i64<V>(self, visitor: V) -> Result<V::Value, DecodeError>
    where
       V: Visitor<'de>,
    {
-      visitor.visit_i64(i64::from_le_bytes(self.read_array::<8>()?))
+      visitor.visit_i64(self.read_scalar(i64::from_le_bytes)?)
    }
 
    fn deserialize_i128<V>(self, visitor: V) -> Result<V::Value, DecodeError>
    where
       V: Visitor<'de>,
    {
-      visitor.visit_i128(i128::from_le_bytes(self.read_array::<16>()?))
+      visitor.visit_i128(self.read_scalar(i128::from_le_bytes)?)
    }
 
    fn deserialize_u8<V>(self, visitor: V) -> Result<V::Value, DecodeError>
    where
       V: Visitor<'de>,
    {
-      visitor.visit_u8(u8::from_le_bytes(self.read_array::<1>()?))
+      visitor.visit_u8(self.read_scalar(u8::from_le_bytes)?)
    }
 
    fn deserialize_u16<V>(self, visitor: V) -> Result<V::Value, DecodeError>
    where
       V: Visitor<'de>,
    {
-      visitor.visit_u16(u16::from_le_bytes(self.read_array::<2>()?))
+      visitor.visit_u16(self.read_scalar(u16::from_le_bytes)?)
    }
 
    fn deserialize_u32<V>(self, visitor: V) -> Result<V::Value, DecodeError>
    where
       V: Visitor<'de>,
    {
-      visitor.visit_u32(u32::from_le_bytes(self.read_array::<4>()?))
+      visitor.visit_u32(self.read_scalar(u32::from_le_bytes)?)
    }
 
    fn deserialize_u64<V>(self, visitor: V) -> Result<V::Value, DecodeError>
    where
       V: Visitor<'de>,
    {
-      visitor.visit_u64(u64::from_le_bytes(self.read_array::<8>()?))
+      visitor.visit_u64(self.read_scalar(u64::from_le_bytes)?)
    }
 
    fn deserialize_u128<V>(self, visitor: V) -> Result<V::Value, DecodeError>
    where
       V: Visitor<'de>,
    {
-      visitor.visit_u128(u128::from_le_bytes(self.read_array::<16>()?))
+      visitor.visit_u128(self.read_scalar(u128::from_le_bytes)?)
    }
 
    fn deserialize_f32<V>(self, visitor: V) -> Result<V::Value, DecodeError>
    where
       V: Visitor<'de>,
    {
-      visitor.visit_f32(f32::from_bits(u32::from_le_bytes(
-         self.read_array::<4>()?,
-      )))
+      let bits = self.read_scalar(u32::from_le_bytes)?;
+      visitor.visit_f32(f32::from_bits(bits))
    }
 
    fn deserialize_f64<V>(self, visitor: V) -> Result<V::Value, DecodeError>
    where
       V: Visitor<'de>,
    {
-      visitor.visit_f64(f64::from_bits(u64::from_le_bytes(
-         self.read_array::<8>()?,
-      )))
+      let bits = self.read_scalar(u64::from_le_bytes)?;
+      visitor.visit_f64(f64::from_bits(bits))
    }
 
    fn deserialize_char<V>(self, visitor: V) -> Result<V::Value, DecodeError>
    where
       V: Visitor<'de>,
    {
-      match char::from_u32(u32::from_le_bytes(self.read_array::<4>()?)) {
+      match char::from_u32(self.read_scalar(u32::from_le_bytes)?) {
          Some(value) => visitor.visit_char(value),
          None => Err(DecodeError::InvalidChar),
       }

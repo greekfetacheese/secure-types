@@ -153,6 +153,18 @@ impl<'a, B: Buffer> Encoder<'a, B> {
       self.bytes.append(bytes).map_err(EncodeError::Secure)
    }
 
+   /// Appends `bytes` and wipes the copy afterwards.
+   ///
+   /// A scalar's little-endian form *is* the plaintext, and the array it is written
+   /// from is a stack temporary: without the wipe the value outlives the call in a
+   /// slot the next frame inherits.
+   fn write_scalar<const N: usize>(&mut self, mut bytes: [u8; N]) -> Result<(), EncodeError> {
+      let result = self.write_bytes(&bytes);
+      bytes.zeroize();
+
+      result
+   }
+
    /// Appends `value` as an unsigned LEB128 varint.
    fn write_varint(&mut self, value: usize) -> Result<(), EncodeError> {
       write_varint(self.bytes, value).map_err(EncodeError::Secure)
@@ -302,57 +314,57 @@ impl<'a, 'b, B: Buffer> ser::Serializer for &'b mut Encoder<'a, B> {
    }
 
    fn serialize_i8(self, value: i8) -> Result<Self::Ok, Self::Error> {
-      self.write_bytes(&value.to_le_bytes())
+      self.write_scalar(value.to_le_bytes())
    }
 
    fn serialize_i16(self, value: i16) -> Result<Self::Ok, Self::Error> {
-      self.write_bytes(&value.to_le_bytes())
+      self.write_scalar(value.to_le_bytes())
    }
 
    fn serialize_i32(self, value: i32) -> Result<Self::Ok, Self::Error> {
-      self.write_bytes(&value.to_le_bytes())
+      self.write_scalar(value.to_le_bytes())
    }
 
    fn serialize_i64(self, value: i64) -> Result<Self::Ok, Self::Error> {
-      self.write_bytes(&value.to_le_bytes())
+      self.write_scalar(value.to_le_bytes())
    }
 
    fn serialize_i128(self, value: i128) -> Result<Self::Ok, Self::Error> {
-      self.write_bytes(&value.to_le_bytes())
+      self.write_scalar(value.to_le_bytes())
    }
 
    fn serialize_u8(self, value: u8) -> Result<Self::Ok, Self::Error> {
-      self.write_bytes(&value.to_le_bytes())
+      self.write_scalar(value.to_le_bytes())
    }
 
    fn serialize_u16(self, value: u16) -> Result<Self::Ok, Self::Error> {
-      self.write_bytes(&value.to_le_bytes())
+      self.write_scalar(value.to_le_bytes())
    }
 
    fn serialize_u32(self, value: u32) -> Result<Self::Ok, Self::Error> {
-      self.write_bytes(&value.to_le_bytes())
+      self.write_scalar(value.to_le_bytes())
    }
 
    fn serialize_u64(self, value: u64) -> Result<Self::Ok, Self::Error> {
-      self.write_bytes(&value.to_le_bytes())
+      self.write_scalar(value.to_le_bytes())
    }
 
    fn serialize_u128(self, value: u128) -> Result<Self::Ok, Self::Error> {
-      self.write_bytes(&value.to_le_bytes())
+      self.write_scalar(value.to_le_bytes())
    }
 
    /// Floats are written as their raw IEEE-754 bit pattern, never reformatted,
    /// so a round-trip cannot round or normalise the value.
    fn serialize_f32(self, value: f32) -> Result<Self::Ok, Self::Error> {
-      self.write_bytes(&value.to_bits().to_le_bytes())
+      self.write_scalar(value.to_bits().to_le_bytes())
    }
 
    fn serialize_f64(self, value: f64) -> Result<Self::Ok, Self::Error> {
-      self.write_bytes(&value.to_bits().to_le_bytes())
+      self.write_scalar(value.to_bits().to_le_bytes())
    }
 
    fn serialize_char(self, value: char) -> Result<Self::Ok, Self::Error> {
-      self.write_bytes(&u32::from(value).to_le_bytes())
+      self.write_scalar(u32::from(value).to_le_bytes())
    }
 
    /// Strings are written as raw UTF-8 with a length prefix: no escaping pass,

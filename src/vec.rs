@@ -12,6 +12,8 @@ use std::vec::Vec;
 use alloc::vec::Vec;
 
 use super::{Error, SecureArray, alloc, zero_bytes};
+#[cfg(feature = "use_os")]
+use crate::array::SourceVec;
 use crate::array::SourceWipe;
 use core::{
    marker::PhantomData,
@@ -212,21 +214,25 @@ impl<T: Zeroize> Drop for TailGuard<T> {
 ///
 /// `push` moves its argument into the vector, but `reserve` runs first and panics
 /// when the growth allocation fails; the unwind would drop the value without
-/// zeroizing it. The guard owns the value across that call and is disarmed by
-/// `take` only once the value has been written into the allocation.
+/// zeroizing it, and the serde visitors hold an element across the same kind of
+/// fallible reservation. The guard owns the value across that call and is disarmed by
+/// `take` as it hands the value to the store: `take` runs as an argument of
+/// `ptr::write`, which cannot unwind, so nothing unwinds between the disarm and the
+/// write. Where the value goes to `push` instead, `push` arms a guard of its own
+/// before its own reservation.
 ///
 /// A `T::zeroize` that panics deterministically aborts through the double-panic rule:
 /// this guard drops during the unwind from `reserve`, so a second unwind is not
 /// possible.
-struct ValueGuard<T: Zeroize>(Option<T>);
+pub(crate) struct ValueGuard<T: Zeroize>(Option<T>);
 
 impl<T: Zeroize> ValueGuard<T> {
-   fn new(value: T) -> Self {
+   pub(crate) fn new(value: T) -> Self {
       Self(Some(value))
    }
 
    /// Disarms the guard and hands the value back, exactly once.
-   fn take(mut self) -> T {
+   pub(crate) fn take(mut self) -> T {
       self
          .0
          .take()
@@ -406,25 +412,26 @@ impl<T: Zeroize> SecureVec<T> {
    /// an over-aligned `T` that the other constructors report as
    /// [`Error::AlignmentFailed`], and [`Error::LockFailed`] if the new region
    /// cannot be locked.
-   pub fn from_vec(mut vec: Vec<T>) -> Result<Self, Error> {
-      if vec.capacity() == 0 {
+   pub fn from_vec(vec: Vec<T>) -> Result<Self, Error> {
+      // Wipes the elements and the spare capacity on every way out of this function,
+      // until the guard is disarmed just before the elements are moved out.
+      let mut source = SourceVec::new(vec);
+      let source_vec = source.as_mut_vec();
+
+      if source_vec.capacity() == 0 {
          // `Vec::reserve` aborts on allocation failure, which would skip the wipe and
          // the `Error::AllocationFailed` this function documents.
-         if vec.try_reserve(1).is_err() {
-            vec.zeroize();
+         if source_vec.try_reserve(1).is_err() {
             return Err(Error::AllocationFailed);
          }
       }
 
-      let capacity = vec.capacity();
-      let len = vec.len();
+      let capacity = source_vec.capacity();
+      let len = source_vec.len();
 
       let size = match capacity.checked_mul(size_of::<T>()) {
          Some(s) => s,
-         None => {
-            vec.zeroize();
-            return Err(Error::AllocationFailed);
-         }
+         None => return Err(Error::AllocationFailed),
       };
 
       // SAFETY: `alloc` is `unsafe` only as a raw-allocation marker — it has no
@@ -432,11 +439,13 @@ impl<T: Zeroize> SecureVec<T> {
       // `capacity * size_of::<T>()` for `capacity >= 1`.
       let ptr = match unsafe { alloc::<T>(size) } {
          Ok(ptr) => ptr,
-         Err(_) => {
-            vec.zeroize();
-            return Err(Error::AllocationFailed);
-         }
+         Err(_) => return Err(Error::AllocationFailed),
       };
+
+      // Disarmed here: the elements are moved out one at a time below, so the guard
+      // must not wipe them. Nothing past this point unwinds — the move loop is raw
+      // reads and writes, and the byte wipe that follows is a volatile store.
+      let mut vec = source.into_inner();
 
       // Move data from the old vec into the secure allocation using ptr::read / ptr::write
       // This correctly transfers ownership for non-Copy types (e.g. structs containing String).
@@ -1348,10 +1357,14 @@ where
                SecureVec::new_with_capacity(capacity).map_err(serde::de::Error::custom)?;
 
             while let Some(item) = seq.next_element::<T>()? {
+               // The guard owns the element across the fallible reservation: a growth
+               // failure returns through `?` and would otherwise drop it un-zeroized.
+               let item = ValueGuard::new(item);
+
                // Reserved fallibly first: `push` would panic out of a decode if the
                // growth failed, and `decode_slice` promises a `DecodeError`.
                vec.try_reserve(1).map_err(serde::de::Error::custom)?;
-               vec.push(item);
+               vec.push(item.take());
             }
 
             Ok(vec)

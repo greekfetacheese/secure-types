@@ -2,7 +2,9 @@
 #[cfg(not(feature = "use_os"))]
 use alloc::vec::Vec;
 
-use super::{Error, SecureVec, alloc};
+use super::{Error, SecureVec, alloc, zero_bytes};
+#[cfg(feature = "serde")]
+use crate::vec::ValueGuard;
 use crate::vec::{FreeGuard, InitGuard};
 use core::{marker::PhantomData, mem, ptr::NonNull};
 use zeroize::Zeroize;
@@ -64,6 +66,75 @@ impl<T: Zeroize> Drop for SourceWipe<'_, T> {
       for item in self.source.iter_mut() {
          item.zeroize();
       }
+   }
+}
+
+/// Owns a caller-owned `Vec` and wipes it when it goes out of scope.
+///
+/// The sibling of [`SourceWipe`], for the constructors that consume a `Vec` instead of
+/// borrowing a slice. Tying the wipe to a guard is what makes it run on the error arms
+/// of a fallible conversion and on the unwind from a panicking `T::clone` alike: a wipe
+/// placed after the copy loop is bypassed by both.
+pub(crate) struct SourceVec<T: Zeroize>(Option<Vec<T>>);
+
+impl<T: Zeroize> SourceVec<T> {
+   pub(crate) fn new(vec: Vec<T>) -> Self {
+      Self(Some(vec))
+   }
+
+   /// The owned vector, for the copy loop that runs before the wipe.
+   pub(crate) fn as_slice(&self) -> &[T] {
+      self.0.as_deref().expect("SourceVec: vector already taken")
+   }
+
+   /// The owned vector, for the growth that has to happen before the copy loop.
+   ///
+   /// Only `SecureVec::from_vec` needs the mutable view and that constructor is
+   /// `use_os`-only, so this accessor is gated with it.
+   #[cfg(feature = "use_os")]
+   pub(crate) fn as_mut_vec(&mut self) -> &mut Vec<T> {
+      self.0.as_mut().expect("SourceVec: vector already taken")
+   }
+
+   /// Disarms the guard and hands the vector back, exactly once.
+   ///
+   /// Only `SecureVec::from_vec` disarms a `SourceVec`, and that constructor is
+   /// `use_os`-only.
+   #[cfg(feature = "use_os")]
+   pub(crate) fn into_inner(mut self) -> Vec<T> {
+      self
+         .0
+         .take()
+         .expect("SourceVec::into_inner: vector already taken")
+   }
+}
+
+impl<T: Zeroize> Drop for SourceVec<T> {
+   fn drop(&mut self) {
+      if let Some(vec) = self.0.as_mut() {
+         wipe_vec(vec);
+      }
+   }
+}
+
+/// Zeroizes a vector's elements and its whole capacity.
+///
+/// [`Vec::zeroize`] zeroizes the elements and then clears the length, so the bytes a
+/// spare slot still holds — one a reused, truncated or drained buffer left behind — are
+/// untouched: they sit past the new length and are no longer reachable as a `&mut [T]`.
+/// The allocation is therefore also wiped as bytes.
+pub(crate) fn wipe_vec<T: Zeroize>(vec: &mut Vec<T>) {
+   vec.zeroize();
+
+   let byte_size = vec.capacity() * mem::size_of::<T>();
+   // Wiped as bytes: the slots past the cleared length hold no element any more, so
+   // only the raw allocation can reach them.
+   //
+   // SAFETY: a `Vec` with a non-zero capacity still owns its allocation after `clear`,
+   // which leaves both `capacity` and `as_mut_ptr` valid, so the pointer is valid for
+   // writes of `capacity * size_of::<T>()` bytes.
+   unsafe {
+      zero_bytes(vec.as_mut_ptr() as *mut u8, byte_size);
    }
 }
 
@@ -623,21 +694,19 @@ impl<T: Clone + Zeroize, const LENGTH: usize> TryFrom<Vec<T>> for SecureArray<T,
    ///
    /// The `Vec` is consumed and zeroized — including when a `T::clone` panics
    /// while the array is being filled.
-   fn try_from(mut vec: Vec<T>) -> Result<Self, Self::Error> {
-      if vec.len() != LENGTH {
-         vec.zeroize();
+   fn try_from(vec: Vec<T>) -> Result<Self, Self::Error> {
+      // Wipes the elements and the spare capacity on every way out of this function:
+      // the length mismatch, the `Self::empty()` error, and the unwind from a
+      // panicking `T::clone` in `init_from_clone`.
+      let source = SourceVec::new(vec);
+
+      if source.as_slice().len() != LENGTH {
          return Err(Error::LengthMismatch);
       }
 
-      // Wipes the elements on every way out of this function, the unwind from a
-      // panicking `T::clone` in `init_from_clone` included.
-      let wipe = SourceWipe::new(vec.as_mut_slice());
-
       let mut new_array = Self::empty()?;
 
-      new_array.init_from_clone(wipe.as_slice());
-
-      drop(wipe);
+      new_array.init_from_clone(source.as_slice());
 
       Ok(new_array)
    }
@@ -806,6 +875,10 @@ where
                SecureVec::new_with_capacity(L).map_err(serde::de::Error::custom)?;
 
             while let Some(element) = seq.next_element::<T>()? {
+               // The guard owns the element across the length check: returning here
+               // would otherwise drop it un-zeroized.
+               let element = ValueGuard::new(element);
+
                if data.len() == L {
                   return Err(serde::de::Error::invalid_length(
                      data.len() + 1,
@@ -813,7 +886,7 @@ where
                   ));
                }
 
-               data.push(element);
+               data.push(element.take());
             }
 
             if data.len() != L {
@@ -970,6 +1043,56 @@ mod tests {
       }
 
       assert_eq!(DROP_COUNT.load(Ordering::SeqCst), 3);
+   }
+
+   /// A caller's `Vec` keeps what a reused buffer held in its spare capacity, and
+   /// `Vec::zeroize` never reaches those bytes: it zeroizes the live elements and then
+   /// clears the length. The wipe therefore has to cover the whole allocation.
+   #[test]
+   fn test_wipe_vec_zeroizes_elements_and_spare_capacity() {
+      let mut vec: Vec<[u8; 4]> = Vec::with_capacity(3);
+      vec.push([0x11; 4]);
+      vec.push([0x22; 4]);
+      vec.push([0x33; 4]);
+      // Two of the three elements now live only in the spare capacity.
+      vec.truncate(1);
+
+      assert_eq!(vec.len(), 1);
+      assert!(vec.capacity() >= 3);
+
+      // The pattern the wipe has to reach is really there: the second element sits
+      // past the length, where only the allocation can reach it.
+      let second = vec.as_ptr().cast::<u8>();
+
+      for offset in 0..core::mem::size_of::<[u8; 4]>() {
+         // SAFETY (test-only): the allocation holds three initialized elements, so
+         // bytes 4..8 of it are in bounds and written.
+         let byte = unsafe { *second.add(4 + offset) };
+         assert_eq!(
+            byte, 0x22,
+            "the spare-capacity pattern was not in place"
+         );
+      }
+
+      wipe_vec(&mut vec);
+
+      assert_eq!(vec.len(), 0, "`Vec::zeroize` clears the length");
+
+      // Read back through the `MaybeUninit<u8>` view the wipe writes through: every
+      // byte read here was written by the pushes above, so `assume_init` never reads
+      // uninitialized memory, and `u8` has no invalid values.
+      let bytes = vec.as_ptr().cast::<core::mem::MaybeUninit<u8>>();
+      let written = 3 * core::mem::size_of::<[u8; 4]>();
+
+      for offset in 0..written {
+         // SAFETY (test-only): the three pushed elements are inside the allocation,
+         // whose capacity the assertion above proved is at least three slots.
+         let byte = unsafe { (*bytes.add(offset)).assume_init() };
+         assert_eq!(
+            byte, 0,
+            "byte {offset} of the allocation was left un-wiped"
+         );
+      }
    }
 
    #[test]
