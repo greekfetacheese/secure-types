@@ -514,7 +514,8 @@ where
    /// `&mut [T]` would make `drop` and [`erase`](Self::erase) zeroize those bytes
    /// as a `T`, which is undefined behaviour. Build the array with
    /// [`from_slice`](Self::from_slice), [`from_slice_mut`](Self::from_slice_mut),
-   /// [`from_fn`](Self::from_fn), `Clone` or `TryFrom` instead.
+   /// [`from_fn`](Self::from_fn) or `TryFrom` instead: `Clone` copies the source's
+   /// `initialized` state, so a clone of an empty array is another empty one.
    ///
    /// The re-entrancy rule of [`unlock`](Self::unlock) applies here: the closure
    /// must not call any method that unlocks this array, in particular another
@@ -527,7 +528,7 @@ where
    {
       assert_eq!(
          self.initialized, LENGTH,
-         "SecureArray::unlock_mut: {} of {LENGTH} slots are initialized; build the array with from_slice, from_slice_mut, from_fn, Clone or TryFrom",
+         "SecureArray::unlock_mut: {} of {LENGTH} slots are initialized; build the array with from_slice, from_slice_mut, from_fn or TryFrom",
          self.initialized,
       );
 

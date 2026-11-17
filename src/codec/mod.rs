@@ -57,8 +57,9 @@
 //!
 //! let encoded = encode(&vault)?;
 //!
-//! // The document this crate produced lives in locked memory and is zeroized on
-//! // drop; the value it was encoded from stays wherever the caller put it.
+//! // The document this crate produced lives in a SecureBytes, locked while idle when
+//! // use_os is on and zeroized on drop either way; the value it was encoded from stays
+//! // wherever the caller put it.
 //! let decoded = decode::<VaultData>(&encoded)?;
 //!
 //! assert_eq!(decoded.wallet_state_key, Some(7));
@@ -96,9 +97,9 @@
 //! # Where the document ends up
 //!
 //! [`encode`] and [`encode_with_capacity`] write into a [`SecureBytes`]: locked
-//! while unused, zeroized on drop, and with the previous allocation wiped on
-//! growth. [`encode_to_vec`] and [`encode_into_vec`] write into an ordinary
-//! `Vec<u8>` the caller owns — for callers that keep the document in one anyway,
+//! while unused with `use_os` (the lock is a no-op without it), zeroized on drop,
+//! and with the previous allocation wiped on growth. [`encode_to_vec`] and
+//! [`encode_into_vec`] write into an ordinary `Vec<u8>` the caller owns — for callers that keep the document in one anyway,
 //! such as a codec tag to prefix it with or an API that only takes `Vec<u8>`,
 //! and would otherwise allocate a [`SecureBytes`] just to copy out of it. Both
 //! go through the same serializer, and its document-byte scratch is always a
@@ -390,8 +391,10 @@ where
 /// Recursive types are bounded at 128 depth units and return
 /// [`DecodeError::DepthLimit`]. A struct field is framed by its own sub-decoder and an
 /// `Option` adds a level of its own, so a recursive struct costs two units per level —
-/// about 64 levels — while an enum/newtype chain reaches 128. The bound is on this side
-/// only: [`encode`] writes a deeper value without refusing it.
+/// a chain of 64 `struct Node { next: Option<Box<Node>> }` nodes decodes and 65 is
+/// refused, measured — while a chain that costs one unit per level, such as an enum
+/// whose variant holds the next value, reaches 128. The bound is on this side only:
+/// [`encode`] writes a deeper value without refusing it.
 ///
 /// Element visits are bounded too: a document may drive at most a small multiple of
 /// its own byte length in element visits, so a small document built from zero-byte

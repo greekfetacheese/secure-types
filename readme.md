@@ -8,18 +8,19 @@ Currently there are three core types:
 - `SecureVec`: For working with `Vec<T>`.
 - `SecureArray`: For working with `&[T; LENGTH]`.
 
-`SecureBytes` is an alias for `SecureVec<u8>`, `SecureBytesWriter` adapts `io::Write`
-onto one, and `Drain` is the iterator `SecureVec::drain` returns.
+`SecureBytes` is an alias for `SecureVec<u8>`, `SecureBytesWriter` (with `use_os`) adapts
+`io::Write` onto one, and `Drain` (in the `vec` module, not at the crate root) is the
+iterator `SecureVec::drain` returns.
 
 ## Features
 
 - **Zeroization on Drop**: Memory is wiped when dropped.
-- **Memory locking** (OS only): Pages are `mprotect`ed `PROT_NONE` while the value is idle. They are unprotected only while an operation that needs them runs — an `unlock*` call; an internal read (`char_len`/`char_len_unchecked`, `Clone`, the `SecureArray`↔`SecureVec` conversions and `TryFrom<SecureVec<u8>> for SecureString`, serde `Serialize`, `encode*`/`encoded_len`); the codec's `decode` (which unlocks the buffer for the parse); one of the type's own mutations (`push`, `push_str`, `insert_text_at_char_idx`, `delete_text_char_range`, `clear`/`erase`, iterating or dropping a `drain`, `reserve`, `Drop`); or a write through `SecureBytesWriter` (`write`/`write_all`, which append via `extend_from_slice`). That stops accidental reads, including from this process; it is not a defence against `ptrace` or a debugger. On the malloc path the allocation is also `mlock`ed on a best-effort basis (the call's result is discarded, so hitting `RLIMIT_MEMLOCK` still constructs; Windows: `VirtualLock`) and, where the OS allows it, excluded from core dumps. Linux uses `memfd_secret` when the kernel supports it. See [How memory is locked](#how-memory-is-locked).
+- **Memory locking** (OS only): Pages are `mprotect`ed `PROT_NONE` while the value is idle. They are unprotected only while an operation that needs them runs — an `unlock*` call; an internal read (`char_len`/`char_len_unchecked`, `Clone`, the `SecureArray`↔`SecureVec` conversions and `TryFrom<SecureVec<u8>> for SecureString`, serde `Serialize`, `encode*`/`encoded_len`); the codec's `decode` (which unlocks the buffer for the parse); one of the type's own mutations (`push`, `push_str`, `insert_text_at_char_idx`, `delete_text_char_range`, `clear`/`erase`, iterating or dropping a `drain`, `reserve`, `Drop`); or a write through `SecureBytesWriter` (`write`/`write_all`, which append via `extend_from_slice`). `SecureString::drain` also unlocks on the call itself, to check that the range lies on char boundaries. That stops accidental reads, including from this process; it is not a defence against `ptrace` or a debugger. On the malloc path the allocation is also `mlock`ed on a best-effort basis (the call's result is discarded, so hitting `RLIMIT_MEMLOCK` still constructs; Windows: `VirtualLock`) and, where the OS allows it, excluded from core dumps. Linux uses `memfd_secret` when the kernel supports it. See [How memory is locked](#how-memory-is-locked).
 - **Scoped access**: No `Index`/`Deref` — `secret[0]` does not compile. The contents are read through the `unlock*` closures (the `expose-ptr` testing feature aside). They can still leave the type as an ordinary copy — `drain` yields owned elements, `Clone` duplicates them, and the conversions move them out — so treat those like any other copy of the secret.
 - **Send, not Sync**: Values can move to another thread. Sharing one instance needs an explicit lock (`Arc<Mutex<_>>`); concurrent `unlock` races on page protection.
 - **`no_std`**: Zeroization only. Disable the default features — see [Feature Flags](#feature-flags).
 - **Serde**: Optional serialization for `SecureString`, `SecureVec<T>`, and `SecureArray<T, LENGTH>`. A `u8` container serializes as a byte buffer; other element types as a sequence (`SeqElement`) — or, for `SecureArray`, as a tuple, matching serde's own `[T; N]` convention.
-- **Binary codec** (feature `codec`): A `serde` Serializer/Deserializer that encodes into locked memory and decodes out of it. No extra dependency beyond `serde`.
+- **Binary codec** (feature `codec`): A `serde` Serializer/Deserializer that encodes into a `SecureBytes` — locked while idle with `use_os`, zeroized on drop either way — and decodes out of it. No extra dependency beyond `serde`.
 
 ## How memory is locked
 
@@ -91,7 +92,7 @@ secure_array.unlock_mut(|unlocked_slice| {
 
 ### Binary codec
 
-The `codec` feature is a small binary `serde` format. Encode goes into locked memory; decode reads out of it. `#[derive(Serialize, Deserialize)]` and `#[serde(...)]` work as usual. No extra dependency beyond `serde`.
+The `codec` feature is a small binary `serde` format. Encode goes into a `SecureBytes` — locked while idle with `use_os`, zeroized on drop in every build — and decode reads out of it. `#[derive(Serialize, Deserialize)]` and `#[serde(...)]` work as usual. No extra dependency beyond `serde`.
 
 ```rust
 # #[cfg(feature = "codec")] {
@@ -115,8 +116,8 @@ let vault = VaultData {
     contacts: vec!["not persisted".to_owned()],
 };
 
-// The encoded document is the only copy, and it lives in locked memory that is
-// zeroized on drop.
+// The encoded document is the only copy, and it lives in a SecureBytes that is
+// locked while idle when use_os is on, and zeroized on drop either way.
 let encoded = encode(&vault)?;
 let decoded = decode::<VaultData>(&encoded)?;
 
@@ -143,7 +144,7 @@ assert_eq!(payload[0], 0x07);
 
 **Not supported.** No type tags, so `deserialize_any` is unimplemented. `#[serde(flatten)]`, `#[serde(untagged)]`, and `Value`-shaped fields fail with `DecodeError::Unsupported`. Untagged enums can still serialize; they cannot be read back.
 
-**Nesting depth.** A recursive type is bounded at 128 depth units: a document nested deeper is refused with `DecodeError::DepthLimit` rather than overflowing the stack. A struct field is framed by its own sub-decoder and an `Option` adds a level of its own, so a recursive struct costs two units per level — about 64 levels, measured (`struct Node { next: Option<Box<Node>> }` accepts 63 and refuses 64). The bound is on the reader: `encode` does not refuse a value for its depth, so a recursive value nested past it produces a document `decode` rejects. A value that has to be read back has to stay inside the bound.
+**Nesting depth.** A recursive type is bounded at 128 depth units: a document nested deeper is refused with `DecodeError::DepthLimit` rather than overflowing the stack. A struct field is framed by its own sub-decoder and an `Option` adds a level of its own, so a recursive struct costs two units per level: a chain of 64 `struct Node { next: Option<Box<Node>> }` nodes decodes and 65 is refused, measured. A chain that costs one unit per level, such as `enum Chain { Nil, Next(Box<Chain>) }`, reaches 128 (129 is refused). The bound is on the reader: `encode` does not refuse a value for its depth, so a recursive value nested past it produces a document `decode` rejects. A value that has to be read back has to stay inside the bound.
 
 **Element visits.** Decoding also bounds the total element visits a document may drive to a small multiple of its own byte length, so a compact document built from zero-byte element types (`Vec<Vec<()>>`) is refused with `DecodeError::InvalidLength` instead of taking quadratic time to be rejected.
 
@@ -155,7 +156,7 @@ assert_eq!(payload[0], 0x07);
 - `use_os` (default): Enables all OS-level security features. Supported on Linux, Windows, and other Unix (macOS, FreeBSD, …); the `memfd_secret` backing (and core-dump exclusion via `MADV_DONTDUMP`) is Linux-only.
 - `no_os`: No-op, kept for backwards compatibility. `no_std` is selected by disabling the default features (`--no-default-features`), which leaves only the zeroize-on-drop guarantee.
 - `serde`: Enables serialization/deserialization.
-- `codec`: Adds `encode` / `encode_with_capacity` / `encode_to_vec` / `encode_to_vec_with_capacity` / `encode_into_vec` / `encoded_len` / `decode` / `decode_slice`, a binary format written into locked memory (or, for the `_vec` pair, into a `Vec<u8>` you own) and read out of it. Implies `serde`, works in `no_std` + `alloc`, and adds no dependency.
+- `codec`: Adds `encode` / `encode_with_capacity` / `encode_to_vec` / `encode_to_vec_with_capacity` / `encode_into_vec` / `encoded_len` / `decode` / `decode_slice`, a binary format written into a `SecureBytes` (locked while idle with `use_os`, zeroized on drop either way) or, for the `_vec` pair, into a `Vec<u8>` you own, and read out of it. Implies `serde`, works in `no_std` + `alloc` (zeroization only there, like the rest of the crate), and adds no dependency.
 - `expose-ptr`: For testing purposes. Exposes the locked memory region pointer.
 
 ## Security notes
