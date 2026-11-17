@@ -142,9 +142,9 @@ fn memfd_probe_failure_is_permanent() -> bool {
 /// instead of leaving every later container on the malloc path for the life of the process.
 ///
 /// `memfd_secret` is Linux-only. On non-Linux Unix (macOS, FreeBSD, …) this is
-/// always `false` and the crate falls back to [`secure_alloc::malloc_sized`]. On
-/// Windows the function does not exist at all, and every allocation goes through
-/// [`secure_alloc::malloc_sized`] there.
+/// always `false` and the crate falls back to [`secure_alloc::malloc_sized`]. The
+/// function does not exist at all on Windows or in any build without `use_os`; every
+/// allocation goes through [`secure_alloc::malloc_sized`] on Windows.
 #[cfg(all(feature = "use_os", unix))]
 pub fn supports_memfd_secret() -> bool {
    #[cfg(target_os = "linux")]

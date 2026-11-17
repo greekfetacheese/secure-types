@@ -257,9 +257,10 @@ impl<T: Zeroize> Drop for ValueGuard<T> {
 ///   is dropped.
 /// - **Memory Locking**: the allocation is `mprotect`ed `PROT_NONE` outside an access scope —
 ///   an `unlock*` call, or one of this type's own operations that must touch the bytes
-///   (`push`, `clear`/`erase`, `drain`, `reserve`, `Clone`, conversions, serde `Serialize`,
-///   and `Drop`) — which stops accidental reads, this process's included, but is not a defence
-///   against `ptrace` or a debugger. On the malloc path it is also
+///   (`push`, `clear`/`erase`, iterating or dropping a `drain`, `reserve`, `Clone`,
+///   conversions, serde `Serialize`, and `Drop`) — which stops accidental reads, this
+///   process's included, but is not a defence against `ptrace` or a debugger. On the
+///   malloc path it is also
 ///   `mlock`ed on a best-effort basis (the call's result is discarded, so hitting
 ///   `RLIMIT_MEMLOCK` still constructs; Windows: `VirtualLock`) and, where the OS supports it,
 ///   excluded from core dumps (`MADV_DONTDUMP` on Linux, `MADV_NOCORE` on FreeBSD/DragonFly).
