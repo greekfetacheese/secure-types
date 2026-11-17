@@ -54,6 +54,17 @@ unsafe fn madvise_aligned(addr: *mut u8, len: usize, advice: libc::c_int) {
     }
 }
 
+/// `false` when `addr + len` wraps the address space.
+///
+/// The kernel rounds a lock length up to a page, so a wrapped `usize::MAX` reaches
+/// `mlock` as a short one and reports success having covered nothing; `munlock` would
+/// reach the zeroing first and write outside the caller's range. Both therefore reject the
+/// range before the call; a valid mapping can never fill the address space.
+#[inline]
+fn range_fits(addr: *mut u8, len: usize) -> bool {
+    len == 0 || (addr as usize).checked_add(len).is_some()
+}
+
 /// Cross-platform `mlock`.
 ///
 /// * Unix `mlock`, which also excludes the range from core dumps:
@@ -71,8 +82,13 @@ unsafe fn madvise_aligned(addr: *mut u8, len: usize, advice: libc::c_int) {
 /// for the duration of the call. It does not have to be page-aligned: the range
 /// that goes to `madvise` is rounded out to whole pages, and `mlock` rounds it
 /// itself. Nothing is dereferenced here, so an invalid range only fails the
-/// underlying call, reported as `false`.
+/// underlying call, reported as `false`; a range whose end wraps the address space is
+/// rejected before any call is made.
 pub unsafe fn mlock(addr: *mut u8, len: usize) -> bool {
+    if !range_fits(addr, len) {
+        return false;
+    }
+
     #[cfg(target_os = "linux")]
     madvise_aligned(addr, len, libc::MADV_DONTDUMP);
 
@@ -103,8 +119,13 @@ pub unsafe fn mlock(addr: *mut u8, len: usize) -> bool {
 /// stay valid for the duration of the call: the range is zeroed (`memzero`)
 /// before it is unlocked. It does not have to be page-aligned, but the unlock and
 /// the restored dump inclusion work on whole pages, so neighbouring bytes in a page
-/// the range shares lose their lock and dump exclusion with it.
+/// the range shares lose their lock and dump exclusion with it. A range whose end wraps
+/// the address space is rejected with `false` before the zeroing runs.
 pub unsafe fn munlock(addr: *mut u8, len: usize) -> bool {
+    if !range_fits(addr, len) {
+        return false;
+    }
+
     crate::memzero(addr, len);
 
     #[cfg(target_os = "linux")]
