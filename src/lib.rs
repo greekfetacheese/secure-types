@@ -116,7 +116,30 @@ const fn get_header_offset<T>() -> usize {
    }
 }
 
-/// Reports whether the kernel supports `memfd_secret`-backed allocations.
+/// Whether a failed `memfd_secret` probe says something about the platform rather than
+/// about this one attempt.
+///
+/// `ENOSYS` (a kernel without the syscall), `EINVAL` (the arguments this build passes are
+/// rejected) and `EPERM` (a policy denies it) are properties of the platform, and caching
+/// them is what keeps a permanent "no" from costing a failing syscall per allocation.
+/// `EMFILE`, `ENFILE`, `ENOMEM` and `EINTR` describe the attempt: caching one would move
+/// every later allocation off `memfd_secret` for the life of the process.
+#[cfg(all(feature = "use_os", target_os = "linux"))]
+fn memfd_probe_failure_is_permanent() -> bool {
+   // Read immediately after the failing call, with no other libc call in between.
+   matches!(
+      std::io::Error::last_os_error().raw_os_error(),
+      Some(libc::ENOSYS | libc::EINVAL | libc::EPERM)
+   )
+}
+
+/// Reports whether `memfd_secret`-backed allocations are in use in this process.
+///
+/// The probe runs once and its answer is cached, but only an answer that is a property of
+/// the platform is: `ENOSYS`, `EINVAL` and `EPERM` are cached, while a failure that
+/// describes one attempt — `EMFILE`, `ENFILE`, `ENOMEM`, `EINTR`, e.g. an exhausted
+/// descriptor table when the first allocation ran — is not. The next call probes again
+/// instead of leaving every later container on the malloc path for the life of the process.
 ///
 /// `memfd_secret` is Linux-only. On non-Linux Unix (macOS, FreeBSD, …) this is
 /// always `false` and the crate falls back to [`secure_alloc::malloc_sized`]. On
@@ -130,23 +153,35 @@ pub fn supports_memfd_secret() -> bool {
          MEMFD_YES => true,
          MEMFD_NO => false,
          _ => {
+            // A failure only describes the platform when the kernel (or a policy that will not
+            // change) says so — see `memfd_probe_failure_is_permanent` for why the distinction
+            // matters: caching a transient one would leave every later allocation on the
+            // malloc path for the life of the process.
             // SAFETY: probes `memfd_secret` with no flags and no pointers; any
             // returned fd is closed immediately.
-            let supported = unsafe {
+            let answer = unsafe {
                use libc::{SYS_memfd_secret, close, syscall};
                let res = syscall(SYS_memfd_secret as _, 0isize);
                if res >= 0 {
                   close(res as libc::c_int);
-                  true
+                  Some(true)
+               } else if memfd_probe_failure_is_permanent() {
+                  Some(false)
                } else {
-                  false
+                  None
                }
             };
-            MEMFD_SECRET_SUPPORT.store(
-               if supported { MEMFD_YES } else { MEMFD_NO },
-               Ordering::Relaxed,
-            );
-            supported
+
+            match answer {
+               Some(answer) => {
+                  MEMFD_SECRET_SUPPORT.store(
+                     if answer { MEMFD_YES } else { MEMFD_NO },
+                     Ordering::Relaxed,
+                  );
+                  answer
+               }
+               None => false,
+            }
          }
       }
    }
@@ -470,6 +505,97 @@ mod abort_tests {
       assert!(
          stderr.contains(DIAGNOSTIC),
          "the child must print the abort diagnostic to stderr: {stderr:?}"
+      );
+   }
+}
+
+#[cfg(all(test, feature = "use_os", target_os = "linux"))]
+mod memfd_cache_tests {
+   use std::process::Stdio;
+
+   /// A probe failure caused by this process's state — no free descriptor — must not be
+   /// cached as "the kernel does not support it". Caching it silently moves every later
+   /// allocation off the `memfd_secret` tier, where the plaintext is out of the kernel's
+   /// direct map, onto the malloc tier, where an unlocked page is readable by a same-uid
+   /// reader.
+   #[test]
+   fn transient_probe_failure_is_not_cached() {
+      const CHILD: &str = "ST_MEMFD_CACHE_CHILD";
+      const SENTINEL: &str = "MEMFD-CACHE-CHILD-OK";
+
+      if std::env::args().any(|arg| arg == CHILD) {
+         let mut original = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+         };
+
+         // SAFETY: `original` is a valid, initialised `rlimit` and `RLIMIT_NOFILE` is a
+         // valid resource; both calls only read or write that struct.
+         unsafe {
+            assert_eq!(
+               libc::getrlimit(libc::RLIMIT_NOFILE, &mut original),
+               0
+            );
+
+            let exhausted = libc::rlimit {
+               rlim_cur: 0,
+               rlim_max: original.rlim_max,
+            };
+            assert_eq!(
+               libc::setrlimit(libc::RLIMIT_NOFILE, &exhausted),
+               0
+            );
+         }
+
+         // The first probe in this process runs with no descriptor free, so the syscall
+         // fails with EMFILE — a fact about this process, not about the kernel.
+         let under_exhaustion = crate::supports_memfd_secret();
+
+         // SAFETY: restores exactly the limit read above.
+         unsafe {
+            assert_eq!(libc::setrlimit(libc::RLIMIT_NOFILE, &original), 0);
+         }
+
+         let after_restore = crate::supports_memfd_secret();
+
+         if !under_exhaustion && after_restore {
+            println!("{SENTINEL}");
+            std::process::exit(0);
+         }
+
+         eprintln!(
+            "the transient failure was cached: under_exhaustion={under_exhaustion} after_restore={after_restore}"
+         );
+         std::process::exit(1);
+      }
+
+      // The child's "after restore" half is only meaningful where the probe succeeds at
+      // all; on a host without `memfd_secret` there is nothing to downgrade.
+      if !crate::supports_memfd_secret() {
+         eprintln!("memfd_secret is unavailable here; skipping");
+         return;
+      }
+
+      let output = std::process::Command::new(std::env::current_exe().unwrap())
+         .arg("transient_probe_failure_is_not_cached")
+         .arg(CHILD)
+         .arg("--nocapture")
+         .stdin(Stdio::null())
+         .output()
+         .expect("failed to spawn the child test binary");
+
+      assert!(
+         output.status.success(),
+         "a transient probe failure must not be cached: {}",
+         String::from_utf8_lossy(&output.stderr)
+      );
+      // The filter is a substring match, so a rename would run nothing and still exit 0;
+      // the sentinel is what makes that a failure.
+      assert!(
+         String::from_utf8_lossy(&output.stdout).contains(SENTINEL),
+         "the child never reported success: stdout: {}, stderr: {}",
+         String::from_utf8_lossy(&output.stdout),
+         String::from_utf8_lossy(&output.stderr)
       );
    }
 }
