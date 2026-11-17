@@ -165,6 +165,8 @@ impl SecureString {
    /// valid: a reserve per byte would panic halfway through a multi-byte character and
    /// leave the buffer holding truncated UTF-8, which every later safe read rejects and
    /// the `_unchecked` readers would hand to `from_utf8_unchecked`.
+   ///
+   /// Aborts with a diagnostic if the memory-protection call fails.
    pub fn push_str(&mut self, string: &str) {
       let slice = string.as_bytes();
 
@@ -263,6 +265,8 @@ impl SecureString {
    /// Panics if the buffer has to grow for the inserted text and the new capacity
    /// overflows `usize` or the allocation fails — the contract of
    /// [`SecureVec::reserve`](crate::SecureVec::reserve).
+   ///
+   /// Aborts with a diagnostic if the memory-protection call fails.
    ///
    /// # Example
    ///

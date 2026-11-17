@@ -1,8 +1,9 @@
 //! The `no_std` + `alloc` build, exercised through the public API.
 //!
-//! Every other integration suite is gated on `use_os`, and that build cannot run under
-//! Miri: its allocator is an `mmap` / `memfd_secret` region that is `mlock`ed and
-//! `mprotect`ed through `libc`, and Miri does not execute foreign functions. This build
+//! The default build cannot run under Miri: its allocator is an `mmap` / `memfd_secret`
+//! region that is `mlock`ed and `mprotect`ed through `libc`, and Miri does not execute
+//! foreign functions. The codec integration suites do compile and run on this build, but
+//! they are sized for native throughput. This build
 //! keeps the same raw-pointer machinery — `try_reserve` moves the elements out and wipes
 //! the buffer it abandons, `clear` / `Drop` / `erase` wipe through a `MaybeUninit` view
 //! of the whole allocation, `drain` compacts with `ptr::copy`, the string mutations shift

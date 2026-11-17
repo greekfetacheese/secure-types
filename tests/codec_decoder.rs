@@ -29,7 +29,11 @@ fn test_scalars_round_trip() {
    assert_eq!(round_trip(&i128::MIN), i128::MIN);
 
    assert_eq!(round_trip(&1.5f32), 1.5f32);
-   assert_eq!(round_trip(&(-0.0f64)), -0.0f64);
+   // `-0.0 == 0.0`, so the value comparison cannot tell the sign apart: compare bits.
+   assert_eq!(
+      round_trip(&(-0.0f64)).to_bits(),
+      (-0.0f64).to_bits()
+   );
    assert!(round_trip(&f32::NAN).is_nan());
    assert!(round_trip(&f64::INFINITY).is_infinite());
 

@@ -112,7 +112,7 @@ pub(crate) fn read_varint(buf: &[u8], pos: &mut usize) -> Result<usize, DecodeEr
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum EncodeError {
-   /// The locked destination buffer could not be allocated or locked.
+   /// The destination buffer could not be allocated or locked.
    Secure(Error),
    /// A length did not fit its wire representation, such as a struct field body
    /// longer than the `u32` frame that precedes it.

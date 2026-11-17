@@ -22,6 +22,7 @@ fn test_every_error_variant_renders() {
       DecodeError::InvalidBool,
       DecodeError::InvalidOptionTag,
       DecodeError::InvalidChar,
+      DecodeError::DepthLimit,
       DecodeError::UnsupportedVersion(1),
       DecodeError::TrailingBytes { extra: 7 },
       DecodeError::FrameMismatch { unconsumed: 3 },
